@@ -68,6 +68,47 @@ local RECESS_MAX = 24
 local SHADE = { top = 0.95, south = 1.0, north = 0.68,
                 side = 0.78, bottom = 0.5 }
 
+-- ------- how far a merged run may reach: the tile lattice
+--
+-- Merging is what keeps a 90k-voxel house down to ~2k quads, and under a
+-- straight projection a run may be as long as it likes -- a straight line
+-- is a straight line however finely it is cut. THE WORLD CURVE IS NOT
+-- STRAIGHT. It drops every vertex by the square of its distance from the
+-- focus (see WorldCurve), so a quad's interior is the CHORD of a parabola
+-- its neighbours draw the arc of: a run of length L hangs k*L^2/4 below
+-- the short quads butted against it, and the join tears open.
+--
+-- Nothing bounded a run's length before, and the runs that ran away were
+-- the ones wearing a CONSTANT texel -- the roof's black eave outline, its
+-- fascia, the shaded underside -- because a flat run has no art to break
+-- it. Those reached 102px across a gym, which at V-CURVE 3 hangs some
+-- three world pixels under the roof surface beside it: the eave tore off
+-- the roof and the drop showed the building's dark interior through the
+-- slot. (Strip runs, the drawing marching along the atlas, break at the
+-- tileset's own boundaries and were never the problem.)
+--
+-- So a run stops at the next 8px lattice line. Buildings are stamped at
+-- tx*8 (see stamp), so the model's lattice IS the map's: every quad in the
+-- scene -- terrain, props, this -- now ends on the same lines, every join
+-- is vertex-for-vertex, and the bend carries them together. What is left
+-- is the sag WITHIN one cell, k*64/4, which is under a twentieth of a
+-- world pixel at any rung.
+--
+-- It costs quads on a dense city map (Cerulean's object stream goes from
+-- 35.7k to 41.6k, and its longest edge from 102px to 8px) and it costs them
+-- whether the curve is on or not, which is the deliberate trade: the mesh
+-- is cached per map and built asynchronously over seconds, so meshing for
+-- the curve's sake only when the curve is on would mean rebuilding every
+-- live map on a keypress.
+local CELL = 8
+
+-- How far a run starting at `a` may go before it crosses the next lattice
+-- line. Floor-mod, so the awning's negative z lands on the same lines the
+-- positive side does.
+local function runCap(a)
+  return CELL - a % CELL
+end
+
 local function keyOf(tx, ty)
   return (ty + 64) * 4096 + (tx + 64)
 end
@@ -170,6 +211,39 @@ local function read(t, data, perRow)
 
   local inside = {}
   for i = 0, W * H - 1 do inside[i] = not outside[i] end
+
+  -- `scrub` names pixel rects where the drawing paints an object standing
+  -- ON the surface (Red's potted plant on the dining tabletop). The object
+  -- keeps its own standee -- the template's `keep` leaves its tiles
+  -- unclaimed -- so the band beneath it is the one surface the drawing
+  -- implies but never paints clear: every rect pixel takes the field
+  -- shade, sourced from the first field texel outside the rects, and the
+  -- model's top comes out as the plain surface the object sat on.
+  if t.scrub then
+    local function inRect(x, y)
+      for _, r in ipairs(t.scrub) do
+        if x >= r[1] and x <= r[3] and y >= r[2] and y <= r[4] then
+          return true
+        end
+      end
+      return false
+    end
+    local donor = nil
+    for i = 0, W * H - 1 do
+      if col[i] == GREY and inside[i]
+         and not inRect(i % W, math.floor(i / W)) then
+        donor = i
+        break
+      end
+    end
+    for i = 0, W * H - 1 do
+      if inRect(i % W, math.floor(i / W)) then
+        col[i] = GREY
+        ax[i], ay[i] = ax[donor], ay[donor]
+        inside[i] = true
+      end
+    end
+  end
   return { W = W, H = H, col = col, ax = ax, ay = ay, inside = inside }
 end
 
@@ -190,7 +264,24 @@ local function measure(sp, t)
     top[x] = r
   end
 
-  local wallH = H - roofRows
+  -- The drawing's own ground line: the row after the last drawn one. A
+  -- building ends on the black threshold row it stands on (ground == H),
+  -- but furniture is drawn standing on open floor -- the lab table's
+  -- legs stop two rows short of its grid -- and extruding against H
+  -- would float it that far above its own plot.
+  local ground = roofRows
+  for sy = H - 1, roofRows, -1 do
+    local drawn = false
+    for sx = 0, W - 1 do
+      if sp.inside[sy * W + sx] then drawn = true break end
+    end
+    if drawn then
+      ground = sy + 1
+      break
+    end
+  end
+
+  local wallH = ground - roofRows
   local ytop = wallH - 1 + t.slab
 
   -- Side faces must not come out as slabs of outline black: where the
@@ -259,6 +350,14 @@ local function measure(sp, t)
     end
   end
 
+  -- The pane rule reads a LIGHT region the drawing seals behind a BLACK
+  -- frame. A drawing built the other way round -- the healing machine's
+  -- dark screens sealed behind their own white bezels -- inverts under
+  -- it: every lit edge sinks and the black panes stand proud, a black
+  -- lattice a voxel off the face. `panes = false` says the drawing does
+  -- not carry the rule's polarity, so the facade stays flush.
+  if t.panes == false then recess = {} end
+
   -- One representative texel per shade, taken from the building's own art:
   -- the roof's fascia and its undersides are geometry the drawing implies
   -- but never paints, and they must still wear its palette (and pick up
@@ -279,20 +378,510 @@ local function measure(sp, t)
   -- sprite taller than its footprint -- the tower's 16-row drawing
   -- stands on the 8 rows of it that are actually on the map, and D = H
   -- would have pushed its body 64px south into the town plaza.
-  return { top = top, ytop = ytop, D = #t.tiles * 8,
+  -- `depth` (in tile rows) names the plot when the grid runs PAST it
+  -- onto ground the drawing merely stands its legs on: the lab table's
+  -- third row is the walkable cell the player faces it from, and the
+  -- full-grid depth would stand the model in their path.
+  -- `depth` names the plot in TILE ROWS, which is the right grain for a
+  -- building. `depthPx` names it in voxels, for an object whose real
+  -- depth is not a whole tile row -- the Bike Shop toolbox is a box
+  -- standing in the middle of its own cell, not a thing that fills a plot.
+  return { top = top, ytop = ytop,
+           D = t.depthPx or ((t.depth or #t.tiles) * 8),
+           ground = ground,
            recess = recess, interior = interior, shadeTexel = shadeTexel }
 end
 
 -- ----------------------------------------------------------------- build --
+
+-- A desk with separately-classified objects on it (a template's `parts`
+-- list): the methodology's region classification at part granularity.
+-- Upright parts anchor their drawn bottom row to the desk's top plane
+-- and wear their own drawn tops as lids; flat parts (a keyboard, a
+-- sheet of paper) lie one voxel proud at drawn row = depth row -- the
+-- same 1:1 the tabletop itself is drawn with, so an object's height ON
+-- the drawing is its position ON the desk. The desk is the lab-table
+-- slab + base; its lid is the one synthesized surface in the model
+-- (the objects cover every drawn pixel of the tabletop), continued
+-- from the sibling tables' pattern in the drawing's own shades.
+-- tools/building_voxels.py `build_desk_set` is the reference twin.
+local function deskSetModel(sp, pr, t)
+  local W, H, D = sp.W, sp.H, pr.D
+  local ground = pr.ground
+  local col, inside = sp.col, sp.inside
+  local vox = {}
+  local function key(x, y, z) return (y * D + z) * W + x end
+  local function put(x, y, z, i) vox[key(x, y, z)] = i end
+
+  -- de-outline walk bounded to the part, so a part's side faces show
+  -- its own material and never the neighbour's (the sprite-wide walk
+  -- the facade path uses would cross the black seam between units)
+  local function interiorAt(sx, sy, lo, hi)
+    local i = sy * W + sx
+    if col[i] ~= BLACK then return sx end
+    local step = sx < math.floor((lo + hi) / 2) and 1 or -1
+    for d = 1, 3 do
+      local nx = sx + step * d
+      if nx >= lo and nx <= hi then
+        local ni = sy * W + nx
+        if inside[ni] and col[ni] ~= BLACK then return nx end
+      end
+    end
+    return sx
+  end
+
+  -- The parts list, shared by every base piece: a desk plane or an
+  -- open tray rim alike, `plane` is simply the height they ride.
+  local ytop = 0
+  local function buildParts(plane)
+    for _, p in ipairs(t.parts) do
+      Budget.tick()
+      local x0, x1 = p.x[1], p.x[2]
+      if p.kind == "flat" then
+        -- drawn row = depth row by default; `z` renames the origin when
+        -- the flat sits below the desk's own drawn top span (the Center
+        -- PC's keyboard). `at` names the sheet's own height when it does
+        -- not lie on the desk plane (the healing machine's keyboard is a
+        -- shelf mounted on the cabinet's side); `thick` gives it a body
+        -- -- layers below the sheet repeating each column's own texel,
+        -- the same continuation rule every synthesized surface follows.
+        local r0 = p.rows[1]
+        local z0 = p.z or r0
+        local atY = p.at or plane
+        local thick = p.thick or 1
+        if atY > ytop then ytop = atY end
+        for sy = r0, p.rows[2] do
+          local z = z0 + (sy - r0)
+          if z >= 0 and z < D then
+            for sx = x0, x1 do
+              if inside[sy * W + sx] then
+                for y = math.max(0, atY - thick + 1), atY do
+                  put(sx, y, z, sy * W + sx)
+                end
+              end
+            end
+          end
+        end
+      elseif p.kind == "box" then
+        -- A BOX part is a drawn rect standing at its own drawn
+        -- elevation -- equipment attached to the machine rather than an
+        -- object on the desk plane. The rows are face-on art: the top
+        -- row's drawn height IS the box's top (ground - 1 - r0,
+        -- measured), and the box runs down to `base` (default the drawn
+        -- extent; 0 continues it to the floor, the legs-continue rule).
+        -- Height beyond the drawn rows fills the way a roof band does:
+        -- rows before `cycle` map 1:1 from the top, rows after it 1:1
+        -- from the bottom -- the healing machine hoses' foot lands ON
+        -- the floor -- and the cycle window repeats between.
+        local r0, r1 = p.rows[1], p.rows[2]
+        local c0 = p.cycle and p.cycle[1] or r1
+        local c1 = p.cycle and p.cycle[2] or r1
+        local pz = p.z or 0
+        local pd = p.depth
+        local top = pr.ground - 1 - r0
+        local bot = p.base or (pr.ground - 1 - r1)
+        local nTop, nBot = c0 - r0, r1 - c1
+        if top > ytop then ytop = top end
+        for y = bot, top do
+          local k, j = top - y, y - bot
+          local sy
+          if k < nTop then
+            sy = r0 + k
+          elseif j < nBot then
+            sy = r1 - j
+          else
+            sy = c0 + (k - nTop) % (c1 - c0 + 1)
+          end
+          for sx = x0, x1 do
+            local i = sy * W + sx
+            if inside[i] then
+              local ix = interiorAt(sx, sy, x0, x1)
+              for z = pz, pz + pd - 1 do
+                if z >= 0 and z < D then
+                  local px = (z == pz or z == pz + pd - 1) and sx or ix
+                  put(sx, y, z, sy * W + px)
+                end
+              end
+            end
+          end
+        end
+      elseif p.kind == "iso" then
+        -- An ISO part is drawn in 2:1 isometric -- a box TURNED 45
+        -- degrees to the map, so one rhombus carries its top, its front
+        -- and its side at once and no band or facade split can reach
+        -- them. Un-projecting it is that projection run backwards: the
+        -- box stands as a real diamond in plan and every voxel wears the
+        -- texel the drawing paints where that voxel projects TO. The
+        -- drawn top lands on the top, the screen on the screen-facing
+        -- side and the flank on the flank, and nothing is segmented by
+        -- hand -- which is the only way to get this right, because the
+        -- three faces meet on a diagonal no rectangle can name.
+        --
+        -- Everything but the depth centre falls out of the drawn rect,
+        -- because the projection fixes it: the half-width is the drawn
+        -- rhombus's x radius, HALF that again its z radius (2:1 is what
+        -- makes it isometric), the near corner's drawn row is the base
+        -- rhombus's front tip, and whatever drawn height is left once
+        -- that rhombus is accounted for is the box's own height. Bill's
+        -- computer: rx 6, rz 3, base centre row 10, and 6 voxels tall --
+        -- which puts its left corner's vertical edge at drawn rows
+        -- 4..10, exactly where the drawing paints one.
+        --
+        -- `plan` is the one thing the drawing CANNOT state: 2:1 is the
+        -- projection, not the object, so reading rz as the plan radius
+        -- too builds a box half as deep as it is wide -- a slab, not the
+        -- cube the drawing depicts. `plan` names the real z radius and
+        -- the drawn row is scaled into it, so a cube is `plan = rx` and
+        -- the drawing still lands on it pixel for pixel.
+        local pr0, pr1 = p.rows[1], p.rows[2]
+        local rx = math.floor((x1 - x0 + 1) / 2)
+        local rz = math.floor(rx / 2)
+        local plan = p.plan or rz
+        local oy = pr1 - rz
+        local h = oy - rz - pr0
+        local ytp = plane + h
+        if ytp > ytop then ytop = ytp end
+        for sx = x0, x1 do
+          -- doubled, so a rect of even width keeps its centre between
+          -- two columns instead of limping one to the left
+          local dx2 = 2 * sx - (x0 + x1)
+          for dz = -plan, plan do
+            local z = p.z + dz
+            local d2 = math.abs(dx2) * plan + 2 * math.abs(dz) * rx
+            if z >= 0 and z < D and d2 <= (2 * rx + 1) * plan then
+              -- the plan row scaled back into the drawn rhombus
+              local dzs = math.floor((2 * dz * rz + plan) / (2 * plan))
+              for y = 0, h do
+                local sy = oy + dzs - y
+                local i = sy * W + sx
+                if sy >= pr0 and sy <= pr1 and inside[i] then
+                  put(sx, plane + y, z, i)
+                end
+              end
+            end
+          end
+        end
+      else
+        local tr0, tr1 = p.top[1], p.top[2]
+        local fr0, fr1 = p.facade[1], p.facade[2]
+        local pd = p.depth
+        -- `rise` lifts a part off the desk's top plane and `z` names its
+        -- back-most depth row (the field a flat part already carries). An
+        -- object STANDING on a desk needs neither: it starts on the plane
+        -- at the plot's back. The healing machine's console needs both --
+        -- it stands in the FRONT map row of a grid whose back row is the
+        -- wall band it leans against, and its screen head is MOUNTED on
+        -- the console's front two voxels above the body's top. Both come
+        -- off the drawing, not off taste.
+        local base = plane + (p.rise or 0)
+        local pz = p.z or 0
+        local ytp = base + (fr1 - fr0)
+        if ytp > ytop then ytop = ytp end
+        -- `inset` sinks an authored pane one voxel: the pane rule
+        -- applied by hand, for a part whose screen IS sealed behind its
+        -- own black frame while the template's `panes = false` (set for
+        -- the polarity-inverted panel elsewhere in the same drawing)
+        -- blocks the global pass. Same mechanism as a recess: the front
+        -- voxel is simply not placed.
+        local ins = p.inset
+        for sx = x0, x1 do
+          -- the lid: the part's drawn top laid across its depth from the
+          -- back, last row continuing forward; the front lid row is the
+          -- facade's own top row -- the drawn front-top edge.  `stretch`
+          -- maps the drawn band over the whole depth instead, the tray's
+          -- rule: for a part authored DEEPER than its drawing (the house
+          -- stool grown past its drawn seat), clamping would print the
+          -- last row as a long smear off the back band's edge.
+          for z = pz, pz + pd - 1 do
+            local front = z == pz + pd - 1
+            local sy
+            if front then
+              sy = fr0
+            elseif p.stretch then
+              sy = math.min(tr0 + math.floor((z - pz) * (tr1 - tr0 + 1)
+                                             / (pd - 1)), tr1)
+            else
+              sy = math.min(tr0 + z - pz, tr1)
+            end
+            while sy <= tr1 and not inside[sy * W + sx] do sy = sy + 1 end
+            local ok = sy <= tr1 or (front and inside[fr0 * W + sx])
+            if ok and z >= 0 and z < D then
+              put(sx, ytp, z, (front and fr0 or sy) * W + sx)
+            end
+          end
+          -- the body: facade rows anchored to the part's own base
+          for sy = fr0 + 1, fr1 do
+            local y = base + (fr1 - sy)
+            local i = sy * W + sx
+            if inside[i] then
+              local ix = interiorAt(sx, sy, x0, x1)
+              for z = pz, pz + pd - 1 do
+                if z >= 0 and z < D then
+                  if z == pz + pd - 1 then
+                    local sunk = ins and sx >= ins.x[1] and sx <= ins.x[2]
+                                 and sy >= ins.rows[1] and sy <= ins.rows[2]
+                    if not sunk and not pr.recess[i] then put(sx, y, z, i) end
+                  elseif z == pz then
+                    put(sx, y, z, i)
+                  else
+                    put(sx, y, z, sy * W + ix)
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- A TRAY is an open container -- the drawing looks down INTO it, so its
+  -- top-view band is not a lid but the inside of the box, and the model
+  -- has to be hollow. Bands, all measured 1:1 like any other band table:
+  -- `top` is the opening (drawn row -> depth row), `front` the near wall
+  -- seen face-on (drawn row -> elevation), `x` the box's outer span and
+  -- `inner` the opening's, so the difference between them is the wall.
+  -- Four walls stand to the rim, the floor slab lies `floor` voxels thick
+  -- under the opening, and the cavity between them is left as AIR -- which
+  -- is the whole point, and what an extruded facade can never be. Parts (a
+  -- standing lid) then ride the rim like any object on a desk's plane.
+  if t.tray then
+    local tr = t.tray
+    local top0 = tr.top[1]
+    local fr0, fr1 = tr.front[1], tr.front[2]
+    local bx0, bx1 = tr.x[1], tr.x[2]
+    local ix0, ix1 = tr.inner[1], tr.inner[2]
+    local floor = tr.floor or 0
+    local plane = fr1 - fr0 + 1            -- the rim: the wall's height
+    -- Which drawn row lies at depth z. The far rim is the band's first
+    -- row and the near rim the front wall's own, and the drawn inside
+    -- STRETCHES over whatever depth is between them: a box deeper than
+    -- its drawing has rows to spare is the ordinary case once the plot
+    -- stops being the grid, and the alternative -- running out of rows
+    -- and repeating the last one -- would print the wrench twice.
+    local lo, hi = top0 + 1, tr.top[2] - 1     -- the drawn inside
+    local span = math.max(1, D - 3)            -- interior depth rows - 1
+    local function trayRow(z)
+      if z == 0 then return top0 end
+      if z == D - 1 then return fr0 end
+      return lo + math.floor((z - 1) * (hi - lo) / span)
+    end
+    for sx = bx0, bx1 do
+      Budget.tick()
+      for z = 0, D - 1 do
+        local hollow = sx >= ix0 and sx <= ix1 and z > 0 and z < D - 1
+        for y = 0, (hollow and floor or plane - 1) do
+          if hollow or y == plane - 1 then
+            -- the opening seen from above: the tray's own floor and
+            -- whatever lies in it -- and the rim is the same band where
+            -- the wall meets it
+            local i = trayRow(z) * W + sx
+            if inside[i] then put(sx, y, z, i) end
+          else
+            -- the wall below the rim: the front band folded up it, the
+            -- drawn face on the front and back layers and the de-outlined
+            -- interior between, exactly as a facade extrudes.
+            --
+            -- NO recess pass here, and it must stay that way: a pane sinks
+            -- by DELETING its front voxel so the one behind becomes the
+            -- pane, and a container's wall is one voxel thick -- there is
+            -- nothing behind it, so the front panel simply opened a hole
+            -- straight into the box and you could see the wrench through it.
+            local sy = fr1 - y
+            local i = sy * W + sx
+            if inside[i] then
+              local px = (z == 0 or z == D - 1) and sx
+                         or interiorAt(sx, sy, bx0, bx1)
+              put(sx, y, z, sy * W + px)
+            end
+          end
+        end
+      end
+    end
+    if plane > ytop then ytop = plane end
+    buildParts(plane)
+    return { at = function(x, y, z)
+               if x < 0 or x >= W or y < 0 or z < 0 or z >= D then
+                 return nil
+               end
+               return vox[key(x, y, z)]
+             end,
+             W = W, ytop = ytop, zmin = 0, zmax = D - 1 }
+  end
+
+  -- No base piece at all: the drawing IS its parts (the house stool -- a
+  -- seat and its legs, nothing under them but floor). The plane the parts
+  -- anchor to is the ground itself.
+  if not t.desk then
+    buildParts(0)
+    return { at = function(x, y, z)
+               if x < 0 or x >= W or y < 0 or z < 0 or z >= D then
+                 return nil
+               end
+               return vox[key(x, y, z)]
+             end,
+             W = W, ytop = ytop, zmin = 0, zmax = D - 1 }
+  end
+
+  -- The desk's top plane. Usually the drawing states it: the fascia and
+  -- base rows it paints below the objects ARE the front face, and their
+  -- row count is the height. Bill's desk paints neither inside its grid
+  -- -- its apron is drawn into the WALKABLE cell in front, and that cell
+  -- is left out on purpose so the chair standing there keeps its own
+  -- tiles -- so `plane` names the height directly and the body below the
+  -- lid is synthesized: the band table's own rim treatment, a shaded box
+  -- closed by the outline where it meets the floor, in the drawing's
+  -- shades via shadeTexel.
+  local f0, f1 = t.desk.fascia[1], t.desk.fascia[2]
+  local b0, b1 = t.desk.base[1], t.desk.base[2]
+  local plane = (b1 - b0 + 1) + (f1 - f0 + 1)
+
+  -- The desk's own PLOT, when the grid holds more than the desk. Bill's
+  -- grid runs on into the walkable cell, because the drawing puts the
+  -- desk's apron AND the chair pushed up to it in the same tiles -- so
+  -- the desk box has to stop at its own cell (`depth`) and stand on its
+  -- own ground line rather than the grid's, which the chair's feet set
+  -- eight rows lower. The base band's last row IS that ground line by
+  -- definition, and for every desk drawn inside its own grid it is the
+  -- measured one to the row (lab table, lab computers, Center PC, the
+  -- Bike Shop toolbox), so this changes nothing for them.
+  -- ...and in voxels (`depthPx`) plus a back origin (`z`) when the desk
+  -- is shallower than a tile row and leans against something: the
+  -- healing machine's cabinet is 10 deep -- its drawn top band's 9 rows
+  -- plus the front edge -- standing against the wall band, so its box
+  -- runs z 16..25 of a 32-deep plot.
+  local deskD = t.desk.depthPx or (t.desk.depth and t.desk.depth * 8) or D
+  local dz0 = t.desk.z or 0
+  local dz1 = dz0 + deskD - 1
+  local deskG = b1 + 1
+  -- ...and the desk's COLUMNS (`x`), when the grid is wider than the
+  -- desk: the healing machine's grid carries its flanking hoses and
+  -- keyboard, and the cabinet is only the middle 16 columns.
+  local dx0 = t.desk.x and t.desk.x[1] or 0
+  local dx1 = t.desk.x and t.desk.x[2] or W - 1
+
+  -- The WALL element: the band the machine backs onto, whose tiles this
+  -- grid claims. The drawing shows it only as the stripe background
+  -- around the tower (the same standing as the potted plants' floor),
+  -- so the block cycles the drawing's own stripe unit -- real pixels of
+  -- column `x`, rows `cycle` -- at wall-band height over the back plot,
+  -- exactly what the neighbouring cells' `wall` pins render.
+  if t.wall then
+    local wl = t.wall
+    local c0, c1 = wl.cycle[1], wl.cycle[2]
+    local cn = c1 - c0 + 1
+    local wx = wl.x or 0
+    for y = 0, wl.h - 1 do
+      Budget.tick()
+      local sy = c0 + (wl.h - 1 - y) % cn
+      for sx = 0, W - 1 do
+        for z = 0, wl.depthPx - 1 do
+          put(sx, y, z, sy * W + wx)
+        end
+      end
+    end
+  end
+
+  -- the base band, extruded exactly like every lab table's
+  for sy = b0, b1 do
+    Budget.tick()
+    local y = deskG - 1 - sy
+    for sx = dx0, dx1 do
+      if inside[sy * W + sx] then
+        local ix = interiorAt(sx, sy, dx0, dx1)
+        for z = dz0, dz1 do
+          local px = (z == dz0 or z == dz1) and sx or ix
+          put(sx, y, z, sy * W + px)
+        end
+      end
+    end
+  end
+  for i in pairs(pr.recess) do
+    local sy = math.floor(i / W)
+    local sx = i % W
+    if sy >= b0 and sy <= b1 and sx >= dx0 and sx <= dx1 then
+      vox[key(sx, deskG - 1 - sy, dz1)] = nil
+    end
+  end
+
+  -- the slab: fascia rows wrap every side
+  for sy = f0, f1 do
+    Budget.tick()
+    local y = plane - 1 - (sy - f0)
+    for sx = dx0, dx1 do
+      for z = dz0, dz1 do put(sx, y, z, sy * W + sx) end
+    end
+  end
+
+  if t.desk.top then
+    -- The lid wears the desk's own drawn top band -- the drawing DOES
+    -- paint this tabletop (the healing machine's white top face with
+    -- its lit west and shaded east strips), so nothing is synthesized
+    -- where it is visible: band rows map back-to-front, the first
+    -- fascia row is the drawn front-top edge, same rule as an upright
+    -- part's lid. Where a part's drawing occludes the band (the monitor
+    -- standing on it), the lid continues the nearest strip BESIDE the
+    -- part -- still the drawing's own pixels, the same sibling-pattern
+    -- rule every synthesized lid follows.
+    local tr0, tr1 = t.desk.top[1], t.desk.top[2]
+    for z = dz0, dz1 do
+      Budget.tick()
+      local sy = z == dz1 and f0 or math.min(tr0 + (z - dz0), tr1)
+      for sx = dx0, dx1 do
+        local px = sx
+        for _, p in ipairs(t.parts) do
+          local px0, px1 = p.x[1], p.x[2]
+          local r0, r1
+          if p.kind == "flat" or p.kind == "iso" or p.kind == "box" then
+            r0, r1 = p.rows[1], p.rows[2]
+          else
+            r0, r1 = p.top[1], p.facade[2]
+          end
+          if sx >= px0 and sx <= px1 and sy >= r0 and sy <= r1 then
+            px = (sx - px0 < px1 - sx) and (px0 - 1) or (px1 + 1)
+            px = math.max(dx0, math.min(dx1, px))
+            break
+          end
+        end
+        put(sx, plane - 1, z, sy * W + px)
+      end
+    end
+  else
+    -- the lid continues the sibling tables' top -- black rim, white
+    -- highlight courses along the north and west, grey field
+    local field = t.desk.lid == "white" and WHITE or GREY
+    for sx = dx0, dx1 do
+      for z = dz0, dz1 do
+        local shade = field
+        if sx == dx0 or sx == dx1 or z == dz0 or z == dz1 then
+          shade = BLACK
+        elseif sx == dx0 + 1 or z == dz0 + 1 then
+          shade = WHITE
+        end
+        put(sx, plane - 1, z, pr.shadeTexel[shade])
+      end
+    end
+  end
+
+  if plane > ytop then ytop = plane end
+  buildParts(plane)
+
+  return { at = function(x, y, z)
+             if x < 0 or x >= W or y < 0 or z < 0 or z >= D then return nil end
+             return vox[key(x, y, z)]
+           end,
+           W = W, ytop = ytop, zmin = 0, zmax = D - 1 }
+end
 
 -- The voxel model as a lookup: `at(x, y, z)` is the index of the sprite
 -- pixel that voxel wears, or nil. Build ORDER is expressed as lookup
 -- order -- roof first, so it overwrites the walls it intersects, and walls
 -- are trimmed to its underside so nothing pokes through the surface.
 local function model(sp, pr, t)
+  if t.parts then return deskSetModel(sp, pr, t) end
   local W, H, D = sp.W, sp.H, pr.D
   local slab, roofRows = t.slab, t.roofRows
-  local top, ytop = pr.top, pr.ytop
+  local top, ytop, ground = pr.top, pr.ytop, pr.ground
 
   -- The roof's drawn span. A sprite inset from its box (B03) leaves outer
   -- columns undrawn in the roof band; they carry no roof at all, and the
@@ -367,16 +956,18 @@ local function model(sp, pr, t)
 
     -- the awning: the band juts two voxels past the walls, front and back
     if ledge0 and (z == -2 or z == -1 or z == D or z == D + 1) then
-      local sy = H - 1 - y
+      local sy = ground - 1 - y
       if sy >= ledge0 and sy <= ledge1 and sp.inside[sy * W + x] then
         return sy * W + x
       end
       return nil
     end
 
-    -- the facade, extruded straight back over the footprint
+    -- the facade, extruded straight back over the footprint. Rows map
+    -- against the measured ground line, not the grid's last row: the two
+    -- differ only for furniture standing on open floor (see measure).
     if z < 0 or z >= D then return nil end
-    local sy = H - 1 - y
+    local sy = ground - 1 - y
     local i = sy * W + x
     if y == 0 and not sp.inside[i] and sy > 0 and sp.inside[i - W] then
       -- the drawing's last row is the ground the building stands on, so
@@ -464,7 +1055,8 @@ local function emit(m, sp, atlasW, atlasH)
   local function runX(y, z, dx, dy, dz, x)
     local i0 = ci(x, y, z)
     local strip, n = nil, 1
-    while true do
+    local cap = runCap(x)
+    while n < cap do
       local nx = x + n
       local i = ci(nx, y, z)
       if not i or ci(nx + dx, y + dy, z + dz) then break end
@@ -556,8 +1148,8 @@ local function emit(m, sp, atlasW, atlasH)
         while z <= zmax do
           local i = ci(x, y, z)
           if i and not ci(x + d, y, z) then
-            local n = 1
-            while z + n <= zmax do
+            local n, cap = 1, runCap(z)
+            while n < cap and z + n <= zmax do
               local j = ci(x, y, z + n)
               if j ~= i or ci(x + d, y, z + n) then break end
               n = n + 1
@@ -666,7 +1258,7 @@ function Buildings.build(S, map, data, perRow)
               end
               built = models[key]
             end
-            Buildings.stamp(S, map, built, tx, ty, bw, bh)
+            Buildings.stamp(S, map, built, tx, ty, bw, bh, t)
           end
         end
       end
@@ -676,20 +1268,53 @@ end
 
 -- One placement: claim its tiles (so the detector leaves them alone and
 -- the mesher paints ground under them) and copy the model into place.
-function Buildings.stamp(S, map, quads, tx, ty, bw, bh)
-  local shape = { class = "building", h = 0, art = "building",
-                  flat = false, authored = true }
+--
+-- Two template fields alter what a claim means, for a drawing that
+-- carries a STANDEE on its surface (Red's potted plant on the dining
+-- table). `keep` names tile ids the stamp must NOT claim: their authored
+-- pins stay live, so the standee scan still stands the object exactly as
+-- it always did. `support` is the model's top plane in voxels: the claim
+-- shape carries it as its height, which is what tells that scan the
+-- standee's shelf -- a plain claim stays at h = 0, and Structures treats
+-- a building claim with height as a full model (skip, never a second
+-- box; see its support branches).
+function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
+  local shape = { class = "building", h = (t and t.support) or 0,
+                  art = "building", flat = false, authored = true }
+  -- `base` is set after the ground vote below; declared here because the
+  -- claim shape is written into every cell of the footprint.
+  local keep = nil
+  if t and t.keep then
+    keep = {}
+    for _, id in ipairs(t.keep) do keep[id] = true end
+  end
 
   -- the ground the building stands on: the commonest flat tile around its
-  -- feet, so a house on a path keeps its path
+  -- feet, so a house on a path keeps its path -- and, by the same vote, the
+  -- HEIGHT of that ground.
+  --
+  -- A model is built in its own space starting at y = 0 and copied into
+  -- place, and until now only x and z moved: every building in the game
+  -- stood on the world datum whatever it was standing on.  On flat ground
+  -- that is invisible and it was invisible for a long time.  Put a house on
+  -- a TERRACE and it is a house sunk to its eaves in the deck -- which is
+  -- what Naljo's plateau buildings looked like the moment $3C started
+  -- standing at 16.
   local votes, best, bestN = {}, nil, 0
+  local hvotes, base, baseN = {}, 0, 0
   local function vote(x, y)
     local k = keyOf(x, y)
     local ns = S.shapeAt[k]
-    if ns and ns.flat and ns.class ~= "void" then
+    -- a TERRACE is ground you stand on even though its art rides the
+    -- top face of a box, so it votes for the datum alongside flat
+    -- ground; only its TILE stays out of the paint vote below.
+    if ns and (ns.flat or ns.class == "terrace") and ns.class ~= "void" then
       local tile = S.tileAt[k]
       votes[tile] = (votes[tile] or 0) + 1
       if votes[tile] > bestN then best, bestN = tile, votes[tile] end
+      local h = ns.h or 0
+      hvotes[h] = (hvotes[h] or 0) + 1
+      if hvotes[h] > baseN then base, baseN = h, hvotes[h] end
     end
   end
   for c = 0, bw - 1 do
@@ -701,23 +1326,36 @@ function Buildings.stamp(S, map, quads, tx, ty, bw, bh)
     vote(tx + bw, ty + r)
   end
 
+  -- the vote is in: tell the mesher which datum this plot stands on, so the
+  -- floor it paints under the model rises with it
+  shape.base = base
   for r = 0, bh - 1 do
     for c = 0, bw - 1 do
       local k = keyOf(tx + c, ty + r)
-      S.shapeAt[k] = shape
-      S.skip[k] = true
-      S.ground[k] = best or false
+      if keep and keep[S.tileAt[k]] then
+        -- unclaimed by request: the tile keeps its pin (the plant's
+        -- cutout pool) and the standee scan finds it there. Only the
+        -- ground is set now, so the scan's own claim of these tiles has
+        -- the building's floor to paint when no flat tile touches a
+        -- cluster ringed by its own furniture.
+        S.ground[k] = best or false
+      else
+        S.shapeAt[k] = shape
+        S.skip[k] = true
+        S.ground[k] = best or false
+      end
     end
   end
 
   local mx, mz = tx * 8, ty * 8
+  local my = base
   local out = S.objectQuads
   for _, q in ipairs(quads) do
     out[#out + 1] = {
-      { q[1][1] + mx, q[1][2], q[1][3] + mz },
-      { q[2][1] + mx, q[2][2], q[2][3] + mz },
-      { q[3][1] + mx, q[3][2], q[3][3] + mz },
-      { q[4][1] + mx, q[4][2], q[4][3] + mz },
+      { q[1][1] + mx, q[1][2] + my, q[1][3] + mz },
+      { q[2][1] + mx, q[2][2] + my, q[2][3] + mz },
+      { q[3][1] + mx, q[3][2] + my, q[3][3] + mz },
+      { q[4][1] + mx, q[4][2] + my, q[4][3] + mz },
       uv = q.uv, shade = q.shade,
       -- placements only ever scan the BODY, so a building is always this
       -- map's own structure: the mesher's edge keep-rules must not eat

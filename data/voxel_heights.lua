@@ -58,12 +58,43 @@
 --                           collapses onto a one-cell-deep box at its
 --                           full drawn height; back rows become hidden
 --                           floor, and an unpinnable trim row above
---                           becomes the cap
+--                           becomes the cap.  Its FRONT carries the
+--                           measured pane relief -- every non-black
+--                           region the drawing seals behind its own
+--                           black frame sinks one voxel, the same rule
+--                           lib/Buildings.lua recesses a facade with,
+--                           so the books stand in the shelf instead of
+--                           being painted on it.  A tileset that
+--                           borrows the collapse for something that is
+--                           not a shelf says `bookcase_relief = false`
+--   cylinder / canopy       round scenery (tree canopies): a voxel hull
+--   / stump                 cut from the art's own darkest-pixel outline,
+--                           round in depth -- one 16px cell, a 2x2-cell
+--                           group, or with the drawn top read as a cut face
+--   can                     that hull cut at both ends, hollowed and
+--                           tapered: an OPEN bin standing on a floor
+--                           (Vermilion Gym's trash cans).  The drawn mouth
+--                           ellipse projects across the round top and down
+--                           the well, the drawn base ellipse is ground
+--                           contact rather than body, the top rows keep a
+--                           wall at each end of their chord and lose the
+--                           middle, and the plan narrows toward the floor
+--                           (can_cap / can_base in art rows; can_height,
+--                           can_well, can_taper in voxels)
+--   planter                 the same hull for a round drawing stacked TWO
+--                           cells high on ONE cell of plot (the Centers'
+--                           potted plants): it stands in the lower cell and
+--                           the upper cell is the height it overhangs
 --   billboard / prop        a prop drawn face-on: a standing per-pixel
 --                           cutout, black-outline segmented; drawn above
 --                           a pinned box it stands ON that box (a
 --                           monitor on its desk).  prop is a second pool
 --                           so two touching cutouts stay separate
+--   bike                    the same cutout at TWO voxels: a vehicle drawn
+--                           side-on is a LINE drawing, and the air inside
+--                           its frame is what makes it read as one -- any
+--                           thicker and neighbouring strokes close those
+--                           gaps with their own side faces
 --
 -- A tileset entry may also carry `prop_ground` (not a class): a map of
 -- prop tile id -> ground tile id naming the tile painted under that
@@ -83,14 +114,27 @@
 -- and nothing automatic can either when the figure has no background
 -- margin to flood from and wears the same shades as what it sits on.
 -- The Pokemon Center's seated man is the case; see POKECENTER below for
--- the format.
+-- the format.  A figure entry that states a `depth` is not a person and
+-- stands as a per-pixel SOLID instead of a flat card -- the Marts' cash
+-- register, a machine set down on a counter (`thin` gives its top rows a
+-- thickness of their own, for the part of a drawing that is paper).
+--
+-- And `mounted` (not a class either): the same authored-mask escape for a
+-- thing painted INTO a WALL band, stood proud of the panel as a thin
+-- per-pixel slab instead of standing on its feet as a sprite card.  Where
+-- a figure is a person and reads face-on from any angle, a mounted object
+-- is an object drawn side-on and holds the wall's own plane; and it keeps
+-- its DRAWN elevation, so a thing hung clear of the floor stays hung.
+-- The Bike Shop's two wall bicycles are the case -- and the mask there is
+-- measured rather than drawn, by flooding the panel tile's own stripe out
+-- from behind them; see CLUB below.
 --
 -- Whole BUILDINGS are not tile pins -- one drawing packs a roof seen from
 -- above, a facade seen face-on and sloped ends as diagonal silhouettes,
 -- and no single class covers that.  They live in the `buildings` list at
 -- the bottom of this file, as a band table over the drawing's rows.
 
-return {
+local profile = {
   version = 1,
 
   -- class -> height in world pixels
@@ -105,15 +149,28 @@ return {
     -- masonry drawn two courses tall (the Indigo Plateau's rim, the
     -- badge-check gates): as tall as a statue on its plinth
     cliff = 32,
+    -- the top of a plateau: one course, so it lands flush with the 16px
+    -- cliff face drawn holding it up
+    terrace = 16,
     tree = 16,
     roof = 28,
     bed = 7,
     stool = 8,
     counter = 8,
+    -- the raised back band of low seating (the Center couch's back and
+    -- arm strip): half again the 8px seat it rises over
+    backrest = 12,
     table = 12,
     desk = 24,
     prop = 16,
     cutout = 16,
+    -- a vehicle drawn side-on (the Bike Shop's bicycles): a standee like
+    -- the pools above, two voxels thin so the air inside its frame stays
+    -- air (see Structures' PINNED_DEPTH)
+    bike = 16,
+    -- a round drawing stacked two cells high on one cell of plot (the
+    -- Centers' potted plants): 32px of hull standing in its lower cell
+    planter = 32,
     relief = 3,
     bookcase = 32,
     stair_e = 16,
@@ -122,9 +179,419 @@ return {
     stair_down_w = 16,
   },
 
+  -- Gen 2 collision class -> class, for every Gen 2 tileset at once.
+  --
+  -- Where Gen 1 hands the mesher a tile id and nothing else, Gen 2 stores a
+  -- collision class per 16x16 CELL, and the classes are semantic: the ROM
+  -- itself distinguishes a tree from a wall.  That reaches drawings a
+  -- tile-id pin cannot -- Johto's lone tree and its tree WALL are cut from
+  -- the same six tiles ($1E/$1F/$2E/$2F/$3E/$3F) and differ only in class --
+  -- and one table covers all thirty tilesets instead of thirty pin lists.
+  --
+  -- Deliberately short.  Every row below is either read off the routine that
+  -- consumes the class or confirmed against the metatile art; the many
+  -- classes whose meaning is only guessable from their distribution are left
+  -- to the detector, which is what rule 1 means by hand-authored.
+  collision = {
+    -- $15 is a tree standing alone on grass (Johto blocks $3C-$3F, $5B-$67),
+    -- $12 the berry tree in the same drawings' corners, $7B the low round
+    -- bush tucked against a cliff base (Johto block $73).  All three are
+    -- drawn ROUND, so all three take the voxel-hull archetype; the tree
+    -- WALL, class $07, is rounded by tile instead -- see TilesetJohto's
+    -- `planter`, which is the only reading that gets its two-cell height
+    [0x12] = "cylinder",
+    [0x15] = "cylinder",
+    [0x7B] = "cylinder",
+    -- CheckGrassCollision's own list, minus the classes the permission table
+    -- calls water: standing tufts the player walks between, not flat ground
+    [0x18] = "grass",
+    -- COLL_WATERFALL.  A fall is drawn as a band of $40 laid across the
+    -- river -- eight blocks wide and two deep at Mt. Mortar, and the same
+    -- shape at Tohjo Falls, Whirl Island B2F and Silver Cave -- and the
+    -- band's cells are the only thing that separates it from the pool it
+    -- pours into.  Unpinned it takes the water class and the whole river
+    -- comes out one flat sheet with a texture change in the middle: no
+    -- fall at all.  `cliff` is the upright fold, so the band stands up
+    -- two courses and the falling water is drawn on its FACE, which is
+    -- the direction it falls.  The rock flanking it is $26/$27 and takes
+    -- the same class from the cave profile, so the gorge walls match.
+    [0x33] = "cliff",
+    -- Hop classes ($A0-$AF) are deliberately NOT pinned.  DoPlayerMovement
+    -- reads the direction out of the low three bits, but the class sits on
+    -- the plain ground you jump FROM, never on the lip -- pinning it raised
+    -- a one-cell rail of turf along the top of every terrace.  The lip is
+    -- reached from the NEIGHBOUR's class instead (TileShape's HOP_LIP),
+    -- which is the only thing that can tell a knee-high side lip from the
+    -- cliff face it shares its two tiles with.
+    -- a door set into a facade (Johto's $37/$38/$39/$3A cells).  It is
+    -- walkable -- the player steps onto it to warp -- so the cell rules
+    -- resolve it to ground and punch a hole through the front of the
+    -- building, which is the same failure Gen 1's door fold exists for
+    [0x71] = "wall",
+    -- the class CheckCounterTile tests: a service counter is something you
+    -- lean on, not a wall stub
+    [0x90] = "counter",
+    -- THE INTERACTIVE FURNITURE CLASSES.  $90 above is the only one of
+    -- these the game names in a routine; the rest are named by the table
+    -- CheckFacingTileForStdScript walks (TileCollisionStdScripts,
+    -- 04:$7A43), which is a straight collision -> std script map and is
+    -- the ROM stating what each of these things IS:
+    --
+    --   $91 -> MagazineBookshelfScript   a bookshelf
+    --   $93 -> PCScript                  a PC terminal
+    --   $94 -> Radio1Script              a radio set
+    --   $95 -> TownMapScript             the town map on the wall
+    --   $96 -> MerchandiseShelfScript    a Mart's stock shelf
+    --   $97 -> TVScript                  a television
+    --   $9D -> WindowScript              a window
+    --   $9F -> IncenseBurnerScript       a Tin Tower burner
+    --
+    -- Every one of them was a 16px cube before this: nothing indoors had
+    -- a pin of any kind, so `forMap`'s fallback sent all of them to
+    -- `wall`, and a Center's PC, a bedroom TV and a Mart's stock shelf
+    -- were the same grey box in the same place.  Eight rows here reach
+    -- all twenty-odd indoor tilesets at once, which is the whole reason
+    -- this table is keyed by class rather than by tile.
+    --
+    -- $95 and $9D are deliberately absent.  A town map and a window are
+    -- PAINTED ON the wall band and are not objects standing in front of
+    -- it -- the fallback's 16px upright panel is already exactly right,
+    -- and giving either its own depth would punch the wall open behind.
+    [0x91] = "bookcase",
+    -- `console`, NOT `desk`.  A desk is a box, and the upright fold gives a
+    -- box its front face from the drawing's bottom row and then REPEATS the
+    -- north row across its lid -- which on a PC or a television means the
+    -- screen is printed twice, once facing you and once lying flat on top
+    -- of the machine.  `console` is the per-pixel standee the class was
+    -- written for: the screen appears once, facing out, and the cabinet
+    -- keeps the silhouette it is drawn with instead of being squared off.
+    [0x93] = "console",
+    [0x94] = "console",
+    [0x96] = "bookcase",
+    [0x97] = "console",
+    -- drawn as a round-bellied urn, so the voxel hull rather than a box
+    [0x9F] = "cylinder",
+    -- $B2 is NOT a wall.  It is the ENTRANCE MAT -- the doorstep laid in
+    -- front of a gate or house (Johto's $2C/$3C, where $3C is the ordinary
+    -- ground tile), and the same class the cave mouths carry.  Folding it
+    -- up stood a box on every doorstep in Johto, so it stays flat ground
+    -- and is deliberately absent from this table; the hole in a mountain
+    -- top is a terrain problem, not this one.
+  },
+
+  -- Pokemon Prism's collision list is NOT Gold's.  It shares the layout --
+  -- one class per cell, high nybbles for grass/water/warps/ledges -- and the
+  -- ledge block is byte-for-byte the same, but the object classes were
+  -- reassigned and a dozen more added.  Read through the table above, three
+  -- of Prism's cells took a shape drawn for something else entirely:
+  --
+  --   $92  --              Prism TV                 (Gold's TV is $97)
+  --   $94  Gold RADIO      Prism SMELTING
+  --   $97  Gold TV         Prism JUMPING_SHOES
+  --   $9f  Gold INCENSE    Prism FAST_CURRENT
+  --   $7b  Gold CAVE       Prism CAVE  (read here as a Johto bush)
+  --
+  -- Every row below is checked against Prism's own TileCollisionTable
+  -- (tilesets/collision.asm), which states LANDTILE / WATERTILE / WALLTILE
+  -- per class -- so `false` means "this is not the thing Gold's row thought
+  -- it was, hand it back to the detector" rather than a guess at new art.
+  --
+  -- Deliberately NOT here, and each one for a reason the permission table
+  -- gives:
+  --   $b0-$b3 RIGHT/LEFT/TOP/BOTTOM_WALL are LANDTILE -- one-way walls the
+  --           player STANDS on, not walls.  The cell rule already floors
+  --           them; pinning `wall` would stand a box on every one.
+  --   $40-$44 CURRENT_* are LANDTILE too, not water: a conveyor floor.
+  --   $9d MINING and $9b OASIS are WALLTILE with art nothing here has seen,
+  --           so they keep the fallback upright panel.
+  collision_prism = {
+    -- Prism's own TV.  `console`, for the reason Gold's $93/$97 are consoles:
+    -- a box would print the screen twice, once facing out and once flat on
+    -- the lid.
+    [0x92] = "console",
+    -- a smelting furnace, and a pair of jumping shoes.  Both WALLTILE, both
+    -- drawn as nothing this profile has measured -- the detector's own
+    -- silhouette reading beats inheriting a radio's and a television's.
+    [0x94] = false,
+    [0x97] = false,
+    -- the two shop signs.  `sign` is the board-on-a-post fold, which is what
+    -- both are drawn as.
+    [0x98] = "sign",
+    [0x99] = "sign",
+    -- a current that sweeps the player along.  WALLTILE here rather than
+    -- water, so it is emphatically not Gold's round-bellied incense urn.
+    [0x9F] = false,
+    -- Prism's second grass class (CheckGrassCollision reads it alongside
+    -- $18): standing tufts, not flat ground.
+    [0x14] = "grass",
+    -- and $8 is snow -- LANDTILE, ordinary walkable ground.
+    [0x08] = "ground",
+    -- $7b is a CAVE MOUTH in Prism, and LANDTILE: the player walks into it.
+    -- The pin above reads it as the low round bush it is in Johto's art,
+    -- which would stand a barrel in every cave entrance here.
+    [0x7B] = false,
+    -- a tape drive: a machine with a face, like the PC.
+    [0xB4] = "console",
+    -- Gold marks $30-$32 unused and only ever draws a fall as a band of $33.
+    -- Prism uses all four (WATERFALL_RIGHT / _LEFT / _UP / WATERFALL), and
+    -- they are WATERTILE, so unpinned the whole fall flattens into the pool it
+    -- pours into.  `cliff` is the upright fold -- the band stands up and the
+    -- falling water is drawn on its FACE, which is the direction it falls.
+    [0x30] = "cliff",
+    [0x31] = "cliff",
+    [0x32] = "cliff",
+  },
+
   -- Only tiles the detector must not touch need listing. Tile ids are
   -- indices into the tileset's own 8x8 atlas.
   tilesets = {
+    -- Gen 2's Johto set. Tile pins still work here -- they are read before
+    -- the collision table above -- and they are the right tool wherever a
+    -- drawing is finer than the 16x16 cell the class describes, which on
+    -- Gen 2 is most of the outdoors: a class is stated per CELL, but a
+    -- ledge lip, a fence rail and a sign board are each drawn across half
+    -- of one.
+    TilesetJohto = {
+      -- Plain ground and open water, pinned flat against their own cells.
+      --
+      -- These look redundant and are the opposite. A Gen 2 tile that is
+      -- not pinned falls to `wall` (the class table answers for the cell,
+      -- not the tile), and the cell rules only rescue it where the cell is
+      -- WALKABLE -- so every scrap of ordinary grass sharing a blocked
+      -- cell with something solid stood up as a 16px box: the two rows of
+      -- turf above every ledge lip, the ground beside every cliff post,
+      -- the verge inside every fence corner. Same for the shoreline, whose
+      -- cells are wall-class ($27) with nothing but water drawn in them.
+      -- $05/$06 and $14/$58 are never anything but flat ground and water
+      -- anywhere in the set.
+      ground = { 0x05, 0x06 },
+      water = { 0x14, 0x58 },
+      -- THE PLATEAU TOP.  Gen 2 records no elevation: the Ruins of Alph
+      -- courtyard rim and the grass it looks down on are both collision
+      -- $00, and the four cliff drawings around them are $07 like any
+      -- other solid.  The only place the drop is written down is the
+      -- floor tile, and there it is unambiguous -- $3C is the dirt drawn
+      -- ON TOP of a cliff and $05/$06 the grass at its foot.  Swept over
+      -- twenty Johto maps $3C falls in a walkable cell 2810 times and
+      -- carries only two classes doing it, $00 and $B2; $05/$06 never
+      -- share a cell with it.
+      --
+      -- $2C is the same floor with its north LIP on it: a black shadow
+      -- band under a sunlit highlight, the rim seen edge-on.  It carries
+      -- collision $B2 -- the class the profile above deliberately leaves
+      -- flat, because $B2 is also every doorstep in Johto -- so the pin
+      -- has to be per TILE, which is exactly the split a tile pin makes:
+      -- the doorsteps are drawn $40 and $3C, never $2C.
+      --
+      -- Left unpinned both fell to the walkable-cell rule and came out as
+      -- flat ground, so every terrace in Johto -- the Ruins' four sunken
+      -- courtyards, Route 32's whole east bank -- was painted onto the
+      -- grass at the same height as the grass, with its own cliff face
+      -- standing 16px out of the lawn beside it.
+      --
+      -- NOT in the collision table and NOT in TilesetForest or
+      -- TilesetPark: those two reuse both ids for the forest floor, where
+      -- they are drawn only in solid $07 cells and mean nothing of the
+      -- sort (Ilex Forest 247 of each, the National Park 177).
+      terrace = { 0x2C, 0x3C },
+      -- the hop-down lip. Its own cell's class is $07 and the LEDGE
+      -- classes ($A0-$A5) sit on the plain ground ABOVE the drop, so the
+      -- class table cannot reach the drawing at all -- the lip was a 16px
+      -- wall running the length of every terrace.
+      --
+      -- $4B and $4D, the run's end caps, are deliberately left as walls:
+      -- they are also the inner corners of the cliff base ($0A, $6C, $6D),
+      -- and nothing in the drawing tells the two apart -- both sit under
+      -- the same $3B/$3D cliff post. At a run's end they read as the
+      -- corner post the cliff turns on, which is what they are drawn as.
+      ledge = { 0x4C },
+      -- the wooden fence: $40 and $4A the vertical runs, $5A/$59 the top
+      -- and bottom rows of a horizontal one. Across all 128 Johto blocks
+      -- these four tiles are drawn NOWHERE else, and their cells' classes
+      -- disagree ($07 for the horizontal runs, $70/$76/$7E for the
+      -- vertical) -- so the class table cannot reach them and a tile pin
+      -- can. Left alone they came out as 16px walls: a picket fence
+      -- standing as tall as the houses behind it.
+      --
+      -- `post`, not `fence`: the fence class is a BOX, and a fence seen
+      -- FACE ON is the one piece of scenery that is mostly holes --
+      -- pickets with daylight between them, a rail with air under it. The
+      -- post pool cuts the drawing per pixel and stands each CELL alone in
+      -- its own depth band, so a run reads as separate panels with gaps
+      -- between them rather than one fence-textured kerb.
+      --
+      -- $40 is NOT one of them.  It is the pink entrance mat, and the cells
+      -- it is drawn in carry classes $70/$76/$7E -- the warp classes
+      -- CheckWarpCollision matches ($60, $68, high nybble $7) -- so it is
+      -- the doorstep you walk onto to enter a gate, not a picket.  Standing
+      -- it up put a box across the front of every route gate in Johto.
+      post = { 0x59, 0x5A },
+      -- ...but only the EAST-WEST run.  The two projections are not the
+      -- same drawing: $59/$5A are the fence seen FACE ON, pickets and
+      -- daylight, which is what the standee pool is for -- while $4A is
+      -- the same fence seen END ON, one 8px column repeated seamlessly
+      -- down the whole run with no picket in it to see through.  Cut per
+      -- cell like the face-on rows it came out as a chain of separate
+      -- slabs, each in its own depth band, stepping away from the camera
+      -- and stopping short of the run it is supposed to meet (Route 35's
+      -- north-south line, the pen around Sprout Tower).  `fence` is the
+      -- continuous kerb the end-on view actually depicts, and at the
+      -- face-on run's own height the two meet flush at the corner.
+      fence = { 0x4A },
+      -- ...and the face-on rows are also what the end-on run is BUILT
+      -- from: a 6px panel down the middle of the cell wearing $5A over
+      -- $59 on both flanks, so a first-person walk along it sees pickets
+      -- rather than one long plank.  See Structures' buildRails.
+      rail_face = { 0x5A, 0x59 },
+      heights = { fence = 16 },
+      -- the flowerbed ($03, drawn in block $04 and nowhere else). It sits
+      -- in a walkable cell, so the cell rules made it flat painted ground;
+      -- `flower` keeps that ground and stands the blooms up on it as a
+      -- one-voxel cutout that sways with the tile animation.
+      flower = { 0x03 },
+      -- the town sign: one cell, $4E/$4F over $5E/$5F, drawn nowhere else
+      -- in the set. A board on a post is a flat panel standing up, not a
+      -- block of masonry, so it takes the per-pixel standee the Gen 1
+      -- signs take rather than the volume path's box.
+      signpost = { 0x4E, 0x4F, 0x5E, 0x5F },
+      -- the tree WALL -- the forest that borders every route and fills
+      -- every town's verges. Its drawing is one canopy 16px wide and TWO
+      -- CELLS high: $1E/$1F the crown, $2E/$2F the middle course, $3E/$3F
+      -- the underside. The lone tree beside it is the SAME crown over the
+      -- SAME underside with the middle course left out, one cell tall, and
+      -- the collision table already rounds that one off ($15). This is the
+      -- other half of the same drawing and nothing but the middle course
+      -- separates them, so it is what the rules below read.
+      --
+      -- `planter` is the class for a round drawing stacked two cells high
+      -- on one cell of plot -- the Centers' potted plants -- and a tree is
+      -- that shape exactly: the crown is HEIGHT, overhanging the cell it
+      -- is drawn in, and the plot is the cell under it. Left to the volume
+      -- path the whole forest came out as one flat-topped green plateau
+      -- with the canopy pattern printed on its lid.
+      --
+      -- $2E/$2F carry the pin outright: across all 128 blocks they are
+      -- drawn in block $05 and nowhere else, so they are never anything
+      -- but the middle of a tall tree. $1E/$1F cannot be, because they are
+      -- also the lone tree's crown -- what tells the two apart is what is
+      -- drawn UNDER them, the middle course or the underside.
+      planter = { 0x2E, 0x2F },
+      -- ...but not the potted plant's SPRAY. The class caps the crown's
+      -- top rows to a five-voxel slab because a pot plant's leaves are a
+      -- flat fan, and a tree's are not: capped, the forest came out as
+      -- rows of thin cards where the lone tree beside it -- the same
+      -- crown, revolved in full -- is a ball. Off, every drawn row turns
+      -- the whole 16px it is drawn at and the two match.
+      planter_spray = false,
+      when_below = {
+        [0x1E] = { { below = { 0x2E }, class = "planter" } },
+        [0x1F] = { { below = { 0x2F }, class = "planter" } },
+      },
+      cylinder = { 0x1E, 0x1F, 0x3E, 0x3F },
+      -- $4C is the cliff's FOOT as well as the ledge's lip -- the same
+      -- eight pixels of dark rim, and the mountain drawings ($0A, $6C-$6F,
+      -- $72, $73) end on a course of it. There it is the bottom band of a
+      -- wall and must keep the wall's height, or every cliff gets a notch
+      -- cut round its base. What separates the two is what stands above:
+      -- open ground over a ledge, more cliff over a cliff.
+      when_above = {
+        [0x4C] = { { above = { 0x3C, 0x4B, 0x4C, 0x4D }, class = "wall" } },
+      },
+    },
+
+    -- BATTLE_TOWER_OUTSIDE's own set, which shares nothing with Johto's.
+    -- Only the two ground drawings need pinning, for exactly the reason
+    -- they do in TilesetJohto: a tile with no pin answers to its CELL's
+    -- class, so every scrap of ground sharing a blocked cell with a tree
+    -- or the tower's own footprint stood up as a 16px box.  $05 (dotted
+    -- turf) and $06 (plain) are never anything else anywhere in this set
+    -- -- 256 and 451 placements on the one map that uses it, all of them
+    -- open ground.
+    TilesetBattleTowerOutside = {
+      ground = { 0x05, 0x06 },
+    },
+
+    -- The Battle Tower's own interior set: the 1F lobby, the lift, the
+    -- hallway and the battle room.  Nothing here was pinned, so every solid
+    -- cell fell to `wall` -- which is how the reception desk came out as a
+    -- 16px bank, the deposit PC sank into it, and the lobby's side walls
+    -- stood as a kerb inside the room shell.
+    TilesetBattleTowerInside = {
+      -- THE RECEPTION DESK.  Two tile rows: the blue front ($1A, with $16
+      -- and $1B its west and east end caps, $1C/$1D the west machine's
+      -- skirt) under the pale work surface ($0A, $06 its west return, $61
+      -- the return's cap, $2A/$2B the surface the deposit PC stands on,
+      -- $0C/$0D the west machine's deck).  `counter` is the one 8px band,
+      -- so exactly the bottom row stands up as the front and the surface
+      -- rides the top face -- which is also what puts the drawn keyboard
+      -- flat on the desk instead of upright in its front.
+      counter = { 0x06, 0x0A, 0x0C, 0x0D, 0x16, 0x1A, 0x1B, 0x1C, 0x1D,
+                  0x2A, 0x2B, 0x61 },
+      -- THE TWO MACHINES STANDING ON IT.  The ROM already calls the
+      -- deposit PC's lower cell $93 (PCScript -> `console`), but the class
+      -- is per 16x16 CELL and the machine is drawn TALLER than one: its
+      -- monitor ($28/$29 over $38/$39) sits in the cell ABOVE, which the
+      -- class table cannot reach and which therefore stayed `wall`.  Half
+      -- the machine was a standee and half a box, and the standee stood on
+      -- the floor behind the desk -- the "hidden" PC.  Pinned `console`
+      -- both halves are one machine, and because the cell below is now an
+      -- authored 8px `counter` it stands ON the desk (Structures' support
+      -- rule).  $08/$09/$18/$19 is the west terminal, drawn the same way
+      -- and never classed at all.
+      console = { 0x08, 0x09, 0x18, 0x19, 0x28, 0x29, 0x38, 0x39 },
+      -- THE LOBBY'S SIDE WALLS, drawn in PERSPECTIVE -- a gold panelled
+      -- face receding north, with the room's outside showing as pale mint
+      -- down its outer edge.  West is $2E/$2F over $3E/$3F ($40/$41 its
+      -- north end); east is $2C/$2D over $3C/$3D ($3A/$3B its north end).
+      -- The room shell Structures rings the map with stands 32px, so left
+      -- at the fallback's 16px these read as a kerb INSIDE a taller wall,
+      -- with the perspective hatching lying across their lids: the step is
+      -- the glitch.  `shell` is that same 32px upright, so the drawn wall
+      -- and the built one are one surface.
+      shell = { 0x2C, 0x2D, 0x2E, 0x2F, 0x3A, 0x3B, 0x3C, 0x3D,
+                0x3E, 0x3F, 0x40, 0x41 },
+    },
+
+    -- THE S.S. AQUA.  The Fast Ship's five maps and the Olivine Lighthouse's
+    -- six share one tileset (id 19), and it had no entry at all: every solid
+    -- cell fell to `wall` and every walkable one to flat floor, which is the
+    -- "boxy" ship -- the cabin tables squared off into 16px blocks and the
+    -- stools around them lying flat in the carpet.
+    --
+    -- Only drawings verified across all eleven maps are named here.  Each
+    -- list below was checked by sweeping every map: the tiles are used for
+    -- that drawing and for nothing else in the set.
+    TilesetLighthouse = {
+      -- FLOORS.  $04 is the deck planking, $0D/$1D the cabins' checked
+      -- carpet, $23 the shadow strip the bulkhead casts along the top of
+      -- the floor cell, $2E/$2F the lighthouse's stone.  Pinned for the
+      -- reason TilesetJohto pins its grass: an unpinned tile answers to its
+      -- CELL, so any scrap of floor sharing a blocked cell with something
+      -- solid stood up as a 16px box.
+      ground = { 0x04, 0x0D, 0x1D, 0x23, 0x2E, 0x2F },
+      -- THE CABINS' STOOLS, drawn from above with their legs showing.  27
+      -- of them, and every one stands in a WALKABLE cell -- so with no pin
+      -- the cell rules flattened them into the carpet and they vanished.
+      -- `stool` is the 8px standee pool, which also puts anyone standing on
+      -- that cell at seat height.
+      stool = { 0x07, 0x08, 0x17, 0x18 },
+      -- THE TABLES: the cabins' games table (a Poke Ball and a board on a
+      -- blue top over a wooden apron) and the dining hall's long one on
+      -- B1F, which is the same drawing with its middle course repeated.
+      -- Drawn from above, so `table` -- the box whose bottom row folds up
+      -- as the apron and whose top rides the lid -- rather than a wall.
+      table = { 0x09, 0x0A, 0x0B, 0x0C, 0x14, 0x19, 0x1A, 0x1C, 0x2C, 0x35,
+                0x40, 0x41, 0x50, 0x51, 0x60, 0x61, 0x62 },
+      -- THE BERTHS: a bunk drawn from above -- wooden head and foot boards,
+      -- a cream sheet between them, grey rails down each side -- twenty of
+      -- them across the cabins.  `bed` is the low box that wears its
+      -- drawing on its TOP face, which is what the art depicts.
+      bed = { 0x46, 0x47, 0x56, 0x57, 0x63, 0x64, 0x65, 0x66 },
+      -- THE LIFEBUOYS on the bulkheads: a ring drawn face-on over the wall
+      -- behind it, six of them.  A per-pixel standee, not a box.
+      prop = { 0x48, 0x49, 0x58, 0x59 },
+    },
+
     OVERWORLD = {
       -- the hop-down edges named by data.field.ledges' ledgeTile: their
       -- art is a ground lip seen from above, which the detector would
@@ -192,12 +659,8 @@ return {
     -- black-outline segmented -- backgrounds flood away, the pixels
     -- the outline encloses stay.  Everything stands on the gyms' main
     -- floor tile ($11), which is also Bruno's floor.
-    -- (The round boulder drawn beside some statues, $07/$08/$17/$18,
-    -- is NOT pinned: it also tiles wall-to-wall as Pewter's rock rows,
-    -- which are scenery for the detector, not a lone prop.  Probed:
-    -- the repeat-aware scenery path already gives every one of them a
-    -- single 16px course in Pewter's and Bruno's rock walls alike, so
-    -- a pin would only restate the derived answer.)
+    -- (The boulders, $07/$08/$17/$18, are pinned round -- see the
+    -- `cylinder` pool below.)
     --
     -- The rest of the tileset is the ten rooms' own furniture: the six
     -- badge gyms it serves (Pewter, Cerulean, Vermilion, Celadon,
@@ -267,13 +730,100 @@ return {
       -- from the darkest-pixel outline -- the same treatment the
       -- overworld's tree canopies take, and per-CELL, so a hedge row
       -- becomes a row of bushes instead of one boxed monolith.
-      cylinder = { 44, 45, 46, 47 },
-      -- The statues, the cans, and Celadon's three little trees
-      -- ($40/$41 canopy over $50/$51 trunk).  A trunk is not round, so
-      -- the tree cannot be a ball like the shrubs beside it -- it takes
-      -- the thin standee pool every interior plant takes, which is also
-      -- a pool apart from the cylinders it touches.
-      prop = { 2, 56, 18, 19, 11, 12, 27, 28,
+      --
+      -- The rock gyms' boulder ($07/$08 over $17/$18) is the same
+      -- reading: one cell is one rock, drawn as a lit dome -- white
+      -- highlight up the north-west, mid-grey body, black-and-grey
+      -- rubble dither filling the rest -- with the FLOOR showing
+      -- through all four corners, which is what makes a run of them
+      -- read as a pile of separate stones rather than a wall (tile
+      -- them and the gaps between four rocks draw a grey diamond).
+      -- Left derived it fell to the repeat-aware scenery path, which
+      -- extruded the whole drawing as one 16px course: Pewter's and
+      -- Bruno's rock rows came out as square bars wearing a boulder
+      -- texture in relief -- the extruded picture.  Round-pinned,
+      -- each cell is a hull whose plan view is its own drawn width
+      -- profile turned in depth: a dome 16 wide and 16 tall, full
+      -- width from the drawn shoulder down and tapering over the top
+      -- five rows exactly where the art tapers, and the corner
+      -- diamonds open up between them the way the drawing has them.
+      -- It stays 16px, so nothing that stands on or beside a rock
+      -- moves.  The perimeter rows take the same model as the maze
+      -- clusters -- one drawing, one rock, everywhere.
+      -- Scanned: across all 222 maps these four tiles occur 87 times
+      -- on this atlas and every one of them anchors a whole boulder
+      -- cell (87 tile-$07 hits, 87 grid matches), in exactly two maps
+      -- -- PEWTER_GYM's walls and rock maze, and BRUNOS_ROOM's
+      -- clusters.  DOJO shares gym.png but places none of them, so
+      -- the pin is not copied there.
+      cylinder = { 44, 45, 46, 47,
+                   7, 8, 23, 24 },
+      -- Vermilion Gym's trash cans ($0B/$0C over $1B/$1C), the switch
+      -- puzzle's fifteen cans plus the sixteenth beside the leader's
+      -- platform.  An open galvanised bin in the 3/4 view, and its plan is
+      -- measured: the silhouette runs straight down both flanks for art
+      -- rows 4-10 and is 11px wide there, so the can is 11 across -- and
+      -- being round in plan, 11 DEEP.  Above row 4 is the MOUTH seen from
+      -- above (the drawn ring is 9x5, a circle flattened to 55%, which is
+      -- what fixes it as a top view rather than a face-on dome); below row
+      -- 10 is the base circle's front arc, ground contact, with the
+      -- drawing's own $555 halo one pixel outside it as the grounding
+      -- shadow.
+      --
+      -- Left in the thin standee pool the can was a flat disc on edge --
+      -- fifteen coins standing in a row.  Pinned a plain `cylinder` it
+      -- revolves every drawn row, bottom arc included, and comes out a
+      -- barrel balanced on a three-voxel stem.  `can` is the hull cut at
+      -- both ends and hollowed: the mouth projects across the round top,
+      -- the base rows are ground rather than body, and the top can_well
+      -- voxel rows keep a wall at each end of every chord and lose their
+      -- middle, so the bin is open and you look down into it.
+      --
+      -- can_cap and can_base are the two ellipses in art rows and come off
+      -- the pixels.  The other three do NOT, and are the numbers taste
+      -- moves:
+      --
+      --   can_height 9    Un-projected strictly the drawing states a squat
+      --                   drum barely two rows of straight side tall,
+      --                   because the GB artist spent most of a 16px cell
+      --                   on the opening -- but a bin is taller than it is
+      --                   wide and the flat game reads as one, the drawing
+      --                   being 14px tall beside a 16px player.  The lowest
+      --                   surviving body row (art row 10: black rim, shaded
+      --                   flank, lit face) is repeated up to this, the
+      --                   plainest continuation of the material drawn.
+      --                   `heights` must follow it so anything riding a can
+      --                   lands on the rim.
+      --   can_well 5      How far down the mouth is hollowed.  The drawing
+      --                   paints an opening and cannot say how deep.
+      --   can_taper 4     Voxels of DIAMETER the base loses -- 11 at the
+      --                   rim to 7 on the floor, stepped twice over the
+      --                   height.  The drawing's base arc pulls in to 9px
+      --                   on its own, so the direction is drawn; the amount
+      --                   is not.  2 is one barely-visible step, 4 reads as
+      --                   a cone.
+      --
+      -- Scanned: the four ids occur as this grid 16 times on the GYM atlas
+      -- and only in VERMILION_GYM -- cells (1/3/5/7/9, 7), the same five
+      -- on rows 9 and 11, and (6,1).  DOJO shares gym.png and places none,
+      -- so the pin is not copied there.  The same four ids form the same
+      -- grid on eight OTHER atlases (the Bike Shop's crates, the overworld
+      -- roofs, the Centers' counters, ...) for 142 more hits; those are id
+      -- collisions between tilesets, and a pin is per tileset id, so they
+      -- are none of this entry's business.
+      can = { 11, 12, 27, 28 },
+      can_cap = 9,
+      can_base = 4,
+      can_height = 9,
+      can_well = 5,
+      can_taper = 4,
+      heights = { can = 9 },
+      -- The statues and Celadon's three little trees ($40/$41 canopy over
+      -- $50/$51 trunk).  A trunk is not round, so the tree cannot be a
+      -- ball like the shrubs beside it -- it takes the thin standee pool
+      -- every interior plant takes, which is also a pool apart from the
+      -- cylinders it touches.
+      prop = { 2, 56, 18, 19,
                64, 65, 80, 81 },
       -- The Hall of Fame's recording machine, the one piece of real
       -- furniture in the tileset.  It is drawn 32px wide and THREE tile
@@ -579,6 +1129,12 @@ return {
       -- auto-extracting into standing prisms, and the ball/Pokedex
       -- sprites ride the table's authored height.
       table = { 41, 42, 57, 59, 78, 79 },
+      -- These tables are drawn 6px tall (3px slab edge over 3px base --
+      -- see the lab_table entry under `buildings`), not the default
+      -- table's 12: the override keeps the volume-built north tables
+      -- and the band-built starter table one height, and stands the
+      -- ball/Pokedex sprites exactly on the top face of both.
+      heights = { table = 6 },
     },
 
     -- Red's room and the Copycat's room (one tileset).  The detector reads
@@ -620,6 +1176,11 @@ return {
     -- the floor above).  Bookcases, dining table with its flower pot,
     -- stools, the TV on the floor, and the staircase up.
     REDS_HOUSE_1 = {
+      -- the `house_stool` template below stands 5 voxels and the
+      -- `reds_house_table` model 6 (both the drawn elevation): whoever
+      -- sits on a stool cell and whatever object sprite stands on the
+      -- table rides these heights, not the 8/12px class defaults
+      heights = { stool = 5, table = 6 },
       wall = { 0, 36, 37, 52, 53 },
       stool = { 2, 3, 18, 19 },
       -- the dining table (38-44/58-60); its top row also caps the
@@ -647,6 +1208,12 @@ return {
     -- wall-height volumes and towers the table, so every object is
     -- pinned to the shape it depicts.
     HOUSE = {
+      -- the `house_stool` template below stands 5 voxels and the
+      -- `house_table` model 6 (both the drawn elevation): whoever sits
+      -- on a stool cell -- Daisy at her table -- and whatever object
+      -- sprite stands on a table cell rides these heights, not the
+      -- 8/12px class defaults
+      heights = { stool = 5, table = 6 },
       -- the wall band stays one 16px face: blank courses, the window,
       -- the framed picture, and the schoolhouse blackboard (72-75/88-91)
       wall = { 0, 36, 45, 46, 52, 61, 62, 72, 73, 75, 88, 89, 90, 91 },
@@ -685,33 +1252,73 @@ return {
       -- look-only), the pokeball poster (2/3/18/19), and the pillars
       -- (16/41) with their bases (4/5/20/21; 20 is the $14 water-fallback
       -- trap and would recess into a pond lip).  The healing machines'
-      -- bodies (72/76/77 console face, 6/22 button panel, 73 light edge,
-      -- 7/13 shadowed edge) are ALSO wall: drawn 16px tall against the
-      -- band, so wall height is their drawn height and they read as
-      -- consoles jutting from it; the near-black screen tiles must be
-      -- pinned or the void rule flattens them, and 72 is the $48
-      -- water-fallback trap
-      wall = { 2, 3, 4, 5, 6, 7, 13, 16, 18, 19, 20, 21, 22, 40, 41,
-               72, 73, 76, 77, 92, 93, 94, 95 },
+      -- console face (76/77) and button panel (6/22) are ALSO wall:
+      -- drawn 16px tall against the band, so wall height is their drawn
+      -- height and they read as equipment jutting from it.  (The
+      -- `center_heal_machine_w`/`_e` templates below claim the full
+      -- 4x4 machine grids at every placement and model the console
+      -- properly; these pins are the degradation path when the profile
+      -- is absent.)  The near-black screen tiles must be pinned or the
+      -- void rule flattens them.  What is NOT wall is the machines'
+      -- two flanks -- see `prop` below.
+      wall = { 2, 3, 4, 5, 6, 16, 18, 19, 20, 21, 22, 40, 41,
+               76, 77, 92, 93, 94, 95 },
       -- the counters, half a cell high: top band (8) with the nurse's
       -- tray (10), front face (24/25, the game's counterTiles), left end
       -- cap (56) and the Cable Club's light sections (90/91).  8px is
       -- one clean band, so the drawn front panel stands up and the
       -- counter top stays on top; at 12 they read as wall stubs
       counter = { 8, 10, 24, 25, 56, 90, 91,
-                  -- and the lounge couch with the man sitting on it.
-                  -- Same half-cell box: its bottom row (42/43, the front
-                  -- base) stands up as the couch's front, and the three
-                  -- rows above it -- cushion (38/39) and the man
-                  -- (36/37 head, 52/53 face) -- ride the top face in
+                  -- and the lounge couch's SEAT column with the man
+                  -- sitting on it.  Same half-cell box: its bottom row
+                  -- (43, the front base) stands up as the couch's
+                  -- front, and the rows above it -- cushion (39) and
+                  -- the man (37 head, 53 face) -- ride the top face in
                   -- drawn order, each exactly once.  See the note below
                   -- on why he cannot be stood upright.
-                  36, 37, 38, 39, 42, 43, 52, 53 },
+                  37, 39, 43, 53 },
+      -- The couch's WEST tile column: the drawing's left strip is the
+      -- couch's back and arm running north-south (the seat's cushions
+      -- and seams fill the east column), so it rises over the 8px seat
+      -- the way a couch back does instead of lying flush in the same
+      -- box.  Per-tile granularity puts the drawn ~6px strip plus a
+      -- 2px sliver of cushion on the raised band -- invisible at tile
+      -- scale, and the alternative is no backrest at all.  The figure
+      -- anchor scans for the tallest authored UPRIGHT under the man
+      -- (see Structures.buildFigure), so he keeps sitting at seat
+      -- height beside it.
+      backrest = { 36, 38, 42, 52 },
       -- standing per-pixel props, black-outline segmented: the healing
       -- machines' screen tops (58/59/74/75, drawn above the pinned
       -- bodies so they stand ON them) and the PC (66/70/82/86), which
       -- stands on its pinned desk
       billboard = { 58, 59, 66, 70, 74, 75, 82, 86 },
+      -- The healing machines' two FLANKS, which are not the machine and
+      -- not the wall: thin equipment standing on the floor beside the
+      -- console, drawn against a plain light-grey ground with no floor
+      -- checker in it.  `wall` boxed each of them into a solid 16px
+      -- half-cell wearing its drawing in relief -- the billboard failure,
+      -- one tile wide.
+      --   72   the west flank of both machines, and 73 its mirror on the
+      --        east machine: a pair of PIPES leaving the console and
+      --        bending down into the floor in an L, the 8px motif drawn
+      --        once per pipe.  Round and thin, so the THIN pool's 5px
+      --        slab, per-pixel, is the whole of them; a box is a wall
+      --        stub with pipework printed on it.
+      --   7/13 the west machine's east flank: a KEYBOARD, one 16px panel
+      --        over two tiles (keys, and the wide bar down its right).
+      --        Same thin standee; the drawn panel IS its thickness.
+      -- All four ids are used at these flanks and nowhere else in the
+      -- game -- 12 maps, the same two cells in each -- so this pin cannot
+      -- reach anything but the machines.  72 is still the $48
+      -- water-fallback trap and still has to carry SOME pin; it just
+      -- wanted the thin one, not the wall.  (The machine templates now
+      -- claim the flank tiles too and model the hoses and keyboard as
+      -- attached 3D equipment; these standee pins are the degradation
+      -- path when the profile is absent.)
+      prop = { 7, 13, 72, 73,
+               -- ...and the potted plants -- see THE POTTED PLANTS below
+               32, 33, 34, 35, 48, 49, 50, 51 },
       -- The man on the couch, cut out by hand and stood up (see `figures`
       -- below).  Nothing automatic reaches him.  A class pin resolves a
       -- whole 8x8 tile and he SHARES his tiles with the couch, so pinning
@@ -725,34 +1332,35 @@ return {
       -- sofa he is painted into, so that is what `figures` carries.
       -- the PC's desk body, which the PC stands on
       table = { 9, 88 },
-      -- the potted plants: bush (32/33/48/49) over pot (34/35/50/51,
-      -- 50 is the $32 water-fallback trap).  Standing per-pixel
-      -- billboards in the THIN pool, like every other interior plant --
-      -- and a pool apart from the sofa, which touches the corner pair
-      -- and must stay a separate object.  The bush's light checker
-      -- highlights share the floor's shades, so the mask drains some of
-      -- them; the standee reads darker than the flat art, which is the
-      -- accepted trade for a real plant silhouette
-      prop = { 32, 33, 34, 35, 48, 49, 50, 51 },
-      -- ...but the POTS were draining outright.  The plant pair is drawn
-      -- as one 4x4-tile block and the pot's olive base is flush on that
-      -- block's bottom row, so the background vote -- which reads the
-      -- shades touching the drawing's own bounding box -- came back with
-      -- "dark" in it, and every dark pixel in the plant left with the
-      -- floor.  The pots rendered as hollow black frames around one or
-      -- two surviving pixels while the flat art has solid olive bodies.
+      -- THE POTTED PLANTS: a leaf crown (32/33/48/49) over an urn
+      -- (34/35/50/51; 50 is the $32 water-fallback trap), the most
+      -- repeated interior prop in the game -- 78 placements over 13 maps
+      -- across this id and MART (scan: six per Center, two in the
+      -- Celadon hotel's lounge rows, four in the Plateau lobby).
       --
-      -- So name the background outright for these eight tiles: the floor
-      -- IS light and white here, and nothing else is.  That restores 152
-      -- pixels of the block (55% -> 69% of it kept) and cannot move any
-      -- other prop, which matters -- the same call tileset-wide would pull
-      -- the dark wall band into the healing consoles' screens and strip
-      -- three pixels off the PC, because those two want the opposite
-      -- answer on the very same shades.
-      prop_bg = {
-        { tiles = { 32, 33, 34, 35, 48, 49, 50, 51 },
-          shades = { "light", "white" } },
-      },
+      -- A plant is the THIN pool's textbook case: the drawing is ONE
+      -- organic silhouette -- crown, 3px stem, urn, all 8-connected,
+      -- 350 of the block's 512 pixels -- so it stands as a per-pixel
+      -- cutout 5 voxels deep at its real drawn height, 32px over the
+      -- two stacked cells.  Its lowest drawn row is the block's bottom
+      -- row, so it stands in the pot cell's south band -- drawn low,
+      -- near the front of its blocked plot -- and the crown overhangs
+      -- the stem the way the drawing says, which no box or hull cut to
+      -- cell granularity can do.  Both cells' tiles carry the pin (in
+      -- `prop` above); the pool clusters them into one drawing, and the
+      -- two side-by-side placements (every map pairs or quads them)
+      -- share one cluster whose per-pixel geometry is identical to two
+      -- separate ones.
+      -- The plant drawing has no floor margin to vote from: the urn's
+      -- #555 foot lies flush on the block's bottom edge, so the rim
+      -- vote reads "dark" as background and drains the urn's own body.
+      -- Name the background outright instead: the floor showing
+      -- through the crown's gaps is white+light and nothing else,
+      -- while the crown's own white/light highlights are sealed inside
+      -- its black/#555 outline -- a light+white flood from the ring
+      -- reproduces the extract mask exactly, leaves intact.
+      prop_bg = { { tiles = { 32, 33, 34, 35, 48, 49, 50, 51 },
+                    shades = { "light", "white" } } },
       -- THE MAN ON THE COUCH.  He is drawn INTO the lounge furniture and
       -- spills out of it in BOTH directions, which is why he needs three
       -- tile columns:
@@ -888,6 +1496,21 @@ return {
       -- part of that same work surface now that the machine has been cut
       -- off them as a sprite -- see `figures` below.
       counter = { 8, 14, 15, 16, 24, 25, 30, 31, 41, 56, 89 },
+      -- the same potted plants as POKECENTER above -- MART shares that
+      -- atlas, so this is the identical drawing tile for tile, and
+      -- INDIGO_PLATEAU_LOBBY (the only map on this id that places it)
+      -- puts four of them along the hall.  Across POKECENTER and MART
+      -- all eight of these ids appear exactly 78 times each, which is
+      -- exactly how often the 2x4 plant grid appears: they are never
+      -- anything but this plant, so pinning them by tile cannot catch
+      -- anything else.  Same reading as the POKECENTER entry: one
+      -- organic silhouette in the THIN standee pool, per-pixel, 5
+      -- voxels deep at its drawn 32px height, with the background
+      -- shades named because the urn's foot lies flush on the block's
+      -- bottom edge and votes the drawing's own darks away.
+      prop = { 32, 33, 34, 35, 48, 49, 50, 51 },
+      prop_bg = { { tiles = { 32, 33, 34, 35, 48, 49, 50, 51 },
+                    shades = { "light", "white" } } },
       -- Left to the derived default on purpose: the floor checker and
       -- its shadowed variants (1/11/17/26/27/54) and the exit mat
       -- (12/28) all sit in cells the ROM marks walkable, so the cell
@@ -895,13 +1518,14 @@ return {
       -- interior, used to be left to the volume path here; it is now the
       -- back wall's third band, because a run of four rows has to be
       -- contiguous for the wall to collapse into one box at all.)
-      -- THE CASH REGISTER: a keypad and a curl of receipt paper drawn
-      -- face-on across two tile rows in the middle of the counter's east
-      -- arm.  Like the Center's seated man it is a FIGURE drawn into the
-      -- furniture, so it gets the same treatment -- a flat sprite card
-      -- standing on the counter -- and for the same reason: no class pin
-      -- can separate it from the counter, because the counter draws its
-      -- own edging down columns 0 and 15 of the very same tiles.
+      -- THE CASH REGISTER: a till drawn across two tile rows in the middle
+      -- of the counter's east arm, and the same drawing in all nine maps
+      -- on this id (eight Marts plus the Indigo Plateau lobby), always at
+      -- cell (1,5).  Like the Center's seated man it is drawn INTO the
+      -- furniture, so it is cut out by the same authored mask, and for the
+      -- same reason: no class pin can separate it from the counter,
+      -- because the counter draws its own edging down columns 0 and 15 of
+      -- the very same tiles.
       --
       -- That edging is what defeated every automatic reading. Black
       -- always survives the shade flood, so the standee pools extruded
@@ -913,13 +1537,70 @@ return {
       -- to the top right, and the counter keeps its edging and its light
       -- work surface.
       --
+      -- But it is a MACHINE, not a person, so unlike the seated man it
+      -- carries a `depth` and stands as a solid rather than a sprite
+      -- card.  A flat card of a till is exactly the billboard the standee
+      -- pools exist to avoid -- it read as a decal on the counter, and
+      -- turned edge-on with the camera.
+      --
+      -- AND IT IS NOT A BOX.  The 16x16 packs two facings, and the black
+      -- linework says which is which: the keypad has its OWN complete
+      -- border (cols 2-8, rows 4-11) sealed inside the outer silhouette,
+      -- and what surrounds it is an L --
+      --
+      --     cols 2-----8 9--12
+      --     +-----------+-----+  row 4
+      --     |  keypad   | arm |    the L's upright arm: the printer and
+      --     +-----------+-----+  row 11    display the paper feeds out of
+      --     |   base / drawer  |  rows 12-15: the L's foot, drawn face-on
+      --     +------------------+
+      --
+      -- So the keypad is NOT a face.  It is the machine's DECK seen from
+      -- ABOVE -- the keys lie on it -- and `flat` lays it horizontal in
+      -- the notch of the L, at the height the base band leaves it and
+      -- with drawn row = depth row 1:1.  Extruding it instead stood that
+      -- surface on end and painted the keys up the front of a plain box:
+      -- the extruded-picture failure, and what the first pass shipped.
+      --
+      -- Everything else falls out of the drawing: the base band is 4 rows,
+      -- so the deck stands 4 above the counter; the arm is 8, so it rises
+      -- 8 above the deck; the paper reaches 4 more.
+      --
+      -- TWO AUTHORED NUMBERS.
+      --
+      -- `depth` 12, three quarters of the cell.  The keypad's own eight
+      -- drawn rows measure 8, and at 8 the machine read thin on the
+      -- counter, so the body runs half again deeper and the deck STRETCHES
+      -- over it -- 8 rows into 12 voxels, centre-sampled, so every second
+      -- row doubles and the keypad still covers the whole surface.  This
+      -- is the one place in the model where a texel is not 1:1 with a
+      -- drawn pixel; laying the panel 1:1 instead leaves a strip of the
+      -- base band's top showing behind the keys.  The model is anchored at
+      -- the counter cell's FRONT and grows north into the bare top behind
+      -- it, so deepening it can never push the till toward the aisle: at
+      -- 12 it still stops 4 voxels short of the cell's north edge.  This
+      -- is the number to move if it wants more or less presence.
+      --
+      -- `thin`: 4 rows at 2.  Row 4 is the machine's
+      -- own drawn top edge -- a black rule from column 3 to column 9 -- so
+      -- everything above it is the receipt strip, and paper is 2 voxels
+      -- like every other `cutout` here.  Centred in the body's band, so
+      -- the strip leaves the arm's top face by a slot in the middle of it
+      -- rather than flush with its front.  At the body's 8 the curl came
+      -- out as a chunky wedge on the corner and stopped reading as paper.
+      --
       -- `under` is 16/41 twice -- the plain work surface, which already
       -- carries the west edging (black over white) and the east (dark
       -- over black), so the counter closes up behind the machine with no
-      -- synthesis at all.
+      -- synthesis at all.  The `counter` pin on 14/15/30/31 stays: the
+      -- box under the till is still the counter, and the machine stands
+      -- on its 8px top plane.
       figures = {
         {
           w = 2,
+          depth = 12,
+          thin = { rows = 4, depth = 2 },
+          flat = { x = { 2, 8 }, rows = { 4, 11 } },
           tiles = { 14, 15,
                     30, 31 },
           under = { 16, 41,
@@ -1628,6 +2309,11 @@ return {
       -- footing.
       bookcase = { 7, 8, 9, 10, 23, 24, 25, 26, 39, 40, 41, 42,
                    55, 56, 57, 58 },
+      -- ...and the drums are the reason this tileset turns the shelf
+      -- relief OFF: the collapse here is borrowed for a MACHINE, whose
+      -- light regions are the barrel's own lit face and not panes
+      -- behind a frame.  Sinking them would dent the drum.
+      bookcase_relief = false,
       -- The big OCTAGONAL boardroom table -- the Fan Club's and Silph
       -- 11F's, the same drawing in both -- half a cell high, and half a
       -- cell on purpose.  A `counter` is ONE band: exactly the drawing's
@@ -1692,12 +2378,30 @@ return {
       -- drawn into the WALKABLE cell in front; 43/44 belong to the stool
       -- there, not to the desk.
       table = { 11, 12, 13, 14, 27, 28, 29, 30 },
+      -- and those eight ids are the ONLY `table` in this tileset, so the
+      -- height override is this desk's alone: 8px, the height its apron
+      -- is drawn and the plane the `bills_desk` template stands its top
+      -- on (see `buildings` below).  The pin is only the degradation
+      -- path here -- the template claims both placements -- but the two
+      -- must not disagree about where the desk's top is.
+      --
+      -- `stool` is 5 for the same reason: that is the drawn elevation of
+      -- BOTH seats in this tileset -- rows 11-15, the seat's front edge
+      -- over its legs -- and the height the `club_stool` template stands
+      -- them.  Bill's chair and the Fan Club's are different drawings
+      -- above the seat but share tiles 59/60 below it, so they are drawn
+      -- at the same height pixel for pixel; the class default of 8 was
+      -- three voxels over both.  Every one of these cells is WALKABLE,
+      -- so this is also where a character sitting on one ends up.
+      heights = { table = 8, stool = 5 },
       -- the seats: Bill's desk stool (43/44 over 59/60) and the Fan
       -- Club's four members' chairs (61/62 over 59/60), a whole cell
       -- each.  All of them sit in WALKABLE cells, so they were flat
-      -- floor until pinned; the 8px standee pool puts them at seat
-      -- height, which is also where a character standing on the cell
-      -- ends up.
+      -- floor until pinned; the standee pool puts them at seat height,
+      -- which is also where a character standing on the cell ends up.
+      -- The Fan Club's four are modelled in full by `club_stool` below
+      -- and these pins are their degradation path; Bill's chair stays a
+      -- standee, stood up as a part of `bills_desk`.
       stool = { 43, 44, 59, 60, 61, 62 },
       -- flat, and pinned flat on purpose.  31 is the rooms' floor tile
       -- and needs no pin for its 980 walkable placements -- but the
@@ -1745,11 +2449,13 @@ return {
       -- rounded foot, 53, stands one row lower on the floor and is
       -- walkable, so it stays flat ground in front of the band).
       -- Drawn INTO the band and therefore wall as well: the two
-      -- bicycles hung on the Bike Shop's wall (1/2/3 over 17/18/19,
+      -- bicycles against the Bike Shop's wall (1/2/3 over 17/18/19,
       -- exactly two tile rows = exactly the band's height), the Cable
       -- Club's link poster (48/49/50/51 -- 50 is $32, the shore trap
       -- that had it recessing to -2), and the Trade Center's pair of
       -- lit notice boards (63/68/68/69 over 66/67/67/70).
+      -- The bicycles keep their `wall` pin as the degradation path, but
+      -- `mounted` below lifts them off the panel -- see there.
       wall = { 1, 2, 3, 6, 17, 18, 19, 48, 49, 50, 51, 52, 63, 66, 67,
                68, 69, 70 },
       -- Counters, half a cell high -- the house rule for anything you
@@ -1777,28 +2483,114 @@ return {
       -- character standing on one sits on it.
       stool = { 38, 39, 42, 43 },
       -- The showroom bicycles -- six of them standing on the Bike Shop
-      -- floor, in two columns, each drawn 3 tiles by 2 side-on.  The
-      -- THIN standee pool, not `bookcase`: a bike is nearly all air
-      -- (two wheel rings and a frame), and collapsing a rack of them
-      -- onto a one-cell-deep box at full height would trade six
-      -- bicycles for one blank 32px panel wearing a bicycle print.  As
-      -- cutouts they segment cleanly -- the drawing has floor margin on
-      -- three sides and its own black outline seals the wheels -- and
-      -- the standee builder's connected-component split gives each bike
-      -- its own feet in its own cell even where a lower bike's
-      -- handlebar stem touches the wheel of the one drawn above it.
+      -- floor, in two columns, each drawn 3 tiles by 2 side-on.  A THIN
+      -- standee pool, not `bookcase`: a bike is nearly all air (two
+      -- wheel rings and a frame), and collapsing a rack of them onto a
+      -- one-cell-deep box at full height would trade six bicycles for
+      -- one blank 32px panel wearing a bicycle print.  As cutouts they
+      -- segment cleanly -- the drawing has floor margin on three sides
+      -- and its own black outline seals the wheels -- and the standee
+      -- builder's connected-component split gives each bike its own
+      -- feet in its own cell even where a lower bike's handlebar stem
+      -- touches the wheel of the one drawn above it.
       -- 11/12/14 the saddle and bar row, 27/28/9 the frame and wheels.
-      prop = { 9, 11, 12, 14, 27, 28 },
-      -- The crate and the standing pump beside the shop's south wall
+      --
+      -- Their own pool at TWO voxels rather than `prop`'s five, which is
+      -- the whole reason `bike` exists.  The segmentation was never the
+      -- problem -- the mask the detector cuts is a clean bicycle, wheels,
+      -- forks, handlebars and all.  Depth was: every stroke of a line
+      -- drawing extruded five voxels closes the gap to its neighbour with
+      -- its own side faces, so off-axis (which is every camera rung but
+      -- flat) the air inside the frame filled in and the showroom's six
+      -- bicycles came out as one dark lump against the wall.  At two the
+      -- negative space survives and they read as bicycles again.
+      bike = { 9, 11, 12, 14, 27, 28 },
+      -- The toolbox and the standing pump beside the shop's south wall
       -- (29/13 over 21/22), twice.  A separate pool from the bicycles
-      -- on purpose, and the thicker one: a crate is a deliberate object
-      -- with a body, where a bike is a silhouette.
+      -- on purpose, and the thicker one: a toolbox is a deliberate
+      -- object with a body, where a bike is a silhouette.
+      --
+      -- Kept as the DEGRADATION PATH only.  The `bike_shop_toolbox`
+      -- building template (see `buildings.CLUB`) claims these cells and
+      -- models the drawing properly -- a per-pixel standee is the wrong
+      -- primitive for a box, and 10 voxels of it turned every black
+      -- outline pixel into a 10-deep bar.  Buildings runs before the
+      -- standee scan, so where the template stamps, this pin never
+      -- fires; without a profile it is still better than the volume
+      -- path.
       billboard = { 13, 21, 22, 29 },
       -- The Bike Shop floor's second checker phase.  It is NOT in the
       -- tileset's walkable list, so the cells it floors resolve by rule
       -- 4 and it rose as a wall stub -- or, worse, got swept into the
       -- bicycle beside it and dragged to 8px.  It is floor; it is flat.
       ground = { 30 },
+      -- THE TWO BICYCLES AGAINST THE SHOWROOM'S NORTH WALL.  Same object
+      -- as the six on the floor -- 24x16 of bicycle seen side-on, wheels
+      -- on the floor line -- but drawn INTO the wall band instead of onto
+      -- the floor, which is a different problem entirely:
+      --
+      --   a class pin resolves a whole 8x8 tile, so `wall` (what these
+      --   carried) paints the bicycle flat on the panel: a green wall
+      --   with a bicycle printed on it, which is what the shop looked
+      --   like;
+      --   and nothing automatic can cut it out either.  The panel behind
+      --   it is tile 6's stripe -- a #aaa field ruled with #555 every
+      --   four rows -- and #555 is a flood BOUNDARY, so a silhouette
+      --   flood comes back with three full-width wall stripes welded
+      --   across the bike (rows 3, 7 and 15 of the drawing).  Naming the
+      --   background shades instead (prop_bg) cannot work either: the
+      --   bicycle's own basket is drawn in the very #aaa and white the
+      --   wall field uses.
+      --
+      -- So the silhouette is authored -- but MEASURED, not drawn by hand.
+      -- 6 is the plain panel these three tile columns are painted over,
+      -- and it is perfectly regular, so compositing 6 across the same 3x2
+      -- grid and flooding the background in through the pixels that still
+      -- MATCH it separates bicycle from wall exactly: 247 pixels, one
+      -- connected component, no stripe left on it and no hole in it.
+      -- That is also why `under` is six 6s -- the wall wears the panel
+      -- the artist drew everywhere else along the same run.
+      --
+      -- `depth` 2 for the same reason the `bike` pool above is 2, and
+      -- because a family shares a silhouette: these are the showroom's
+      -- bicycles, leaning on the wall rather than standing in the room.
+      -- The slab juts 2 voxels SOUTH of the band, so they stand in front
+      -- of the wall and overhang the walkable cell a little -- which is
+      -- what a bicycle leaning on a wall does.  Collision is untouched.
+      --
+      -- Only BIKE_SHOP places this grid on the club atlas, at tile (1,0)
+      -- and (6,0).  The same six tile ids DO pair up in gate.png (both
+      -- Route gate upper floors and all four Safari rest houses), but
+      -- that is a different image and `mounted` is keyed per tileset, so
+      -- the pattern cannot reach them.
+      mounted = {
+        {
+          w = 3,
+          depth = 2,
+          tiles = {  1,  2,  3,
+                    17, 18, 19 },
+          under = {  6,  6,  6,
+                     6,  6,  6 },
+          pixels = {
+            ".........XXX............",
+            "..XXXXX.XXXX............",
+            "..XXXXXXXXXX............",
+            "..XXXXXXXXXX............",
+            "..XXXXXXXXXXXXX.........",
+            "..XXXXXXXXXXXXXX........",
+            "..XXXXXXXXXXXXXX........",
+            "..XXXXXXXXXXXXXX..XXX...",
+            ".XXXXXXXXXXXXXXXXXXXXXX.",
+            "XXXXXXXXX..XXXXXXXXXXXXX",
+            "XXXXXXXXX.XXXXXXXXXXXXXX",
+            "XXXXXXXXX.XXXXXXXXXXXXXX",
+            "XXXXXXXXX.XXXXXXXXXXXXXX",
+            "XXXXXXXXX..XXX..XXXXXXXX",
+            ".XXXXXXX....X...XXXXXXX.",
+            "...XXX.....XXX....XXX...",
+          },
+        },
+      },
       -- Left to the derived default on purpose:
       --   $0F $1F    the main floor checker -> walkable, ground
       --   $0A $1A    the dark slab under the Bike Shop's exit warp -> a
@@ -1900,11 +2692,34 @@ return {
       -- towered to 24.
       bookcase = { 43, 54 },
       -- The galley barrels -- three down the kitchen's east wall, one in
-      -- the captain's room, one in each house.  A per-pixel cutout in
-      -- the THIN pool, the treatment Lt. Surge's trash cans get: 72/73
-      -- the lid, 88/89 the banded body.  72 is $48, the shore-set trap
-      -- that had each barrel resolving to water at -2.
-      prop = { 72, 73, 88, 89 },
+      -- the captain's room, one in each house.  72/73 the mouth, 88/89
+      -- the banded body.  72 is $48, the shore-set trap that had each
+      -- barrel resolving to water at -2.
+      --
+      -- This is Lt. Surge's trash can REDRAWN PIXEL FOR PIXEL on the ship
+      -- atlas: lay the two masks side by side and the only difference is
+      -- that the gym's floor stripes cross the gym copy's background,
+      -- which the flood keeps and this one has no need of.  So it takes
+      -- the same treatment and the same numbers as GYM's can -- see there
+      -- for why the mouth and base ellipses are measured and the height,
+      -- well and taper are authored.
+      --
+      -- Scanned: six placements on the SHIP atlas and no others --
+      -- SS_ANNE_KITCHEN (13,5), (13,7) and (13,9) down the east wall,
+      -- SS_ANNE_CAPTAINS_ROOM (4,1), and one each in CERULEAN_BADGE_HOUSE
+      -- and FUCHSIA_GOOD_ROD_HOUSE at (7,7), both of which are ship
+      -- interiors reusing the tileset.  Twenty-one more hits are id
+      -- collisions on other atlases and no business of this entry; the one
+      -- worth naming is VERMILION_DOCK, because SHIP_PORT is a near-twin
+      -- of this image -- but its $48/$49/$58/$59 are a hull panel, not a
+      -- barrel (diffed pixel for pixel), so the pin is NOT copied there.
+      can = { 72, 73, 88, 89 },
+      can_cap = 9,
+      can_base = 4,
+      can_height = 9,
+      can_well = 5,
+      can_taper = 4,
+      heights = { can = 9 },
       -- The stairs, both flights, in every map that has them (1F, 2F,
       -- 3F, B1F and the captain's room).  Same two drawings the whole
       -- game uses, and the warp table says which is which: 41/42/57/58
@@ -2409,6 +3224,11 @@ return {
       -- PLATEAU, so the wall reads as set INTO the terrace instead of
       -- standing in front of a trench of synthesized ground.
       bookcase_backfill = "above",
+      -- and no shelf relief: what the collapse carries here is MASONRY,
+      -- whose courses are the wall itself rather than panes set behind
+      -- a frame.  Sinking them cut a stepped bevel into the League's
+      -- walls and the pilasters (shot before it was turned off).
+      bookcase_relief = false,
       -- ONE course, and it must stay one: $15/$16 + $05/$06 + $30/$31 is
       -- the pilaster -- cap, shaft, plaque base -- and $15/$16 over $30/$31
       -- IS the statue's plinth, the artist having drawn the same stone
@@ -2541,6 +3361,759 @@ return {
   -- the flood itself, which every model here depends on, for one scenery
   -- placement.
   buildings = {
+    -- Gen 2's Johto set. Every town building in Johto is drawn from three
+    -- courses -- a ridge cap, a striped roof band, an eave -- over a brick
+    -- facade, and the whole catalogue is two footprints: the 4x4-cell
+    -- civic block (Center, Mart, gym, the larger houses) and the 4x2-cell
+    -- cottage. Both are here because the volume detector cannot read
+    -- either one.
+    --
+    -- What defeats it is Johto's facades REPEATING their wall course. The
+    -- detector reads a column's drawn unit off its tile sequence, and its
+    -- trim-foot rule -- "when the two rows above the front are identical
+    -- the column is a repeat wearing a trim" -- was written for cliff
+    -- plateaus. The civic block's column is 10/0D/0D/0A/1A/1A/1A/01: the
+    -- two rows above its base course ARE identical, so every Center and
+    -- Mart in Johto read as a 16px repeat, which also means flat-topped
+    -- (a repeat never roofs). That is the flat-lidded box with the roof
+    -- printed on it -- eight tile rows of drawing standing two rows high.
+    --
+    -- Roof bands, read off the art: row 0 the black ridge line, row 1 its
+    -- white highlight, then the vertical stripe field (period 1 down the
+    -- roof -- the stripes run WITH the slope, so any row of the band
+    -- serves), closing on a four-row fascia of black/shade/black/shade.
+    -- So `roofBack` 2 lays the cap along the north rim, `roofFront` 4 the
+    -- fascia along the south, and the middle cycles the stripe field.
+    TilesetJohto = {
+      -- OLIVINE LIGHTHOUSE.  Four cells wide and fourteen tall -- twenty-
+      -- three tile rows of nothing but brick between the gallery and the
+      -- door, which is exactly what defeats the volume path: its trim-foot
+      -- rule reads the repeating $1A/$07/$1C course as a 16px pattern and
+      -- lays the whole tower flat on the ground.  Stated as a template the
+      -- shaft is facade, so all twenty-three rows become elevation and the
+      -- lighthouse stands up as the tallest thing in Johto.
+      --
+      -- The cap is the lantern gallery, not a roof: rows 0-2 are the glass
+      -- seen from above (the hatched field) and row 3 the deck's dark
+      -- fascia -- hence `roofFront` 8 rather than the 4 every gabled Johto
+      -- roof uses, and a cycle that stops at 23 where the hatching does.
+      -- It must come FIRST: the shaft's plain courses are a tile-for-tile
+      -- match for `johto_block_brick`, which would otherwise claim slices
+      -- of the tower and leave nothing for this grid to sit on.
+      {
+        id = "johto_lighthouse",
+        tiles = {
+          { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x37, 0x38, 0x07, 0x07, 0x07, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- CRYSTAL variant of johto_lighthouse.  Templates match on an EXACT tile
+      -- grid, and Crystal re-draws part of this building, so Gold's grid
+      -- misses here and the volume path takes over -- which is the
+      -- stepped, glitched mass instead of a building.
+      -- Crystal swaps four courses of the shaft ($1A/$07/$26) for a
+      -- decorated band ($60-$73) just under the gallery.
+      {
+        id = "johto_lighthouse_crystal",
+        tiles = {
+          { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x60, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x62 },
+          { 0x63, 0x64, 0x73, 0x65, 0x66, 0x73, 0x67, 0x68 },
+          { 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6B, 0x6E, 0x6F },
+          { 0x70, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x72 },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x37, 0x38, 0x07, 0x07, 0x07, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- THE PAGODAS.  Sprout Tower (VIOLET_CITY blocks 11-12, rows 0-2) and
+      -- the Burned Tower (ECRUTEAK_CITY blocks 2-3, rows 0-2) are the SAME
+      -- drawing, tile for tile: a tiled cap over two eaved tiers over a
+      -- doorway, ten tile rows of it.  Six of those rows are the two tiers,
+      -- and the tiers are identical to each other -- which is precisely
+      -- what the volume path's trim-foot rule calls a repeat, so both
+      -- towers lay flat on the grass like the lighthouse did.  Stated here
+      -- the six rows below the cap are all facade, so the tower stands
+      -- five cells tall.  The `$3B`/`$3D` at the ends of the last two rows
+      -- are the hedge the doorway is cut into; they are in the grid
+      -- because they are in the drawing's rectangle, and both towers are
+      -- planted in the same hedge.
+      {
+        id = "johto_pagoda",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x3B, 0x1A, 0x27, 0x28, 0x1B, 0x1B, 0x1C, 0x3D },
+          { 0x3B, 0x01, 0x29, 0x2A, 0x02, 0x02, 0x16, 0x3D },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- CRYSTAL variant of johto_pagoda.  Templates match on an EXACT tile
+      -- grid, and Crystal re-draws part of this building, so Gold's grid
+      -- misses here and the volume path takes over -- which is the
+      -- stepped, glitched mass instead of a building.
+      -- Crystal re-draws SPROUT TOWER's wall courses with the $74-$79
+      -- lattice in place of Gold's plain $1B/$02.
+      {
+        id = "johto_pagoda_crystal",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x3B, 0x1A, 0x27, 0x28, 0x75, 0x76, 0x1C, 0x3D },
+          { 0x3B, 0x77, 0x29, 0x2A, 0x78, 0x78, 0x79, 0x3D },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- THE BELL TOWER, the same pagoda drawing run to SEVEN tiers instead
+      -- of two -- ECRUTEAK_CITY cell (36,0), the tower the city is built
+      -- around.  It is so tall that its cap is off the top of the map, so
+      -- the ten-row `johto_pagoda` grid above never matched: the four roof
+      -- rows it wants are at cell rows -2 and -1, where the border block
+      -- is.  Fourteen rows of identical tier is the volume path's repeat
+      -- again, so the whole tower lay flat.
+      --
+      -- Same fix as `johto_block_plain_clipped` at the bottom of this
+      -- list: `topRows` supplies the cap from the atlas, the matcher
+      -- places on the fourteen tier rows plus the doorway that ARE on the
+      -- grid, and the model is built from the complete drawing.  It cannot
+      -- collide with `johto_pagoda` in either direction -- that grid leads
+      -- with a roof this one does not have on the map, and this grid is
+      -- longer than that whole template.
+      {
+        id = "johto_pagoda_tall",
+        topRows = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+        },
+        tiles = {
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x3B, 0x1A, 0x27, 0x28, 0x1B, 0x1B, 0x1C, 0x3D },
+          { 0x3B, 0x01, 0x29, 0x2A, 0x02, 0x02, 0x16, 0x3D },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- CRYSTAL variant of johto_pagoda_tall.  Templates match on an EXACT tile
+      -- grid, and Crystal re-draws part of this building, so Gold's grid
+      -- misses here and the volume path takes over -- which is the
+      -- stepped, glitched mass instead of a building.
+      -- TIN TOWER, the same lattice, on every one of its wall courses.
+      {
+        id = "johto_pagoda_tall_crystal",
+        tiles = {
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x22, 0x41, 0x74, 0x75, 0x75, 0x76, 0x44, 0x25 },
+          { 0x50, 0x51, 0x52, 0x52, 0x52, 0x52, 0x54, 0x55 },
+          { 0x3B, 0x1A, 0x27, 0x28, 0x75, 0x76, 0x1C, 0x3D },
+          { 0x3B, 0x77, 0x29, 0x2A, 0x78, 0x78, 0x79, 0x3D },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- ECRUTEAK'S SIX-CELL HALL, the wide one with the brown top --
+      -- ECRUTEAK_CITY cell (16,9), the building beside the theatre.  It
+      -- is the roofed-wall drawing below stretched to six cells with a
+      -- doorway cut in the middle, and it is FIRST of the $53 family for
+      -- the usual reason: placement is first-claim-wins and the four-cell
+      -- templates that follow would otherwise take bites out of its
+      -- facade and stand second buildings through it.
+      {
+        id = "johto_ecruteak_hall",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x27, 0x28, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x29, 0x2A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- CRYSTAL variant of johto_ecruteak_hall.  Templates match on an EXACT tile
+      -- grid, and Crystal re-draws part of this building, so Gold's grid
+      -- misses here and the volume path takes over -- which is the
+      -- stepped, glitched mass instead of a building.
+      -- Crystal's lattice wall course.
+      {
+        id = "johto_ecruteak_hall_crystal",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x74, 0x75, 0x76, 0x27, 0x28, 0x74, 0x75, 0x75, 0x75, 0x76, 0x1C },
+          { 0x77, 0x78, 0x78, 0x78, 0x29, 0x2A, 0x78, 0x78, 0x78, 0x78, 0x78, 0x79 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- ECRUTEAK'S ROOFED WALL.  The compounds around the Burned Tower and
+      -- the Tin Tower are enclosed by a tiled wall, drawn 8x6 tiles (4x3
+      -- cells) and repeated all round the city -- ECRUTEAK_CITY blocks
+      -- (6,7)-(7,8) is one of them.  It wears the lighthouse's gallery caps
+      -- ($31/$41/$51 west, $34/$44/$54 east) over a $53 tile field and a
+      -- $52 fascia, and NOT the $10/$11/$0D/$0E ridge every other Johto
+      -- roof uses -- which is exactly why no template reached it and the
+      -- volume path laid all of them flat on the grass as brown decking.
+      -- Four tile rows of roof over two of wall, so the same band table as
+      -- the mart with the wall course shortened.
+      {
+        id = "johto_ecruteak_wall",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- CRYSTAL variant of johto_ecruteak_wall.  Templates match on an EXACT tile
+      -- grid, and Crystal re-draws part of this building, so Gold's grid
+      -- misses here and the volume path takes over -- which is the
+      -- stepped, glitched mass instead of a building.
+      -- Crystal's lattice wall course.
+      {
+        id = "johto_ecruteak_wall_crystal",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x74, 0x75, 0x76, 0x75, 0x75, 0x76, 0x1C },
+          { 0x77, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x79 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- THE PAIR WEST OF THE MART AND THE CENTRE -- ECRUTEAK_CITY cells
+      -- (22,19) and (12,25).  Same drawing as the wall above with a
+      -- doorway ($27/$28 over $29/$2A) cut into its facade, which is the
+      -- one difference, and the one that stopped the wall's grid matching:
+      -- two buildings in the middle of town went on lying flat as brown
+      -- decking while the compound walls around them stood up.
+      {
+        id = "johto_ecruteak_house",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x1B, 0x27, 0x28, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x29, 0x2A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- CRYSTAL variant of johto_ecruteak_house.  Templates match on an EXACT tile
+      -- grid, and Crystal re-draws part of this building, so Gold's grid
+      -- misses here and the volume path takes over -- which is the
+      -- stepped, glitched mass instead of a building.
+      -- Crystal's lattice wall course.
+      {
+        id = "johto_ecruteak_house_crystal",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x75, 0x27, 0x28, 0x75, 0x75, 0x76, 0x1C },
+          { 0x77, 0x78, 0x29, 0x2A, 0x78, 0x78, 0x78, 0x79 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- THE DANCE THEATRE -- ECRUTEAK_CITY cell (36,24).  Four cells
+      -- square, and it wears the LIGHTHOUSE's hatched gallery cap
+      -- ($36/$48 field between the $31/$41/$51 and $34/$44/$54 verges)
+      -- rather than the $53 tiled field the rest of the city does, so no
+      -- $53 template could reach it and the lighthouse's own grid is
+      -- twenty-eight rows of $07 shaft it does not have.  Doorless on
+      -- this face, a window bay at each end.
+      {
+        id = "johto_ecruteak_gallery_block",
+        tiles = {
+          { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- VIOLET'S LONG HALL: the Ecruteak hall's drawing again, but with
+      -- six courses of tile on the roof instead of four, so the roof is
+      -- half again as deep and the walls sit that much lower.
+      {
+        id = "johto_violet_hall",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x27, 0x28, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x29, 0x2A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 48, roofBack = 2, roofFront = 4, roofCycle = { 2, 43 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- CRYSTAL variant of johto_violet_hall.  Templates match on an EXACT tile
+      -- grid, and Crystal re-draws part of this building, so Gold's grid
+      -- misses here and the volume path takes over -- which is the
+      -- stepped, glitched mass instead of a building.
+      -- Crystal's VIOLET hall is TWO TILE ROWS SHORTER than Gold's --
+      -- four roof courses where Gold has six -- as well as wearing the
+      -- lattice, so its roof band is 32px and the cycle ends at 27.
+      {
+        id = "johto_violet_hall_crystal",
+        tiles = {
+          { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x74, 0x75, 0x76, 0x27, 0x28, 0x74, 0x75, 0x75, 0x75, 0x76, 0x1C },
+          { 0x77, 0x78, 0x78, 0x78, 0x29, 0x2A, 0x78, 0x78, 0x78, 0x78, 0x78, 0x79 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- THE ROUTE GATEHOUSES.  Every gate between two Johto routes is one
+      -- of these two drawings -- the same shell, the same pair of windows
+      -- ($26/$26 either side of the middle), and only the roof differs --
+      -- and neither had a template, so every gate on the map was a flat
+      -- box with its roof painted on the lid.
+      {
+        id = "johto_gate",
+        tiles = {
+          { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+          { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- the same gatehouse under the brick roof, at Olivine
+      {
+        id = "johto_gate_brick",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- the 4x4-cell civic block with MART over its door
+      {
+        id = "johto_mart",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x37, 0x38, 0x18, 0x19, 0x07, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x17, 0x17, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- its twin with the POKe sign
+      {
+        id = "johto_pokecenter",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x37, 0x38, 0x08, 0x09, 0x07, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x17, 0x17, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- the 4x2-cell cottage: the same courses with the stripe band cut
+      -- to one tile row, the ordinary house of every Johto town
+      {
+        id = "johto_house",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- the gym: the civic block stretched to six cells, GYM on the
+      -- lintel ($23/$24) over the door, a window bay at each end
+      {
+        id = "johto_gym",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x23, 0x24, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- the same six-cell hall with a plain lintel: Elm's lab and the
+      -- civic halls that share its drawing
+      {
+        id = "johto_hall",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- the four-cell civic block with a brick front and one window bay
+      {
+        id = "johto_block_brick",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- and its plaster-fronted twin (Olivine's warehouses)
+      {
+        id = "johto_block_plain",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x37, 0x38, 0x07, 0x07, 0x07, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- doorless cottages, the scenery of every town: four, three and two
+      -- cells wide on the same two-course roof
+      {
+        id = "johto_house_4x2",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      {
+        id = "johto_house_3x2",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      {
+        id = "johto_house_2x2",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x12 },
+          { 0x0A, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- ROUTE 29'S NORTH GATE, and the one shape in Johto that no
+      -- template above could ever reach.  It is `johto_block_plain` down
+      -- to the tile, but it stands hard against the map's north edge:
+      -- its four roof rows would be at cell rows -2 and -1, and what is
+      -- actually up there is the border block, a wall of trees.  The
+      -- drawing is CLIPPED BY THE MAP, not continued on the neighbour --
+      -- unlike the Pokemon Tower, whose missing half really is drawn on
+      -- ROUTE_10 -- so there is nothing to claim and nothing to read
+      -- back.  With only the lower four rows on the grid the eight-row
+      -- template never matched, the facade fell to the volume path, and
+      -- the whole gate folded into a wedge with its door painted flat
+      -- across the top.
+      --
+      -- `topRows` supplies the missing roof from the atlas rather than
+      -- from the map, which is exactly what it is for: the matcher still
+      -- places by `tiles` alone, so the four rows it can see, while the
+      -- MODEL is built from the complete eight-row drawing.  The offsets
+      -- line up with no fudge because `topRows` here is precisely
+      -- `roofRows` deep (32px, four rows), so the model's first depth
+      -- slice is `tiles[1]` and the stamp lands where it matched.
+      --
+      -- LAST IN THE LIST ON PURPOSE.  These four rows are the bottom
+      -- half of every `johto_block_plain` in Johto, so on any ordinary
+      -- placement this would match too.  Placement is first-claim-wins
+      -- (see Buildings.build), and the full template is above, so by the
+      -- time this one is tried those cells are already claimed and only
+      -- the roofless gate is left.
+      {
+        id = "johto_block_plain_clipped",
+        topRows = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+        },
+        tiles = {
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+          { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x07, 0x37, 0x38, 0x07, 0x07, 0x07, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- MAHOGANY'S NORTH GATE, the building the Lake of Rage road runs
+      -- past -- MAHOGANY_TOWN cell (8,0).  The brick-fronted twin of the
+      -- gate above and clipped by the map's north edge the same way, so
+      -- the same treatment: `topRows` for the roof it has no room to
+      -- draw, and LAST in the list because these four rows are the bottom
+      -- half of every `johto_block_brick` in Johto.
+      {
+        id = "johto_block_brick_clipped",
+        topRows = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+        },
+        tiles = {
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+    },
+
+    -- ------------------------------------------------------------------
+    -- CRYSTAL'S BATTLE TOWER, on BATTLE_TOWER_OUTSIDE.  It is the only
+    -- building this tileset draws, and nothing described it at all, so the
+    -- whole tower fell to the volume path and came out as a stepped mass.
+    --
+    -- Twenty cells of drawing, five wide and five tall.  Read off the art:
+    -- rows 0-23 are the two wings' flat white roofs seen from above (the
+    -- rounded parapet corners at the outer edges, the lift shaft rising
+    -- through the middle), rows 24-31 the parapet's own fascia -- light
+    -- band, shade, black eave line -- and rows 32-127 six storeys of glass
+    -- curtain wall, one two-row course each.  Rows 128-159 are the
+    -- entrance canopy and its doors, facade like any other ground floor.
+    --
+    -- That is the Olivine lighthouse's shape exactly -- a flat top with a
+    -- deck rather than a gable -- so it takes the lighthouse's numbers:
+    -- roofFront 8 for the full parapet band, not the 4 a gabled Johto roof
+    -- uses, and a cycle stopping at 23 where the roof field does.
+    --
+    -- `seal = "n"` is required.  The lift shaft runs off the TOP EDGE of
+    -- the map, so its topmost row is the shaft's own light stripes rather
+    -- than an outline: seeded from the north border the silhouette flood
+    -- climbs straight in and eats the shaft's shoulders where they meet
+    -- the wings.  Sealed, the ground still floods in from the other three
+    -- sides (it wraps the building on all of them) and the silhouette
+    -- comes out as the tower alone.
+    TilesetBattleTowerOutside = {
+      {
+        id = "battle_tower",
+        seal = "n",
+        tiles = {
+          { 0xA0, 0xA1, 0xA1, 0xA1, 0xA1, 0xA1, 0xA2, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0xA5, 0xA1, 0xA1, 0xA1, 0xA1, 0xA1, 0xA6 },
+          { 0xA7, 0xA8, 0x00, 0x00, 0x00, 0x00, 0xA9, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0xAA, 0x00, 0x00, 0x00, 0x00, 0xAB, 0xAC },
+          { 0x7E, 0x8E, 0xA4, 0xA4, 0xA4, 0xA4, 0xAE, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0xAF, 0xA3, 0xA3, 0xA3, 0xA3, 0x8F, 0x7D },
+          { 0x60, 0x7E, 0xAD, 0xAD, 0xAD, 0xAD, 0xAD, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0xAD, 0xAD, 0xAD, 0xAD, 0xAD, 0x7D, 0x6C },
+          { 0x7E, 0x60, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x6C, 0x7D },
+          { 0x60, 0x7E, 0x70, 0x71, 0x71, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0x70, 0x71, 0x71, 0x71, 0x72, 0x7D, 0x6C },
+          { 0x7E, 0x60, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x6C, 0x7D },
+          { 0x60, 0x7E, 0x70, 0x71, 0x71, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0x70, 0x71, 0x71, 0x71, 0x72, 0x7D, 0x6C },
+          { 0x7E, 0x60, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x6C, 0x7D },
+          { 0x60, 0x7E, 0x70, 0x71, 0x71, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0x70, 0x71, 0x71, 0x71, 0x72, 0x7D, 0x6C },
+          { 0x7E, 0x60, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x6C, 0x7D },
+          { 0x60, 0x7E, 0x70, 0x71, 0x71, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0x70, 0x71, 0x71, 0x71, 0x72, 0x7D, 0x6C },
+          { 0x7E, 0x60, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x6C, 0x7D },
+          { 0x60, 0x7E, 0x70, 0x71, 0x71, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0x70, 0x71, 0x71, 0x71, 0x72, 0x7D, 0x6C },
+          { 0x7E, 0x60, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x63, 0x64, 0x65, 0x66, 0x64, 0x6B, 0x61, 0x6D, 0x6D, 0x6D, 0x62, 0x6C, 0x7D },
+          { 0x60, 0x7E, 0x70, 0x71, 0x71, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x74, 0x7C, 0x70, 0x71, 0x71, 0x71, 0x72, 0x7D, 0x6C },
+          { 0x60, 0x60, 0x61, 0x6D, 0x87, 0x80, 0x00, 0x81, 0x82, 0x83, 0x84, 0x82, 0x85, 0x00, 0x86, 0x88, 0x6D, 0x6F, 0x6C, 0x6C },
+          { 0x9B, 0x60, 0x61, 0x6D, 0x89, 0x90, 0x91, 0x92, 0x92, 0x92, 0x92, 0x92, 0x92, 0x93, 0x94, 0x8A, 0x6E, 0x6F, 0x6C, 0x9F },
+          { 0x06, 0x9B, 0x9C, 0x9D, 0x8B, 0x7F, 0xB0, 0x99, 0x95, 0x96, 0x95, 0x96, 0x99, 0xB3, 0x8D, 0x8C, 0x9D, 0x9E, 0x9F, 0x06 },
+          { 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0xB1, 0x9A, 0x97, 0x98, 0x97, 0x98, 0x9A, 0xB2, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+      -- THE ROUTE 40 GATE HOUSE, at the south of the same map -- the
+      -- building you come in through, and the one in the screenshot
+      -- standing as a stepped mass with the player walking up it.  Eight
+      -- tiles square, two cells by two.
+      --
+      -- A flat-roofed hut, and its bands are the Johto civic block's
+      -- exactly: rows 0-1 the roof's north rim, rows 2-27 the striped
+      -- field (the stripes run WITH the slope, period 1 down the roof, so
+      -- any row of the band serves), rows 28-31 the four-row fascia, and
+      -- rows 32-63 the brick facade with its window and door.  Hence the
+      -- same numbers Johto's roofs take -- roofFront 4, cycle stopping at
+      -- 27 -- rather than the tower's deck-and-parapet 8/23 above.
+      --
+      -- No `seal`: row 0 is a solid black rim and the ground wraps the
+      -- other three sides, so the silhouette flood comes back with the hut
+      -- alone.  The grid matches in exactly one place on the map.
+      {
+        id = "battle_tower_gate",
+        tiles = {
+          { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+          { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+          { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+          { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+        },
+        roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+        slab = 4, frontEave = 4, ledge = nil,
+      },
+    },
+
     OVERWORLD = {
       -- assets/docs/buildings/B30: the POKEMON TOWER -- the one drawing
       -- in the catalogue that STRADDLES A MAP BOUNDARY.  Twelve of its
@@ -3231,5 +4804,3929 @@ return {
         slab = 4, frontEave = 4, ledge = nil,
       },
     },
+
+    DOJO = {
+      -- F01: the starter-ball table in Oak's lab (one placement in the
+      -- game: OAKS_LAB cell 6,3) -- the first FURNITURE through the
+      -- band pipeline, and the first drawing whose plot is smaller than
+      -- its grid. Its 24 rows read: 0-15 the tabletop seen from above
+      -- (black rim, white highlight course, grey field); 16-18 the top
+      -- slab's own front edge, black/#555/black -- which is exactly
+      -- what the rim treatment paints, so slab = 3 and those rows fold
+      -- into the roof band instead of extruding under it; 19-21 the
+      -- base band, corner feet and the inset dark panel between them.
+      --
+      -- The legs stand on open FLOOR: the measured ground line lands
+      -- two rows short of the grid (see Buildings measure), and `depth`
+      -- keeps the plot to the blocked cell row -- the grid's third row
+      -- is the walkable cell the player faces the table from, matched
+      -- so the flat leg art is claimed off the floor, not so the model
+      -- stands on it. 16 top rows onto a 16px plot map 1:1: roofBack
+      -- covers the whole depth, nothing cycles, and roofCycle is
+      -- unreachable behind it. The Poke Ball sprites ride the `table`
+      -- pin's height (VoxelScene.groundAt reads the collision tile, not
+      -- this model), so the tileset entry above overrides that height
+      -- to the 6px this drawing actually stands.
+      {
+        id = "lab_table",
+        tiles = {
+          { 41, 59, 59, 59, 59, 42 },
+          { 78, 57, 57, 57, 57, 79 },
+          { 88, 89, 89, 89, 89, 90 },
+        },
+        roofRows = 19, roofBack = 16, roofFront = 0, roofCycle = { 2, 13 },
+        slab = 3, frontEave = 0, ledge = nil, depth = 2,
+      },
+      -- F02: the computer desk on the lab's west side (OAKS_LAB cell
+      -- 0,1) -- the one DESK-SET template: the pipeline's region
+      -- classification at PART granularity (see Buildings
+      -- deskSetModel). The desk is the sibling lab table (fascia rows
+      -- 16-18, base 19-21); on it stand a monitor over its keyboard
+      -- (left), a computer tower over a keyboard and mouse (middle),
+      -- and a sheet of paper LYING FLAT (right). Upright parts anchor
+      -- their drawn bottom row to the desk's top plane and wear their
+      -- own drawn tops as lids; flat parts lie one voxel proud at
+      -- drawn row = depth row -- the same 1:1 the tabletop itself is
+      -- drawn with. The roof fields are inert (roofRows = 0 keeps the
+      -- recess scan over the whole drawing, which is what sinks the
+      -- monitor's screen and the tower's slots). Same drawing, same
+      -- grid, stands in the Hall of Fame on the GYM atlas --
+      -- registered there below.
+      {
+        id = "lab_computers",
+        tiles = {
+          { 91, 92, 93, 94 },
+          { 54, 55, 85, 95 },
+          { 88, 89, 89, 90 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 2,
+        desk = { fascia = { 16, 18 }, base = { 19, 21 } },
+        parts = {
+          { kind = "upright", x = { 2, 13 }, top = { 0, 2 },
+            facade = { 3, 10 }, depth = 4 },              -- the monitor
+          { kind = "flat", x = { 1, 13 }, rows = { 11, 14 } },  -- keyboard
+          { kind = "upright", x = { 14, 21 }, top = { 0, 3 },
+            facade = { 4, 10 }, depth = 6 },              -- the tower
+          { kind = "flat", x = { 14, 21 }, rows = { 11, 14 } }, -- keys+mouse
+          { kind = "flat", x = { 22, 30 }, rows = { 1, 14 } },  -- the paper
+        },
+      },
+      -- F03: the empty north table beside it (OAKS_LAB cell 2,1): the
+      -- starter table's band table verbatim on a grid two tiles
+      -- narrower.
+      {
+        id = "lab_table_small",
+        tiles = {
+          { 41, 59, 59, 42 },
+          { 78, 57, 57, 79 },
+          { 88, 89, 89, 90 },
+        },
+        roofRows = 19, roofBack = 16, roofFront = 0, roofCycle = { 2, 13 },
+        slab = 3, frontEave = 0, ledge = nil, depth = 2,
+      },
+    },
+
+    POKECENTER = {
+      -- F04: the PC in every Center's northeast corner (11
+      -- placements; the Indigo Plateau lobby's twin is registered
+      -- under MART below). The lab desk-set read again: a Mac-style
+      -- unit drawn face-on -- white top band (rows 0-3), bezel, screen
+      -- and drive slot (4-14) -- standing at the back of a low desk
+      -- whose front face is rows 20-23; the drawn top around the unit
+      -- is WHITE, which is what `lid` carries. The keyboard rows 17-19
+      -- are drawn below the desk's 16px top span, so the flat part's
+      -- `z` puts it at the desk's front edge. The old billboard pins
+      -- for these tiles (66/70/82/86, desk 9/88) stay as the
+      -- degradation path -- the claim neutralizes them wherever this
+      -- template stamps.
+      {
+        id = "center_pc",
+        tiles = {
+          { 66, 70 },
+          { 82, 86 },
+          {  9, 88 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 2,
+        desk = { fascia = { 20, 21 }, base = { 22, 23 }, lid = "white" },
+        parts = {
+          { kind = "upright", x = { 2, 13 }, top = { 0, 3 },
+            facade = { 4, 14 }, depth = 6 },                -- the unit
+          { kind = "flat", x = { 2, 13 }, rows = { 17, 19 },
+            z = 13 },                                       -- keyboard
+        },
+      },
+      -- F05: the healing machine behind the counter -- two 4x4-tile
+      -- variants, 24 placements between them (a pair in every Center,
+      -- cells (1,0):(2,1) and (6,0):(7,1), plus the Indigo Plateau
+      -- lobby's pair under MART below).  The variants differ only in
+      -- the east flank: the west machine has the control keyboard
+      -- there (7/13, scan "40,58,59,40;40,74,75,40;72,76,77,7;
+      -- 72,6,22,13" -- 12 placements), the east machine mirrored
+      -- hoses (73, scan "...;72,76,77,73;72,6,22,73" -- 12).
+      --
+      -- The FULL drawing is claimed now: the corners are the striped
+      -- wall band (40), the flanks the machine's own equipment --
+      -- hoses and a keyboard ATTACHED to the cabinet, not furniture
+      -- standing free (their standee pins above stay as the
+      -- degradation path).  What no class can split is a wall-height
+      -- cabinet with a monitor perched on its front top edge, drawn
+      -- across two map rows because it towers over the 16px band
+      -- behind it, which the volume path can only read as more wall.
+      --
+      -- Read off the pixels (absolute grid x0..x31):
+      --   rows 15-31, x8..x23  the CABINET's front face, 16 wide, 17
+      --               tall: black front-top edge with vent notches
+      --               (15), white top rail (16), black panel in a
+      --               white frame (17-28), white rail / light plinth /
+      --               black ground line (29-31).  `desk.x` bounds the
+      --               desk to the middle columns.
+      --   rows 6-14, x8..x23   the cabinet's TOP FACE seen from above
+      --               -- not a second-story facade: a white expanse
+      --               with a lit west strip (x9) and a shaded east
+      --               strip (x22) wrapping the monitor.  Its 9 rows
+      --               plus the front edge row 15 ARE the cabinet's
+      --               depth: 10, z 16..25 against the wall.
+      --               `desk.top` lays the band flat as the lid; where
+      --               the monitor's drawing occludes it, the lid
+      --               continues the nearest strip (the drawing's own
+      --               pixels).
+      --   rows 1-13, x10..x21  the MONITOR: black back rim (1) and
+      --               white cap (2-3) seen from above -- depth 4 --
+      --               then bezel, screen and control strip (4-13)
+      --               face-on, 10 tall, at the cabinet top's front
+      --               (the drawn base edge 13 is one band row up from
+      --               the front strip 14): z 20..23.  The screen
+      --               interior (x13..x18, rows 6-8) sinks one voxel
+      --               via `inset` -- the pane rule applied by hand,
+      --               because `panes = false` blocks the global pass.
+      --   rows 16-31, x0..x7   the HOSES (tile 72 stacked): one 8-row
+      --               motif per map row, and the two stacked motifs
+      --               are two hoses in DEPTH -- the drawn row band is
+      --               the depth band, and each motif's own rows are
+      --               its elevation WITHIN that band, exactly the
+      --               potted plants' stacked-cell rule.  So both
+      --               hoses hug the floor: a horizontal run off the
+      --               cabinet's side (rows 24-26, x3..x7 -> heights
+      --               5..7) over a shaded drop landing ON the floor
+      --               (rows 27-31, x2..x7 -> heights 0..4) -- all
+      --               measured, the drawn extent maps 1:1 with no
+      --               continuation.  `box` parts at z 18 and z 24, 3
+      --               deep; both wear the LOWER motif's rows (the one
+      --               drawn at its true elevation; the upper motif is
+      --               the same atlas tile, pixel-identical).
+      --   rows 16-31, x24..x31 west variant: the KEYBOARD (7/13), a
+      --               key grid with its cable at the north end and a
+      --               bar down the east edge -- TOP-VIEW art, 16 rows
+      --               = 16 depth rows.  A `flat` part mounted on the
+      --               cabinet's side at COUNTER level (`at` 8, the
+      --               counters' own 8px band -- the one number
+      --               top-view art cannot state, pinned to the room's
+      --               work surface), 3 thick, top face wearing the
+      --               drawn art.  The dark dashes east of it (x30-31)
+      --               are its cast shadow on the floor: background.
+      --               East variant: mirrored hoses (runs x24..x28,
+      --               drops x24..x29), same rows and z slots.
+      --   rows 0-15 elsewhere  wall stripes and the machine's cast
+      --               shadow -- BACKGROUND, the same standing as the
+      --               potted plants' floor.  The `wall` element keeps
+      --               the band solid over the back map row, full grid
+      --               width: a 16-tall, 16-deep block cycling the
+      --               drawing's own stripe unit (x0, rows 0-3), what
+      --               the neighbouring cells' wall pins render.
+      --
+      -- `depth = 4` is BOTH map rows: the back row is the wall's plot,
+      -- the front row the machine's own.  `panes = false`: the front
+      -- panel seals DARK behind LIGHT (a black panel in a white
+      -- frame), the opposite polarity to the pane rule, so the global
+      -- recess pass would sink the frame and leave the panel proud.
+      {
+        id = "center_heal_machine_w",
+        tiles = {
+          { 40, 58, 59, 40 },
+          { 40, 74, 75, 40 },
+          { 72, 76, 77,  7 },
+          { 72,  6, 22, 13 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 4,
+        panes = false,
+        wall = { h = 16, depthPx = 16, x = 0, cycle = { 0, 3 } },
+        desk = { x = { 8, 23 }, fascia = { 15, 16 }, base = { 17, 31 },
+                 z = 16, depthPx = 10, top = { 6, 14 } },
+        parts = {
+          { kind = "upright", x = { 10, 21 }, top = { 1, 3 },
+            facade = { 4, 13 }, z = 20, depth = 4,
+            inset = { x = { 13, 18 }, rows = { 6, 8 } } },   -- the monitor
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 18, depth = 3 },                             -- N hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 18, depth = 3 },                             -- N hose drop
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 24, depth = 3 },                             -- S hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 24, depth = 3 },                             -- S hose drop
+          { kind = "flat", x = { 24, 29 }, rows = { 16, 31 },
+            z = 16, at = 8, thick = 3 },                     -- keyboard shelf
+        },
+      },
+      {
+        id = "center_heal_machine_e",
+        tiles = {
+          { 40, 58, 59, 40 },
+          { 40, 74, 75, 40 },
+          { 72, 76, 77, 73 },
+          { 72,  6, 22, 73 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 4,
+        panes = false,
+        wall = { h = 16, depthPx = 16, x = 0, cycle = { 0, 3 } },
+        desk = { x = { 8, 23 }, fascia = { 15, 16 }, base = { 17, 31 },
+                 z = 16, depthPx = 10, top = { 6, 14 } },
+        parts = {
+          { kind = "upright", x = { 10, 21 }, top = { 1, 3 },
+            facade = { 4, 13 }, z = 20, depth = 4,
+            inset = { x = { 13, 18 }, rows = { 6, 8 } } },   -- the monitor
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 18, depth = 3 },                             -- NW hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 18, depth = 3 },                             -- NW hose drop
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 24, depth = 3 },                             -- SW hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 24, depth = 3 },                             -- SW hose drop
+          { kind = "box", x = { 24, 28 }, rows = { 24, 26 },
+            z = 18, depth = 3 },                             -- NE hose run
+          { kind = "box", x = { 24, 29 }, rows = { 27, 31 },
+            z = 18, depth = 3 },                             -- NE hose drop
+          { kind = "box", x = { 24, 28 }, rows = { 24, 26 },
+            z = 24, depth = 3 },                             -- SE hose run
+          { kind = "box", x = { 24, 29 }, rows = { 27, 31 },
+            z = 24, depth = 3 },                             -- SE hose drop
+        },
+      },
+    },
+
+    MART = {
+      -- F04 again: the Indigo Plateau lobby's PC (cell 15,7) -- the
+      -- MART tileset shares the POKECENTER atlas, so this is the same
+      -- drawing tile for tile. Same part table as the POKECENTER entry
+      -- above.
+      {
+        id = "center_pc",
+        tiles = {
+          { 66, 70 },
+          { 82, 86 },
+          {  9, 88 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 2,
+        desk = { fascia = { 20, 21 }, base = { 22, 23 }, lid = "white" },
+        parts = {
+          { kind = "upright", x = { 2, 13 }, top = { 0, 3 },
+            facade = { 4, 14 }, depth = 6 },                -- the unit
+          { kind = "flat", x = { 2, 13 }, rows = { 17, 19 },
+            z = 13 },                                       -- keyboard
+        },
+      },
+      -- F05 again: the Indigo Plateau lobby has the Centers' healing
+      -- machine pair too -- the west-variant grid at (5,4):(6,5) and
+      -- the east at (10,4):(11,5), verified by region dump -- and its
+      -- MART tileset shares the POKECENTER atlas, so these are the
+      -- same drawings tile for tile. Same part tables as the
+      -- POKECENTER entries above.
+      {
+        id = "center_heal_machine_w",
+        tiles = {
+          { 40, 58, 59, 40 },
+          { 40, 74, 75, 40 },
+          { 72, 76, 77,  7 },
+          { 72,  6, 22, 13 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 4,
+        panes = false,
+        wall = { h = 16, depthPx = 16, x = 0, cycle = { 0, 3 } },
+        desk = { x = { 8, 23 }, fascia = { 15, 16 }, base = { 17, 31 },
+                 z = 16, depthPx = 10, top = { 6, 14 } },
+        parts = {
+          { kind = "upright", x = { 10, 21 }, top = { 1, 3 },
+            facade = { 4, 13 }, z = 20, depth = 4,
+            inset = { x = { 13, 18 }, rows = { 6, 8 } } },   -- the monitor
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 18, depth = 3 },                             -- N hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 18, depth = 3 },                             -- N hose drop
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 24, depth = 3 },                             -- S hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 24, depth = 3 },                             -- S hose drop
+          { kind = "flat", x = { 24, 29 }, rows = { 16, 31 },
+            z = 16, at = 8, thick = 3 },                     -- keyboard shelf
+        },
+      },
+      {
+        id = "center_heal_machine_e",
+        tiles = {
+          { 40, 58, 59, 40 },
+          { 40, 74, 75, 40 },
+          { 72, 76, 77, 73 },
+          { 72,  6, 22, 73 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 4,
+        panes = false,
+        wall = { h = 16, depthPx = 16, x = 0, cycle = { 0, 3 } },
+        desk = { x = { 8, 23 }, fascia = { 15, 16 }, base = { 17, 31 },
+                 z = 16, depthPx = 10, top = { 6, 14 } },
+        parts = {
+          { kind = "upright", x = { 10, 21 }, top = { 1, 3 },
+            facade = { 4, 13 }, z = 20, depth = 4,
+            inset = { x = { 13, 18 }, rows = { 6, 8 } } },   -- the monitor
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 18, depth = 3 },                             -- NW hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 18, depth = 3 },                             -- NW hose drop
+          { kind = "box", x = { 3, 7 }, rows = { 24, 26 },
+            z = 24, depth = 3 },                             -- SW hose run
+          { kind = "box", x = { 2, 7 }, rows = { 27, 31 },
+            z = 24, depth = 3 },                             -- SW hose drop
+          { kind = "box", x = { 24, 28 }, rows = { 24, 26 },
+            z = 18, depth = 3 },                             -- NE hose run
+          { kind = "box", x = { 24, 29 }, rows = { 27, 31 },
+            z = 18, depth = 3 },                             -- NE hose drop
+          { kind = "box", x = { 24, 28 }, rows = { 24, 26 },
+            z = 24, depth = 3 },                             -- SE hose run
+          { kind = "box", x = { 24, 29 }, rows = { 27, 31 },
+            z = 24, depth = 3 },                             -- SE hose drop
+        },
+      },
+    },
+
+    GYM = {
+      -- F02 again: the Hall of Fame's recording machine is the lab's
+      -- computer desk drawing, tile for tile, on the GYM atlas (one
+      -- placement: HALL_OF_FAME cell 4,1). Same part table as the DOJO
+      -- entry above.
+      {
+        id = "lab_computers",
+        tiles = {
+          { 91, 92, 93, 94 },
+          { 54, 55, 85, 95 },
+          { 88, 89, 89, 90 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 2,
+        desk = { fascia = { 16, 18 }, base = { 19, 21 } },
+        parts = {
+          { kind = "upright", x = { 2, 13 }, top = { 0, 2 },
+            facade = { 3, 10 }, depth = 4 },              -- the monitor
+          { kind = "flat", x = { 1, 13 }, rows = { 11, 14 } },  -- keyboard
+          { kind = "upright", x = { 14, 21 }, top = { 0, 3 },
+            facade = { 4, 10 }, depth = 6 },              -- the tower
+          { kind = "flat", x = { 14, 21 }, rows = { 11, 14 } }, -- keys+mouse
+          { kind = "flat", x = { 22, 30 }, rows = { 1, 14 } },  -- the paper
+        },
+      },
+    },
+
+    CLUB = {
+      -- F06: the Bike Shop's OPEN TOOLBOX -- BIKE_SHOP cells (6,6) and
+      -- (7,7), and nowhere else in the game (2 placements).
+      --
+      -- The drawing looks down INTO the box: what fills its middle is not
+      -- a face but the inside of the tray, with a wrench lying in it, and
+      -- the lid standing open on the right.  That is why every solid
+      -- treatment fails it.  As a `billboard` (what these tiles carried)
+      -- the whole 16x16 went up as one 10-voxel per-pixel slab -- the
+      -- extruded picture in its pure form, a black monolith wearing the
+      -- drawing as a decal.  Reading the middle as a cabinet FRONT and
+      -- extruding that is the same mistake one level down: it puts a wall
+      -- where the opening is.  An open box has to be hollow, so `tray`
+      -- builds four walls, a floor slab and AIR between them.
+      --
+      -- The bands, and they measure out exactly (8 depth rows for a
+      -- one-tile-row plot):
+      --   row 4       the FAR rim, black across the back wall     -> z 0
+      --   rows 5-10   the tray's inside, seen from above, with the
+      --               wrench lying across it -- drawn row = depth row,
+      --               six rows for six rows                       -> z 1-6
+      --   row 11      the near wall's INNER face, in shadow
+      --   row 12      the near rim, black right across the box    -> z 7
+      --   rows 13-15  the near wall's outer face, seen face-on: a light
+      --               panel between its black rim and its black foot,
+      --               so the wall stands 4 voxels and the rim is its top
+      --
+      -- `x` is the box's outer span and `inner` the opening's, so the
+      -- one-column difference on each side IS the wall.  x12 is left out
+      -- of both on purpose: the #555 at x11-x12 on rows 13-15 is the 3/4
+      -- shear of the right wall, which un-projecting simply removes --
+      -- the wall is where the plan says it is, not where the projection
+      -- slides it to.  `floor = 0` puts the tray's bottom one voxel thick,
+      -- leaving three voxels of open box above it.
+      --
+      -- The LID is an upright part riding the rim, hinged on the right
+      -- and standing up: 12 tall as drawn, spanning the box's whole depth
+      -- (8) and 4 thick, which is the black outline plus the two columns
+      -- of white body the drawing gives it.  It overhangs east of the
+      -- hinge, which is what a hinged lid standing open does.
+      {
+        id = "bike_shop_toolbox",
+        tiles = {
+          { 29, 13 },
+          { 21, 22 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depthPx = 14,
+        tray = { top = { 4, 11 }, front = { 12, 15 }, x = { 2, 11 },
+                 inner = { 3, 9 }, floor = 0 },
+        parts = {
+          { kind = "upright", x = { 11, 14 }, top = { 0, 0 },
+            facade = { 0, 11 }, z = 0, depth = 14 },       -- the open lid
+        },
+      },
+    },
+
+    MANSION = {
+      -- F05: the TALL display cabinet, the one with the trophy behind
+      -- its glass -- CELADON_CHIEF_HOUSE cells 3,0 and 4,0 and
+      -- CELADON_MANSION_1F cell 2,2 (3 placements).  Its 32 rows read
+      -- like every band table's: 0-8 the cabinet top seen from above
+      -- (black rim, white highlight courses along the north and west,
+      -- grey field, the front corner shaded at row 8); row 9 the top's
+      -- own black front edge -- which is what the rim treatment paints,
+      -- so slab = 1 and that row folds into the roof band instead of
+      -- extruding under it; 10-31 the front face: the trophy in its
+      -- dark display opening, the nameplate under it, then the two
+      -- panelled doors of the base.  The contents come off the pixels,
+      -- not the band table: the trophy, the plate and both door panels
+      -- are non-black regions the drawing seals behind its own black
+      -- frame, so the measured recess pass sinks each of them a voxel
+      -- and the frames stay proud.  Nine drawn top rows over a 32px
+      -- plot, so the rims map 1:1 -- the drawn front-corner shading
+      -- lands one voxel behind the front edge -- and the uniform field
+      -- cycles between.  Both cell rows of the plot are BLOCKED and
+      -- both are cabinet drawing, so D is the whole grid: the rank is
+      -- built into the room's north wall, and its front stands flush
+      -- with the short case's beside it.  23 voxels tall.
+      {
+        id = "mansion_trophy_case",
+        tiles = {
+          { 38, 41 },
+          { 40, 21 },
+          { 56, 87 },
+          { 50, 51 },
+        },
+        roofRows = 10, roofBack = 8, roofFront = 2, roofCycle = { 2, 7 },
+        slab = 1, frontEave = 0, ledge = nil,
+      },
+      -- F06: the SHORT book case standing beside it -- the same
+      -- cabinet on a grid one tile row shorter (CELADON_CHIEF_HOUSE
+      -- cells 2,0 and 5,0, CELADON_MANSION_1F tiles 2,5 and 6,5; 4
+      -- placements).  Identical top band, identical panelled base;
+      -- only the display opening is shorter, a shelf of books where
+      -- the tall one has the trophy.  Same band numbers as F05 --
+      -- which is what makes the pair read as one line of furniture --
+      -- and 15 voxels tall against the tall one's 23, exactly the 8
+      -- rows of drawing between them.  The grid must carry the 38/41
+      -- cap row: {34,35} over {50,51} alone also stands on
+      -- CELADON_MANSION_2F, where it is the bottom of a taller
+      -- two-shelf bank and not this drawing at all.  The 8px of wall
+      -- behind the cap is not part of the cabinet and keeps its own
+      -- `wall` pin.
+      {
+        id = "mansion_bookcase",
+        tiles = {
+          { 38, 41 },
+          { 34, 35 },
+          { 50, 51 },
+        },
+        roofRows = 10, roofBack = 8, roofFront = 2, roofCycle = { 2, 7 },
+        slab = 1, frontEave = 0, ledge = nil,
+      },
+      -- F07: the long table in the middle of the chief's house
+      -- (CELADON_CHIEF_HOUSE cell 2,3), the lab table's read at four
+      -- cells wide and two deep.  Rows 0-23 are the tabletop seen from
+      -- above; 24-26 are the top slab's own front edge,
+      -- black/#555/black, and row 27 the #555 shadow that closes it --
+      -- exactly what the rim treatment paints, so slab = 3 and rows
+      -- 24-27 fold into the roof band.  That leaves 28-30 as the base,
+      -- the same three rows the lab table's is, and the two tables
+      -- stand the same 6 voxels: row 28 the apron running the whole
+      -- width, 29-30 the end legs under it.  The legs stop one row
+      -- short of the grid, so the measured ground line lands there and
+      -- the model does not float.  Both cell rows of the plot are
+      -- blocked, so D is the whole grid: the 24 drawn top rows map 1:1
+      -- from the north rim and the field's own rows cycle for the last
+      -- 8.  The `table` pin these tiles keep stays 12px -- it is
+      -- shared with the 2F/3F writing desks and the rooftop shed, and
+      -- nothing rides this table -- so it is only the degradation
+      -- path, neutralized wherever this template stamps.
+      {
+        id = "mansion_long_table",
+        tiles = {
+          { 38, 39, 39, 39, 39, 39, 39, 41 },
+          { 54, 55, 55, 55, 55, 55, 55, 57 },
+          { 54, 55, 55, 55, 55, 55, 55, 57 },
+          { 60, 58, 58, 58, 58, 58, 58, 59 },
+        },
+        roofRows = 28, roofBack = 24, roofFront = 0, roofCycle = { 2, 23 },
+        slab = 3, frontEave = 0, ledge = nil,
+      },
+    },
+
+    HOUSE = {
+      -- F08: the dining table of the generic town house -- 18
+      -- placements, every home's cells (3,3):(4,4), Blue's and the
+      -- Daycare among them -- the chief's long table (F07 above) at two
+      -- cells wide, the same read to the row.  Rows 0-23 are the rounded
+      -- tabletop seen from above (black rim, white highlight course,
+      -- grey field, #555 east rim); 24-26 the slab's own front edge,
+      -- black/#555/black, and 27 the #555 apron shadow that closes it,
+      -- folded into the band; 28-30 the base -- the apron's black
+      -- underrun and the corner legs -- stopping one row short of the
+      -- grid, so the measured ground line keeps the model on its plot.
+      -- The same 6 voxels the whole table family stands.  The `table`
+      -- pins stay as the degradation path, neutralized where this
+      -- stamps; the schoolhouse's half-width table with its book and the
+      -- trashed house's ransacked corner are different grids and keep
+      -- theirs.
+      {
+        id = "house_table",
+        tiles = {
+          { 38, 39, 39, 41 },
+          { 54, 47, 47, 57 },
+          { 54, 47, 47, 57 },
+          { 60, 58, 58, 59 },
+        },
+        roofRows = 28, roofBack = 24, roofFront = 0, roofCycle = { 2, 23 },
+        slab = 3, frontEave = 0, ledge = nil,
+      },
+      -- F10: the town house's BOOKCASE -- the commonest piece of
+      -- furniture in the game at 58 placements across three drawings,
+      -- and the piece this family was really for: pinned `desk` it was a
+      -- 24px box with a flat front and the books PAINTED on it.  Band for
+      -- band it is the Celadon display cabinet (F05/F06 under MANSION)
+      -- on a different atlas, and it takes those numbers unchanged: rows
+      -- 0-8 the top seen from above (black rim, white highlight courses
+      -- along the north and west, grey field, the front corner shaded at
+      -- row 8); row 9 the top's own black front edge -- which is what the
+      -- rim treatment paints, so slab = 1 and that row folds into the
+      -- roof band instead of extruding under it; 10-31 the front: two
+      -- shelves in their dark openings over the cupboard's two panelled
+      -- doors.  Every book, bowl and door panel is a non-black region the
+      -- drawing seals behind its own black frame, so the measured pane
+      -- pass sinks each one a voxel and the frames stand proud of them --
+      -- the relief the `bookcase` class now carries too, arrived at the
+      -- same way.
+      --
+      -- Nine drawn top rows over a 32px plot: the rims map 1:1 (the drawn
+      -- front-corner shading lands one voxel behind the front edge) and
+      -- the uniform field cycles between.  BOTH cell rows of the plot are
+      -- blocked and both are cabinet drawing, so D is the whole grid --
+      -- the case is built into the room's north wall.  23 voxels tall,
+      -- one under the `desk` pin it replaces and exactly the Celadon
+      -- trophy case's stand; the `desk` pins stay as the degradation
+      -- path, neutralized wherever this stamps.
+      --
+      -- This drawing carries books and a bowl on each shelf: 36
+      -- placements, the west end of eighteen homes.
+      {
+        id = "house_bookcase_bowls",
+        tiles = {
+          { 38, 41 },
+          { 14, 15 },
+          { 14, 15 },
+          { 30, 31 },
+        },
+        roofRows = 10, roofBack = 8, roofFront = 2, roofCycle = { 2, 7 },
+        slab = 1, frontEave = 0, ledge = nil,
+      },
+      -- F10 again: its twin at the east end, books on both shelves -- 22
+      -- placements, and the only one of the two that Cerulean's trashed
+      -- house also puts at the west end.
+      {
+        id = "house_bookcase_books",
+        tiles = {
+          { 38, 41 },
+          { 48, 49 },
+          { 48, 49 },
+          { 30, 31 },
+        },
+        roofRows = 10, roofBack = 8, roofFront = 2, roofCycle = { 2, 7 },
+        slab = 1, frontEave = 0, ledge = nil,
+      },
+      -- F09: the stool at every one of those tables (94 placements on
+      -- this tileset) -- the first template with NO base piece.  The
+      -- drawing is one object, a round seat on legs, drawn MID-CELL over
+      -- its own floor (rows 0-4 are the room behind it), and no band
+      -- split fits that: a roof band starts at the drawing's top row.
+      -- So it is a desk-set of exactly one upright part anchored to the
+      -- floor: rows 5-10 the seat seen from above (its lid), row 11 the
+      -- seat's own front edge, 12-15 the legs with the floor showing
+      -- between them, which the per-pixel facade cut keeps open.  The
+      -- drawing measures 7 deep (six seat rows plus the front edge at
+      -- drawn row = depth row); the shipped stool is grown two voxels
+      -- past that north AND south (z 3..13, developer-tuned against the
+      -- in-game read), with `stretch` mapping the seat band over the
+      -- deeper lid instead of smearing its last row.  `panes = false`:
+      -- a stool has no windows, and the pane rule would sink the legs'
+      -- lit faces behind their own outlines.  The 5-voxel stand is the
+      -- drawn elevation, and the tileset's `heights` above pins the
+      -- `stool` ride height to it, so whoever sits here sits ON the
+      -- seat; the old stool standee pins stay as the degradation path.
+      {
+        id = "house_stool",
+        tiles = {
+          { 2, 3 },
+          { 18, 19 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil,
+        panes = false,
+        parts = {
+          { kind = "upright", x = { 2, 13 }, top = { 5, 10 },
+            facade = { 11, 15 }, z = 3, depth = 11,
+            stretch = true },                             -- the stool
+        },
+      },
+    },
+
+    REDS_HOUSE_1 = {
+      -- F08 again: Red's and the Copycat's ground-floor dining table
+      -- (cells (3,4):(4,5) of both maps) -- the house table on the
+      -- reds_house atlas, with two differences the fields absorb.
+      --
+      -- Its tabletop field stops at row 22 and row 23 is the top's own
+      -- #555 south rim, which roofBack = 24 would lay MID-TABLE as a
+      -- dark stripe: back stops at 23 and the field cycles from there
+      -- (the drawn rim's place at the south edge is under the rim
+      -- treatment's own black, like every sibling's).
+      --
+      -- And the POTTED PLANT is drawn standing on the tabletop (rows
+      -- 5-15, x10..x21, tiles 40/55/56 with the cutout pool's 54/57
+      -- beside them).  It stays the cutout standee it has always been:
+      -- `keep` leaves its tiles unclaimed so the pin and its standee
+      -- survive, `scrub` replaces its pixels with the field shade so the
+      -- model tops out as the plain surface it sits on, and `support`
+      -- states the model's 6-voxel top plane so the standee stands ON
+      -- the modelled tabletop (Structures reads it off the claim; a
+      -- plain claim's h = 0 supports nothing).
+      {
+        id = "reds_house_table",
+        tiles = {
+          { 38, 39, 40, 41 },
+          { 54, 55, 56, 57 },
+          { 44, 42, 42, 43 },
+          { 60, 58, 58, 59 },
+        },
+        roofRows = 28, roofBack = 23, roofFront = 1, roofCycle = { 2, 22 },
+        slab = 3, frontEave = 0, ledge = nil,
+        scrub = { { 10, 5, 21, 15 } },
+        keep = { 40, 54, 55, 56, 57 },
+        support = 6,
+      },
+      -- F10 again: Red's and the Copycat's bookcase pair, cells (0,0)
+      -- and (1,0) of both maps (4 placements).  The same object as the
+      -- town house's, one shelf of each of its two drawings -- 48/49
+      -- books above, 34/35 below -- and the same band numbers; see HOUSE
+      -- above for the read.
+      {
+        id = "reds_bookcase",
+        tiles = {
+          { 38, 41 },
+          { 48, 49 },
+          { 34, 35 },
+          { 50, 51 },
+        },
+        roofRows = 10, roofBack = 8, roofFront = 2, roofCycle = { 2, 7 },
+        slab = 1, frontEave = 0, ledge = nil,
+      },
+      -- F09 again: the stools around it (10 placements across Red's and
+      -- the Copycat's ground floors), pixel for pixel the house
+      -- tileset's drawing.  Same part table; see HOUSE above.
+      {
+        id = "house_stool",
+        tiles = {
+          { 2, 3 },
+          { 18, 19 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil,
+        panes = false,
+        parts = {
+          { kind = "upright", x = { 2, 13 }, top = { 5, 10 },
+            facade = { 11, 15 }, z = 3, depth = 11,
+            stretch = true },                             -- the stool
+        },
+      },
+    },
+
+    INTERIOR = {
+      -- F0x: Bill's desk, and the Silph president's -- one drawing, two
+      -- placements (BILLS_HOUSE cell 1,4 and SILPH_CO_11F cell 10,12,
+      -- both found by the scan and nothing else).  The whole 4x4-tile
+      -- block is one designed unit, but this template deliberately takes
+      -- only the desk's own two cells.
+      --
+      -- What the 16 drawn rows are: the TABLETOP seen from above, the
+      -- lab table's pattern tile for tile -- black rim, a white
+      -- highlight course inside it, grey field -- over a 16px plot, so
+      -- they map 1:1 and nothing cycles.  Standing on it, and drawn INTO
+      -- that top view the way lab_computers' objects are: a terminal
+      -- (screen head over a keypad panel, rows 3-13) and the ball
+      -- (rows 1-13).  Drawn row = depth row on a top view, so each part's
+      -- `z` is where the drawing puts it: the head's front row is 8, the
+      -- keypad picks up at 9, and the ball's front row is its drawn
+      -- bottom.  Only the two DEPTHS and how much of each blob is lid
+      -- rather than face are authored -- the projection cannot state
+      -- either.
+      --
+      -- Why the grid stops at two rows.  This drawing's front face is its
+      -- APRON, and the artist drew the apron into the WALKABLE cell in
+      -- front (43/44 + 91/92) -- exactly where the lab table's fascia and
+      -- base are.  But 43/44 is also the upper half of the CHAIR pushed
+      -- up to the desk (43/44 over 59/60, pinned `stool` in the tileset
+      -- section above), and a template claims whole TILES: reading the
+      -- apron would take the chair's back with it and leave a backless
+      -- stub in both rooms.  So the apron stays with the chair, `plane`
+      -- authors the desk's height instead, and the body under the lid is
+      -- synthesized in the drawing's own shades (the band table's rim
+      -- treatment -- a shaded box closed by the outline at the floor).
+      -- 8px is not a taste number: it is the apron's own drawn row count
+      -- and the `table` height these tiles are already pinned to, so the
+      -- desk stands where the degradation path stood it.
+      {
+        id = "bills_desk",
+        tiles = {
+          { 11, 12, 13, 14 },
+          { 27, 28, 29, 30 },
+          { 43, 44, 91, 92 },
+          { 59, 60, 31, 31 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil, depth = 4,
+        -- the desk's own plot is its two cells; the grid runs on because
+        -- its apron and the CHAIR share tiles 43/44
+        desk = { fascia = { 16, 18 }, base = { 19, 23 }, depth = 2 },
+        parts = {
+          -- the notes: two sheets lying on the desk, so PAPER -- one
+          -- voxel proud at drawn row = depth row, and nothing raised
+          { kind = "flat", x = { 2, 15 }, rows = { 3, 7 } },
+          -- the keyboard: a real slab, not a print on the desk.  Its
+          -- keys are drawn from ABOVE so they ride the top face across
+          -- its depth, and its drawn bottom frame row stands as the
+          -- front edge
+          { kind = "upright", x = { 4, 15 }, top = { 8, 12 },
+            facade = { 12, 13 }, z = 8, depth = 6 },
+          -- the cord: the kinked dark run the drawing puts between the
+          -- keyboard's top-right corner and the computer's left corner.
+          -- Raised to the keyboard's own height so it reads as a cable
+          -- spanning them rather than a scuff on the desk
+          { kind = "upright", x = { 16, 19 }, top = { 8, 8 },
+            facade = { 8, 9 }, z = 8, depth = 2 },
+          -- the computer: drawn in 2:1 ISOMETRIC, turned 45 degrees to
+          -- the map -- see the `iso` branch in buildParts.  `plan` = rx
+          -- makes its footprint a SQUARE turned 45, so from directly
+          -- above it is the cube the drawing depicts and not the slab
+          -- the 2:1 would otherwise build
+          { kind = "iso", x = { 19, 30 }, rows = { 1, 13 },
+            plan = 6, z = 9 },
+          -- the chair pushed up to the desk, drawn into the walkable
+          -- cell in front.  It stands on the FLOOR, not on the desk, so
+          -- its rise is the whole plane back down; two voxels deep
+          -- because it is a chair, and `inside` cuts it per pixel, so
+          -- this is the thin slab the `stool` standee was -- the desk
+          -- claiming tiles 43/44 for its apron is what makes the
+          -- template owe it
+          { kind = "upright", x = { 2, 13 }, top = { 20, 21 },
+            facade = { 22, 31 }, rise = -8, z = 22, depth = 10 },
+        },
+      },
+      -- F09 once more: the Pokemon Fan Club's four members' chairs,
+      -- drawn round the boardroom table -- POKEMON_FAN_CLUB cells (1,3),
+      -- (1,4), (6,3) and (6,4), and nowhere else in the game.
+      --
+      -- A DIFFERENT drawing from the house stool -- its seat field
+      -- carries a one-pixel white margin where the house's carries two
+      -- -- but the same object band for band: rows 5-10 the seat seen
+      -- from above (its lid), row 11 the seat's own front edge, 12-15
+      -- the legs with the floor showing between them.  Its elevation
+      -- rows are PIXEL-IDENTICAL to the house drawing's, so it takes
+      -- that part table unchanged, growth and all: z 3..13, `stretch`
+      -- mapping the seat band over the deeper lid, `panes = false` so
+      -- the pane rule does not sink the legs' lit faces.
+      --
+      -- Rows 11-15 come from tiles 59/60, which this drawing SHARES
+      -- with Bill's chair (43/44 over 59/60, modelled as a part of
+      -- `bills_desk` above).  That is why the tileset's `stool = 5`
+      -- height override is right for both seats rather than a special
+      -- case for this one: they are drawn at the same height because
+      -- they are drawn with the same pixels.
+      --
+      -- Listed after `bills_desk` although neither grid is a subgrid of
+      -- the other (that grid has 43/44 over 59/60, this one 61/62), so
+      -- the order is free and the bigger, more specific grid keeps
+      -- first claim.
+      {
+        id = "club_stool",
+        tiles = {
+          { 61, 62 },
+          { 59, 60 },
+        },
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil,
+        panes = false,
+        parts = {
+          { kind = "upright", x = { 2, 13 }, top = { 5, 10 },
+            facade = { 11, 15 }, z = 3, depth = 11,
+            stretch = true },                             -- the stool
+        },
+      },
+    },
   },
 }
+
+-- ---------------------------------------------------------------------------
+-- TilesetJohtoModern -- the set Goldenrod City and Azalea Town are drawn in.
+--
+-- The ROM names it separately from TilesetJohto, and the profile is keyed by
+-- the tileset id, so those two maps were reaching NO pins and NO buildings at
+-- all: every scrap of turf sharing a blocked cell stood as a 16px box, the
+-- ledges and the picket fences stood as walls, the town signs stood as
+-- masonry, and every house was a flat-lidded slab with its roof printed on
+-- the top face.  That is exactly what "messed up in goldenrod, azalea town"
+-- describes.
+--
+-- Comparing the two atlases tile for tile: 66 of 96 are byte-identical, and
+-- every tile the pins and the building templates below name is among them --
+-- ground $05/$06, water $14/$58, the ledge lip $4C, the fence run
+-- $40/$4A/$59/$5A, the signpost $4E/$4F/$5E/$5F, the tree $1E/$1F/$3E/$3F,
+-- the cliff context $3C/$4B/$4D, and the whole roof/facade vocabulary
+-- $01/$02/$07/$0A-$0F/$10-$12/$16-$19/$1A-$1C/$23/$24/$26/$37-$3A.  So the
+-- authored work transplants unchanged.
+--
+-- The one thing that does NOT transplant is the tall tree WALL.  Johto draws
+-- it as a crown over a middle course over an underside ($1E/$1F, $2E/$2F,
+-- $3E/$3F) and pins the middle course as `planter` to get its two-cell
+-- height.  In Modern $2E/$2F are different art entirely and appear in no
+-- tree: scanning all 128 blocks, the only thing ever drawn under $1E/$1F is
+-- $3E/$3F (eleven blocks) or $13/$15 (two blocks).  Modern has no tall tree,
+-- only the one-cell lone tree -- which the `cylinder` pin already rounds --
+-- so the planter pin and the conditional that arms it are left out.
+profile.tilesets.TilesetJohtoModern = {
+  ground = { 0x05, 0x06 },
+  water = { 0x14, 0x58 },
+  -- the plateau top, transplanted with the rest of the terrain vocabulary
+  -- (see TilesetJohto's `terrace`).  Modern has far less of it -- Azalea's
+  -- north verge and one lip cell in Goldenrod -- but it is the same
+  -- drawing in the same ids, and left out those few cells would have been
+  -- the only flat terraces in Johto
+  terrace = { 0x2C, 0x3C },
+  ledge = { 0x4C },
+  post = { 0x4A, 0x59, 0x5A },
+  flower = { 0x03 },
+  signpost = { 0x4E, 0x4F, 0x5E, 0x5F },
+  cylinder = { 0x1E, 0x1F, 0x3E, 0x3F },
+  when_above = {
+    [0x4C] = { { above = { 0x3C, 0x4B, 0x4C, 0x4D }, class = "wall" } },
+  },
+}
+
+-- Goldenrod's own buildings, the ones Johto's catalogue has no drawing for.
+-- Each was read straight off GOLDENROD_CITY's tile grid, as the region left
+-- over once every Johto template had claimed what it matches.
+--
+-- They share Johto's roof exactly -- black ridge, white highlight, the
+-- stripe field, a four-row fascia -- so `roofRows` 32 / `roofBack` 2 /
+-- `roofFront` 4 / `roofCycle` { 2, 27 } carry over verbatim; what differs is
+-- the footprint and the facade.
+
+-- ---------------------------------------------------------------------------
+-- NALJO'S TOWN BUILDINGS -- Tileset01 (NALJO_1), Tileset02 (NALJO_2) and
+-- Tileset56 (NALJO_3), which tilesets.asm aliases to 01.
+--
+-- Prism draws Naljo's houses out of GEN 2'S OWN building vocabulary.  Hashed
+-- tile for tile against pokecrystal's johto.png, the whole roof is
+-- byte-identical at the same index -- the ridge $10/$11/$12, the stripe band
+-- $0D/$0E/$0F, the eave $0A/$0B/$0C -- and so is the doorway $37/$38/$39 and
+-- both shop signs $17/$18/$19.  Only the facade is repainted ($1A/$1B/$1C,
+-- $01/$02/$16, $26): brick in a different colour, drawn on the same grid.
+-- Caper Ridge's Pokemon Center is `johto_pokecenter` with $1B where Johto
+-- puts $07, and its big house is `johto_hall` tile for tile.
+--
+-- So this is the TilesetJohtoModern case again: the authored work transplants,
+-- and what it needs is the right tile grids to match on.  Every grid below was
+-- FOUND rather than guessed -- swept out of the .ablk block data of all 34
+-- Naljo maps by walking from each $10/$31 roof corner to its $12/$34 partner
+-- and down to the $01..$16 base course -- so the catalogue is what Prism
+-- actually places, and the placement counts in each comment say where.
+--
+-- The band numbers are mechanical and follow Johto's exactly: roofBack 2,
+-- roofFront 4 (8 for the hipped $31/$41/$51 roof, which has the deeper
+-- fascia -- Johto's lighthouse uses the same), slab 4, frontEave 4, and the
+-- middle cycle running from row 2 to roofRows - roofFront - 1.  Nothing here
+-- describes the roof's SHAPE, because the topmost drawn row of each column
+-- already is the elevation profile.
+--
+-- Ordered largest footprint first, so the department store cannot be eaten by
+-- the four-cell block that matches a slice of it.
+local naljoBuildings = {
+  -- 1 placement: SpurgeCity x1
+  {
+    id = "naljo_house_10x8",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: SaxifrageIsland x1
+  {
+    id = "naljo_house_8x8_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: SpurgeCity x1
+  {
+    id = "naljo_mart_10x6",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x18, 0x19, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x17, 0x17, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: PhloxTown x1
+  {
+    id = "naljo_house_6x6",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: AcaniaDocks x1
+  {
+    id = "naljo_house_6x6_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 4 placements: HeathVillage x4 -- the village's tiered house, and the one
+  -- shape in Naljo that is NOT a roof over a facade.  Its hip ($31/$53/$34
+  -- over two courses of $41/$53/$44 over $51/$52/$54) sits on THREE stacked
+  -- courses of the same $51/$52/$54 fascia with $41/$1B/$44 storey bands
+  -- between them -- a building that steps back twice on its way down -- and
+  -- its door is the wide $27/$28 over $29/$2A pair, not the $37/$38 the rest
+  -- of the region uses.  No template carried either, so all four fell to the
+  -- volume detector and stood as stacks of slabs.  The bands are the ordinary
+  -- hip numbers because the ROOF is the ordinary hip drawing, 4 tile rows of
+  -- it; the courses below are facade and the extruder reads their own pixels.
+  {
+    id = "naljo_house_6x5_hip_tiered",
+    tiles = {
+      { 0x31, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x34 },
+      { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+      { 0x41, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x41, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x27, 0x28, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x29, 0x2A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 4 placements: SpurgeCity x2, LaurelCity x1, CaperRidge x1
+  {
+    id = "naljo_house_6x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 3 placements: LaurelCity x1, SaxifrageIsland x1, ToreniaCity x1
+  {
+    id = "naljo_gym_6x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x23, 0x24, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 2 placements: SpurgeCity x1, AcaniaDocks x1
+  {
+    id = "naljo_gym_6x4_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x23, 0x24, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: SpurgeCity x1
+  {
+    id = "naljo_house_4x6",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x26, 0x26, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: OxalisCity x1
+  {
+    id = "naljo_gym_6x4_a",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x23, 0x24, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: ToreniaCity x1
+  {
+    id = "naljo_house_6x4_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x6B, 0x67, 0x67, 0x67, 0x37, 0x38, 0x6E, 0x6F, 0x68, 0x69, 0x6A, 0x6C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x70, 0x71, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: ToreniaCity x1
+  {
+    id = "naljo_house_6x4_hip_a",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: Route69South x1 -- the house at the route's west edge, and
+  -- the one the bug report is about.  It is `naljo_block_4x4_hip` widened to
+  -- six cells and nothing else: the same $31/$36/$34 hip over $41/$48/$44 and
+  -- $51/$52/$54, the same doorless $1A/$1B/$1C facade with the $26 window
+  -- pairs, the same $01/$02/$16 base course.  Only the width was missing from
+  -- the catalogue, so no grid matched it, and an unmatched drawing goes to the
+  -- volume detector -- which reads the roof's stripe bands as separate storeys
+  -- and stands them as the stack of slabs the screenshot shows.
+  {
+    id = "naljo_block_6x4_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: Route70 x1 -- the same six-cell block in Naljo_2's OTHER
+  -- roof colour.  Prism repaints the hip as $32/$46 there ($31/$34 corners
+  -- and $51/$52/$54 fascia unchanged), and a template matches on tile ids, so
+  -- the recolour needs its own grid or the drawing is invisible to the
+  -- catalogue.  Same bands: the two roofs are the same drawing at a different
+  -- palette row, and the extruder reads whichever it is given.
+  {
+    id = "naljo_block_6x4_hip_b",
+    tiles = {
+      { 0x31, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x34 },
+      { 0x41, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x44 },
+      { 0x41, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 6 placements: LaurelCity x1, PhaceliaCity x1, SaxifrageIsland x1, OxalisCity x1
+  {
+    id = "naljo_pokecenter_4x4_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x08, 0x09, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x17, 0x17, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 5 placements: ToreniaCity x2, PhaceliaCity x1, OxalisCity x1, AcaniaDocks x1
+  {
+    id = "naljo_house_4x4_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: Route71West x1 -- the four-cell house in the $32/$46 roof,
+  -- with its door at the left of the front wall and a single window pair to
+  -- its right.  The recoloured hip again, at the smaller footprint.
+  {
+    id = "naljo_house_4x4_hip_b",
+    tiles = {
+      { 0x31, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x34 },
+      { 0x41, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x44 },
+      { 0x41, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 5 placements: PhaceliaCity x1, SaxifrageIsland x1, OxalisCity x1, ToreniaCity x1
+  {
+    id = "naljo_mart_4x4_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x18, 0x19, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x17, 0x17, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 3 placements: SpurgeCity x1, CaperRidge x1, PhloxTown x1
+  {
+    id = "naljo_pokecenter_4x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x08, 0x09, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x17, 0x17, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 2 placements: SpurgeCity x2
+  {
+    id = "naljo_block_4x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 2 placements: HeathVillage x1, ToreniaCity x1
+  {
+    id = "naljo_block_4x4_hip",
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 2 placements: LaurelCity x1, PhloxTown x1
+  {
+    id = "naljo_mart_4x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x18, 0x19, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x17, 0x17, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 2 placements: OxalisCity x2
+  {
+    id = "naljo_house_4x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: CaperRidge x1
+  {
+    id = "naljo_mart_4x4_hip_a",
+    tiles = {
+      { 0x31, 0x32, 0x32, 0x32, 0x32, 0x32, 0x32, 0x34 },
+      { 0x41, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x44 },
+      { 0x41, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x18, 0x19, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x17, 0x17, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 8, roofCycle = { 2, 23 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: OxalisCity x1
+  {
+    id = "naljo_house_4x4_a",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 15 placements: PhaceliaCity x3, LaurelCity x2, PhloxTown x2, ToreniaCity x2
+  {
+    id = "naljo_house_4x2",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x26, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 4 placements: OxalisCity x3, LaurelCity x1
+  {
+    id = "naljo_block_4x2",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x26, 0x1B, 0x1B, 0x26, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: PhloxTown x1
+  {
+    id = "naljo_block_4x2_a",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- ---- SPURGE CITY'S TERRACE ----------------------------------------------
+  -- Naljo's capital is not drawn the way its towns are.  Spurge is built down
+  -- a hillside and the houses are drawn one cell-row IN FRONT of one another
+  -- with no gap between them at all: read down any column of the map's south
+  -- half and it goes roof, facade, roof, facade, roof -- the row after a
+  -- house's last facade course is the next house's ridge.  Each of those IS
+  -- a separate house standing on the same ground; what the drawing omits is
+  -- the BASE COURSE, because the house in front covers it.
+  --
+  -- Every template above ends on that base course ($01/$02/$16), which is
+  -- what a building standing in the open looks like, so not one of them could
+  -- match here -- 18 roof corners on this one map, every one of them falling
+  -- through to the volume detector.  That path reads the roof's stripe bands
+  -- as separate storeys and stands them, which is the terrace of flat grey
+  -- slabs the city came out as.
+  --
+  -- These are the same drawings without the base row.  `measure` does not
+  -- need one: it takes the drawing's own ground line as the row after the
+  -- last drawn one, so a facade that simply stops still extrudes to its full
+  -- height and stands at the datum its neighbours vote for.  Nothing else
+  -- changes -- same gable bands as the rest of the region.
+  --
+  -- ORDER IS LOAD-BEARING TWICE OVER.  These come after every base-course
+  -- template, so a house drawn in the open is always claimed as a whole
+  -- house first and a section can only ever pick up what the catalogue left.
+  -- And among themselves they run TALLEST FIRST, because a section's grid is
+  -- a prefix of every taller section at the same width -- the 4x4 is the top
+  -- eight rows of the 4x6 exactly -- and a short one matched first would take
+  -- the tall one's placement and strand the courses below it.
+  -- 2 placements: SpurgeCity x2
+  {
+    id = "naljo_sec_6x6",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: SpurgeCity x1 -- cut by the map's EAST edge, so the roof run
+  -- ends on $11 with no $12 corner and the west jamb is all the drawing has
+  {
+    id = "naljo_sec_4x6_edge",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 3 placements: SpurgeCity x3
+  {
+    id = "naljo_sec_4x6",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: SpurgeCity x1
+  {
+    id = "naljo_sec_6x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 2 placements: SpurgeCity x2
+  {
+    id = "naljo_sec_4x4",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: SpurgeCity x1 -- the east-edge cut again, one course shorter
+  {
+    id = "naljo_sec_4x4_edge",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- 1 placement: SpurgeCity x1
+  -- Two of the terrace's houses are cut FRONT-ON: their roof is the last
+  -- thing on the map (the bottom four tile rows) or the house in front of
+  -- them covers the whole facade, so the drawing holds a roof and nothing
+  -- else.  There is no wall to extrude, so these claim and stamp nothing --
+  -- the roof paints flat, which is what the 2D game shows there, instead of
+  -- standing as a slab.
+  {
+    id = "naljo_sec_roof_8x2",
+    claimOnly = true,
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+    },
+  },
+  -- 4 placements: SpurgeCity x4
+  {
+    id = "naljo_sec_roof_6x2",
+    claimOnly = true,
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+    },
+  },
+  -- 2 placements: SpurgeCity x2 -- east-edge cut as well as front-cut
+  {
+    id = "naljo_sec_roof_4x2_edge",
+    claimOnly = true,
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B },
+    },
+  },
+  -- ---- A FACADE WITH NO ROOF ----------------------------------------------
+  -- 1 placement: OxalisCity x1, at the top of the map.  This is the mirror of
+  -- the two edge partials below: there the map keeps a building's ROOF and the
+  -- rest is on the neighbour, here it keeps the FRONT -- four tile rows of
+  -- facade, door and base course starting on row 0, with the roof off the
+  -- north edge entirely.
+  --
+  -- Every other template in this file matches from a roof corner, so nothing
+  -- could match it, and an unmatched drawing goes to the volume detector: it
+  -- came out as two cells of uniform `wall` at 16, a flat slab sitting level
+  -- with the terrace beside it rather than a building front.
+  --
+  -- `roofRows = 0` is what says "this drawing is all facade".  measure() then
+  -- takes the whole thing as wall (`wallH = ground - roofRows`), and every
+  -- roof test in the builder is `top[x] < roofRows`, which no column can
+  -- satisfy at zero -- so the roof solid, its rims and its eave are all
+  -- skipped and the front extrudes to its full 32px.  `roofCycle` still has to
+  -- be present because the band table is computed before those tests; it is
+  -- never read.
+  {
+    id = "naljo_facade_4x2_northcut",
+    tiles = {
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x37, 0x38, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 1 },
+    slab = 4, frontEave = 0, ledge = nil,
+  },
+  -- ---- MAP-EDGE PARTIALS -------------------------------------------------
+  -- Two placements are drawings CUT BY THE MAP BORDER: Route 73's house sits
+  -- on the last cell row of the map and Route 75's on the last two columns,
+  -- so each map holds only the roof and the rest of the building is on the
+  -- connected map beyond.  There is no facade to extrude and no base course
+  -- to stand on, and left unmatched the volume detector read the roof's
+  -- stripe bands as storeys and stood a half-building of slabs at the edge.
+  --
+  -- `claimOnly` is what the profile already does for the other half-drawing
+  -- of this kind (Lavender's tower rows on ROUTE_10): claim the tiles so the
+  -- detector never boxes them, stamp no model, and let the roof paint flat --
+  -- which is what the 2D game shows at a map seam.  Both go LAST in the list,
+  -- so every whole building claims its cells first and these can only ever
+  -- pick up what is genuinely left over at a border.
+  {
+    id = "naljo_edge_roof_4x2_hip",
+    claimOnly = true,
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x34 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x41, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x44 },
+      { 0x51, 0x52, 0x52, 0x52, 0x52, 0x52, 0x52, 0x54 },
+    },
+  },
+  {
+    id = "naljo_edge_roof_2x2_hip",
+    claimOnly = true,
+    tiles = {
+      { 0x31, 0x36, 0x36, 0x36 },
+      { 0x41, 0x48, 0x48, 0x48 },
+      { 0x41, 0x48, 0x48, 0x48 },
+      { 0x51, 0x52, 0x52, 0x52 },
+    },
+  },
+}
+
+profile.buildings.Tileset01 = naljoBuildings
+profile.buildings.Tileset02 = naljoBuildings
+profile.buildings.Tileset56 = naljoBuildings
+
+-- Prism's opening campsite.  The structure the river falls out of is a stone
+-- gatehouse standing at the top of the map, and the volume detector reads it
+-- the way it reads every repeating facade: its three identical courses of $61
+-- make it a 16px repeat, and a repeat never roofs -- so it comes out as a flat
+-- plate with the building printed on it.
+--
+-- Read off the map's own tile grid at (30,0):
+--
+--   6E 01 01 01 01 6F     the rim seen from above, with its two corners
+--   60 11 11 11 11 62     the deck
+--   60 61 61 61 61 62     |
+--   60 61 61 61 61 62     |  facade: $60/$62 are the jambs, $61 the field
+--   60 61 48 49 61 62     |  and $48/$49 over $58/$59 the dark doorway
+--   60 61 58 59 61 62     |
+--
+-- Two tile rows of that are the top, so roofRows is 16 PIXELS, not 2 -- every
+-- one of these numbers is in drawn pixel rows (Johto's lighthouse is 32 for
+-- its four-row gallery).  The rim is one tile row deep and there is no eave:
+-- this is masonry standing straight up, not a gabled roof overhanging a wall.
+--
+-- FIRST CUT.  The six numbers below are a craft, not a derivation, and they
+-- were reasoned from Johto's entries rather than seen -- there is no LOVE in
+-- the authoring environment to look at the result.  Expect to tune slab and
+-- roofBack against a screenshot.
+profile.buildings.Tileset03 = {
+  {
+    id = "prism_intro_gatehouse",
+    tiles = {
+      { 0x6E, 0x01, 0x01, 0x01, 0x01, 0x6F },
+      { 0x60, 0x11, 0x11, 0x11, 0x11, 0x62 },
+      { 0x60, 0x61, 0x61, 0x61, 0x61, 0x62 },
+      { 0x60, 0x61, 0x61, 0x61, 0x61, 0x62 },
+      { 0x60, 0x61, 0x48, 0x49, 0x61, 0x62 },
+      { 0x60, 0x61, 0x58, 0x59, 0x61, 0x62 },
+    },
+    roofRows = 16, roofBack = 8, roofFront = 0, roofCycle = { 8, 15 },
+    slab = 4, frontEave = 0, ledge = nil,
+  },
+}
+
+profile.buildings.TilesetJohtoModern = {
+  -- THE RADIO TOWER, and it comes before even the department store.  Twelve
+  -- cells of identical window course is exactly the repeat the volume path's
+  -- trim-foot rule reads as a 16px pattern, so the city's landmark was
+  -- pressed flat into its own pavement the way Olivine's lighthouse was.
+  --
+  -- It is drawn as TWO stepped shafts side by side, the west one six cells
+  -- taller than the east.  The rectangle that would hold both also holds the
+  -- cottage and the pavement standing north of the east shaft -- cells this
+  -- must not claim -- so it is two templates split down the seam between the
+  -- shafts.  Each seals the cut side (`e` on the west, `w` on the east):
+  -- the drawing runs straight on across it, and without the seal the
+  -- silhouette flood walks in through the window courses and hollows the
+  -- tower out.  Each half still carries its own height, so the west shaft
+  -- rises past the east one just as the art shows.
+  {
+    id = "goldenrod_radio_tower_west",
+    tiles = {
+      { 0x2E, 0x56, 0x42, 0x43 },
+      { 0x50, 0x30, 0x33, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x26, 0x26, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x26, 0x26, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x26, 0x26, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x26, 0x26, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x26, 0x26, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x26, 0x26, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x21 },
+      { 0x50, 0x26, 0x26, 0x26 },
+      { 0x50, 0x21, 0x1D, 0x21 },
+      { 0x50, 0x26, 0x26, 0x26 },
+      { 0x50, 0x21, 0x1D, 0x21 },
+      { 0x50, 0x26, 0x26, 0x26 },
+      { 0x50, 0x21, 0x1D, 0x21 },
+      { 0x50, 0x53, 0x35, 0x35 },
+      { 0x50, 0x53, 0x35, 0x35 },
+      { 0x20, 0x25, 0x06, 0x06 },
+    },
+    -- the cap is two tile rows -- the black crown and the dish standing on
+    -- it -- so a 16px band with no eave: this is a flat modern roof, not
+    -- one of Johto's gables.
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 0, ledge = nil,
+    seal = "e",
+  },
+  -- the east shaft, topping out six cells lower with its own dish
+  {
+    id = "goldenrod_radio_tower_east",
+    tiles = {
+      { 0x2E, 0x56, 0x42, 0x43 },
+      { 0x1D, 0x30, 0x33, 0x53 },
+      { 0x1D, 0x21, 0x1D, 0x53 },
+      { 0x26, 0x26, 0x26, 0x53 },
+      { 0x1D, 0x21, 0x1D, 0x53 },
+      { 0x26, 0x26, 0x26, 0x53 },
+      { 0x1D, 0x21, 0x1D, 0x53 },
+      { 0x26, 0x26, 0x26, 0x53 },
+      { 0x1D, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x50, 0x21, 0x1D, 0x53 },
+      { 0x20, 0x21, 0x1D, 0x25 },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 0, ledge = nil,
+    seal = "w",
+  },
+  -- the department store: six cells wide and EIGHT cells tall, storey
+  -- bands of window ($26) every three courses.  It has to come first --
+  -- first claim wins, and the smaller blocks below would otherwise take
+  -- bites out of its facade and stand second buildings through it.
+  {
+    id = "goldenrod_dept_store",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x37, 0x38, 0x07, 0x07, 0x18, 0x19, 0x07, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x17, 0x17, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the six-cell plaster hall with a bay at each end and a central door:
+  -- Johto's `johto_hall` drawn in $07 render instead of $1B brick
+  {
+    id = "goldenrod_hall_plain",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x37, 0x38, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the same hall with its door at the west end and one bay at the east
+  {
+    id = "goldenrod_hall_plain_w",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x07, 0x37, 0x38, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x01, 0x02, 0x39, 0x3A, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- doorless four-cell blocks with a bay at each end, plaster and brick:
+  -- the city's back-lot warehouses
+  {
+    id = "goldenrod_block_plain_2bay",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x07, 0x07, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  {
+    id = "goldenrod_block_brick_2bay",
+    tiles = {
+      { 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x12 },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0D, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0F },
+      { 0x0A, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x1A, 0x26, 0x26, 0x1B, 0x1B, 0x26, 0x26, 0x1C },
+      { 0x1A, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1C },
+      { 0x01, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x16 },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+}
+
+-- ...then Johto's own catalogue behind them. Every drawing it names is cut
+-- from tiles Modern shares byte for byte, and Azalea's Mart, Centre, gym and
+-- cottages and Goldenrod's Centre, gym and terraces are those drawings
+-- exactly -- matched against both maps' tile grids before this was written.
+-- Order is priority order (first claim wins), so the city-specific templates
+-- above get their cells first.
+for _, template in ipairs(profile.buildings.TilesetJohto) do
+  profile.buildings.TilesetJohtoModern[#profile.buildings.TilesetJohtoModern + 1]
+    = template
+end
+
+-- ---------------------------------------------------------------------------
+-- TilesetKanto -- the set the whole of Kanto is drawn in, 39 maps, the
+-- largest single gap left after JohtoModern and the same failure: no pins at
+-- all, so every ledge, every fence run and every tree came out as a 16px
+-- wall.
+--
+-- Nothing transplants from Johto: comparing the two atlases only three of 96
+-- tiles match, and none of them is one the Johto pins name.  Every group
+-- below was read off Kanto's own 128 blocks -- the tile quad that fills each
+-- 16x16 cell, counted across the whole blockset, cross-checked against the
+-- collision class the cell carries.
+profile.tilesets.TilesetKanto = {
+  -- the two turf drawings the ledge classes ($A0-$A5) themselves sit on --
+  -- $2C the dappled grass (51 cells) and $39 the sparse one (20) -- plus the
+  -- pavement $23/$11/$10/$30 that the towns' forecourts are paved with.  All
+  -- are walkable, so they would already fall to "ground"; naming them keeps
+  -- them flat where they run into a blocked cell, which is where the
+  -- fallback would otherwise raise them.
+  -- $11 is NOT ground.  It is Kanto's PLATEAU FLOOR -- the dirt drawn on top
+  -- of every mountain shelf -- and listing it as ground is why the Cerulean
+  -- and Route 24/25 shelves stayed flat even once their cliff faces stood up:
+  -- the face was 16px and the ground on top of it was 0.
+  --
+  -- It reads as ordinary dirt, so the evidence is where it is DRAWN.  Swept
+  -- over all 66 TilesetKanto maps it fills 6595 cells across 39 maps, and the
+  -- maps it fills are the mountain ones: Silver Cave Outside (789), Route 3
+  -- (470), Route 22 (357), Route 9 (287), Route 25 (278).  The town paving is
+  -- a different tile -- $23, 4074 cells whose top maps are Route 17, Pewter,
+  -- Saffron, Cerulean and Viridian, the forecourts -- and $23 sits next to a
+  -- cliff face 14% of the time against $11's 38%.  The two are not the same
+  -- surface and were never drawn as one.
+  --
+  -- This is exactly Johto's $3C: the floor ON a cliff, which is the only
+  -- place Gen 2 writes an elevation down at all.
+  terrace = { 0x11 },
+  ground = { 0x10, 0x23, 0x2C, 0x30, 0x39 },
+  -- class $29 is Kanto's water, and these four are the only tiles ever drawn
+  -- in one: $14 the open surface, $33 and $31 the shore courses, $54 the
+  -- ripple.
+  water = { 0x14, 0x31, 0x33, 0x54 },
+  -- the hop-down lip.  As in Johto the class table cannot reach it -- the
+  -- LEDGE classes sit on the turf ABOVE the drop and the lip's own cell is
+  -- plain $07 -- so it took a tile pin or it stood as a wall.  Kanto draws
+  -- the lip as a course of cobbles: $37 the run, $36 and $34 its end caps,
+  -- $27 and $24 the same course turned to face left and right, $0D the
+  -- inside corner.  Every block that carries a ledge class is bounded by
+  -- exactly these six and nothing else.
+  -- $24 and $27 are NOT ledge lips, and reading them as one is what left
+  -- every Kanto plateau flat.  Measured across all 66 TilesetKanto maps, a
+  -- vertical run of $37 is one cell tall 2254 times out of 2254 -- that is a
+  -- hop-down lip, and it stays here.  $24 and $27 are the opposite: 149 runs
+  -- each, 98% and 100% of them TALLER than one cell, up to twenty-eight cells
+  -- in a single column.  Nothing hops down twenty-eight cells; those two are
+  -- the cliff FACE, seen edge-on, and the ledge class is a 6px kerb -- so the
+  -- whole west wall of the Cerulean plateau was drawn as a low step with the
+  -- ground above it at the same height as the ground below.  Left unpinned
+  -- they fall to `wall`, which is what a cliff face is, and which is exactly
+  -- the call Johto makes for its own shared cap tiles ($4B/$4D).
+  ledge = { 0x0D, 0x34, 0x36, 0x37 },
+  -- $39 is the other floor that can find itself on top of a drop, but unlike
+  -- $11 it is genuinely general-purpose turf -- 5561 cells over 62 maps, most
+  -- of them Vermilion, Viridian and Pewter -- so pinning it outright would
+  -- raise half the verges in Kanto.  It only counts as a terrace where the
+  -- cell below it is the $0E cliff face, which is the shape the sweep found
+  -- 4117 times.  Both tile rows of the cell need the rule or the cell comes
+  -- out half terrace and half ground, which carves as a broken hull -- hence
+  -- the `rows = 2` twin.
+  when_below = {
+    [0x39] = { { below = { 0x0E }, class = "terrace" },
+               { below = { 0x0E }, rows = 2, class = "terrace" } },
+  },
+  -- No `post` pin.  $4F was read as a wooden rail because its cells carry
+  -- $70/$76/$7E, but CheckWarpCollision matches exactly those classes ($60,
+  -- $68, high nybble $7): they are WARPS, so $4F is the entrance mat laid
+  -- in front of a gate, and standing it up boxed off every doorway.
+  -- the flowerbeds.  $03 is the one that matters -- the blossoms scattered
+  -- through the turf of every Kanto town, drawn as a diagonal spray across
+  -- a 2x2 block of walkable grass -- and it was missing, so every one of
+  -- them was painted flat while Johto's ($03 there too) stood up and swayed.
+  -- $04 is the denser bed of blocks $2F and $5C and was the only id here.
+  flower = { 0x03, 0x04 },
+  -- Kanto's two round tree drawings, both one cell tall: $2A/$2B/$3A/$3B the
+  -- pale-crowned tree that borders the routes (48 cells) and $40/$41/$50/$51
+  -- the dark leafy one the towns are hedged with (27).  Left to the volume
+  -- path each row of them came out as one flat-topped plateau with the
+  -- canopy printed on its lid; the cylinder archetype carves a voxel ball
+  -- per cell from the crown's outline so they read as canopies.
+  --
+  -- The cut tree ($2D/$2E/$3D/$3E) and the boulder ($48/$49/$58/$59) need no
+  -- pin: their cells carry classes $12 and $7B, which the collision map
+  -- already rounds.
+  cylinder = { 0x2A, 0x2B, 0x3A, 0x3B, 0x40, 0x41, 0x50, 0x51 },
+  -- KANTO'S RAIL FENCE, the run that pens Pallet's yards and lines the
+  -- ridge above Viridian: $0E over $55, one cell per bay, and drawn
+  -- nowhere else in the set.  Its cells are plain $07, so a fence read as
+  -- a solid 16px wall -- a row of barrels rather than a rail you could see
+  -- the town through.
+  --
+  -- `post`, not `fence`: the fence class is a BOX at 10px, which turns a
+  -- run into one continuous fence-textured kerb -- lower than a wall and
+  -- still a wall.  A fence is mostly holes, and the post pool is the one
+  -- that says so: it cuts the drawing per pixel and stands each CELL in
+  -- its own depth band, so a run comes out as separate pickets with
+  -- daylight between them.  Same class Johto's fence takes.
+  post = { 0x0E, 0x55 },
+  -- THE SIGNPOSTS: $46/$47 over $56/$57, a board on a stick, one cell,
+  -- and again plain $07 so each stood as a cube.  `signpost` is the thin
+  -- per-pixel plate the class exists for -- a sign is not furniture.
+  signpost = { 0x46, 0x47, 0x56, 0x57 },
+}
+
+-- ---------------------------------------------------------------------------
+-- KANTO'S BUILDINGS.
+--
+-- There was no `buildings` list for TilesetKanto at all -- Johto had ten
+-- templates and Kanto none -- so every house, lab, Mart and Center west of
+-- the Tohjo Falls fell to the volume path, and fell to it the same way
+-- Johto's did before its list was written: Kanto's facade repeats its wall
+-- course ($4B under $4B, $1A under $1A), the detector's trim-foot rule
+-- reads a repeat, a repeat never roofs, and a six-tile-row drawing came out
+-- as a 16px flat-lidded box with the roof printed on its lid.
+--
+-- Kanto's catalogue is drawn to the same three courses Johto's is -- a
+-- ridge cap, a field, a fascia -- so the band table is Johto's unchanged
+-- (2 back, 4 front, the middle cycling), and the templates differ only in
+-- their tile grids and in how deep the roof band runs.
+profile.buildings.TilesetKanto = {
+  -- PEWTER MUSEUM, the biggest drawing in Kanto: 8 cells wide and 6 tall,
+  -- and the gym's tiled pitch run a whole extra course deeper -- rows 0-6
+  -- are roof (56px) over five rows of facade.  It has to come first: every
+  -- narrower tiled template below is a sub-rectangle of its roof field in
+  -- everything but the verge, and placement is first-claim-wins.
+  {
+    id = "kanto_museum",
+    tiles = {
+      { 0x05, 0x06, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x08, 0x09 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x28, 0x29 },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x0A, 0x32, 0x0A, 0x0A, 0x0A, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 56, roofBack = 2, roofFront = 4, roofCycle = { 2, 51 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- CERULEAN GYM: the tiled pitch again, 8 cells wide over four tall, with
+  -- the twin sign panels ($2F/$3F between $22) across its lintel.
+  {
+    id = "kanto_gym_wide",
+    tiles = {
+      { 0x05, 0x06, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x08, 0x09 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0A, 0x0A, 0x22, 0x2F, 0x3F, 0x22, 0x22, 0x2F, 0x3F, 0x22, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x0F, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x1F },
+      { 0x0F, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0B, 0x0C, 0x0A, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- ------------------------------------------------------------------
+  -- THE SLATE OFFICE BLOCKS -- Vermilion, Saffron and Celadon are built
+  -- almost entirely out of these, and not one of them had a template, so
+  -- three whole cities came out as flat-lidded boxes.  All share the lab's
+  -- cap ($4C/$4E/$4D over two courses of $5A/$5E over a $5C/$5F/$5D
+  -- fascia) and differ only in footprint and in which window course
+  -- ($0A/$32) and door ($0B/$0C over $1B/$1C) fill the facade.
+  --
+  -- Ordered tallest and widest first throughout: placement is
+  -- first-claim-wins and every smaller block here is a sub-rectangle of a
+  -- larger one's facade.
+  --
+  -- SILPH CO, eight cells wide and twelve tall, the tallest building in
+  -- Kanto and twenty rows of repeating storey -- the volume path's
+  -- trim-foot rule at its worst.
+  {
+    id = "kanto_silph",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x32, 0x4B, 0x4B, 0x32, 0x0A, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x0B, 0x0C, 0x0A, 0x0A, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- CELADON DEPARTMENT STORE: six cells wide, eight tall, MART ($44/$45
+  -- over $4A) beside the door.
+  {
+    id = "kanto_dept_store",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x32, 0x4B, 0x4B, 0x32, 0x0A, 0x0A, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x0B, 0x0C, 0x0A, 0x0A, 0x44, 0x45, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x4A, 0x4A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the six-cell block six storeys tall: Celadon's Game Corner and the
+  -- mansions that repeat its drawing.
+  {
+    id = "kanto_office_6x6",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x32, 0x4B, 0x4B, 0x32, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x0B, 0x0C, 0x0A, 0x0A, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the eight-cell hall, two storeys, its door off centre to the east
+  {
+    id = "kanto_office_8x4",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x0A, 0x32, 0x0A, 0x0A, 0x32, 0x4B, 0x4B, 0x32, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x0B, 0x0C, 0x0A, 0x0A, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the four-cell block, six storeys: Saffron's and Celadon's back lots
+  {
+    id = "kanto_office_4x6",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- and the four-cell block four storeys tall, with and without a door:
+  -- the single commonest drawing in Kanto's cities
+  {
+    id = "kanto_office_4x4_door",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x0B, 0x0C, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  {
+    id = "kanto_office_4x4",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- OAK'S LAB, and the same drawing wherever Kanto repeats it: 6 cells
+  -- wide, 4 tall, with a 32px roof band ($4C/$4E/$4D cap, two courses of
+  -- $5A/$5E field, a $5C/$5F/$5D fascia) over a two-cell brick facade.
+  -- Listed first because it is the largest: placement is first-claim-wins
+  -- and the smaller house below shares its wall tiles.
+  {
+    id = "kanto_lab",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x32, 0x4B, 0x4B, 0x32, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x0B, 0x0C, 0x0A, 0x0A, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- THE CIVIC BLOCK: the Center and the Mart, which share Oak's slate roof
+  -- and differ from him only in where the door sits and how the brick runs
+  -- under it.  Same 6x4 footprint, same 32px band.
+  {
+    id = "kanto_civic",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x0B, 0x0C, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the same slate block with no door at all: Pewter's civic hall and the
+  -- warehouses that repeat it.  Its window course is the lab's, so it
+  -- differs from the two above in the facade only.
+  {
+    id = "kanto_civic_blank",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x0A, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- THE GYM.  Also 6x4, but its roof is the tiled pitch the houses wear
+  -- rather than the civic slate, run two courses deeper ($53 over $12 over
+  -- $12 over $17) with the $38/$19 verge down both sides.
+  {
+    id = "kanto_gym",
+    tiles = {
+      { 0x05, 0x06, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x53, 0x08, 0x09 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0A, 0x0A, 0x22, 0x2F, 0x3F, 0x22, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x0F, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x1F },
+      { 0x0F, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0B, 0x0C, 0x0A, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the tiled pitch on a FOUR-cell plot -- Cerulean's bike shop and the
+  -- trade house, four cells square with a window course over the door.
+  -- Two of them, one with a shutter ($32) where the other has plain wall.
+  {
+    id = "kanto_gym_small",
+    tiles = {
+      { 0x05, 0x06, 0x53, 0x53, 0x53, 0x53, 0x08, 0x09 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0A, 0x0A, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x0F, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x1F },
+      { 0x0F, 0x0A, 0x0A, 0x0A, 0x0B, 0x0C, 0x0A, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  {
+    id = "kanto_gym_small_shutter",
+    tiles = {
+      { 0x05, 0x06, 0x53, 0x53, 0x53, 0x53, 0x08, 0x09 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x38, 0x12, 0x12, 0x12, 0x12, 0x38, 0x19 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0A, 0x0A, 0x32, 0x0A, 0x28, 0x29 },
+      { 0x0F, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x1F },
+      { 0x0F, 0x0A, 0x0A, 0x0A, 0x0B, 0x0C, 0x32, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- THE MART: the same slate roof again, but only 4 cells wide over four
+  -- tall, with the MART board ($44/$45 over $4A) beside its door.  It is
+  -- listed above the houses because it is four rows deep and they are two
+  -- and three -- a shorter template placed first would claim its facade
+  -- and leave the roof to the volume path, which is what the first draft
+  -- of this list did.
+  {
+    id = "kanto_mart",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x0A, 0x0A, 0x0A, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x0B, 0x0C, 0x44, 0x45, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x4A, 0x4A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- THE POKEMON CENTER, the Mart's twin down to the tile with the POKe
+  -- board ($42/$43) hung where the Mart's ($44/$45) is.  Every Center in
+  -- Kanto is this drawing, so its absence was one missing building per
+  -- town -- and always the one the player walks up to first.
+  {
+    id = "kanto_center",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+      { 0x0F, 0x0A, 0x32, 0x0A, 0x0A, 0x0A, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x0B, 0x0C, 0x42, 0x43, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x4A, 0x4A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- THE KANTO HOUSE: 4 cells wide, 3 tall.  The roof runs four tile rows
+  -- deep here rather than the lab's four-over-a-taller-wall -- $05..$09
+  -- and $15..$19 the pitched field, $25/$26/$28/$29 the eave corners,
+  -- $5C/$5D closing the fascia -- over a single-cell facade with the
+  -- door ($0B/$0C over $1B/$1C, the cell the game marks $71) in it.
+  {
+    id = "kanto_house",
+    tiles = {
+      { 0x05, 0x06, 0x07, 0x07, 0x07, 0x07, 0x08, 0x09 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x32, 0x22, 0x32, 0x32, 0x28, 0x29 },
+      { 0x5C, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x5D },
+      { 0x0F, 0x22, 0x0B, 0x0C, 0x0A, 0x0A, 0x22, 0x1F },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- THE ROW HOUSES, the cottage stretched along its ridge: the same two
+  -- roof rows over a single facade course, but six and eight cells wide
+  -- with the shuttered bay ($23/$32/$0A/$23) repeated between the ends.
+  -- These are the ordinary houses of Cerulean, Vermilion, Saffron and
+  -- Celadon -- the bulk of every Kanto town -- and only the four-cell
+  -- cottage below had a template, so the wide ones stood as boxes.
+  -- Widest first, and all three ahead of the cottage.
+  {
+    id = "kanto_row_8x2_door",
+    tiles = {
+      { 0x05, 0x06, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x08, 0x09 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0B, 0x0C, 0x23, 0x32, 0x0A, 0x23, 0x23, 0x32, 0x0A, 0x23, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  {
+    id = "kanto_row_6x2_door",
+    tiles = {
+      { 0x05, 0x06, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x08, 0x09 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0B, 0x0C, 0x23, 0x32, 0x0A, 0x23, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  {
+    id = "kanto_row_6x2_window",
+    tiles = {
+      { 0x05, 0x06, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x08, 0x09 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0A, 0x22, 0x23, 0x32, 0x0A, 0x23, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- THE COTTAGE: the same drawing with the upper wall course cut away, 4
+  -- cells wide and 2 tall, which is the ordinary house of every Kanto
+  -- town.  Two of them, differing only in whether this face carries the
+  -- door ($0B/$0C) or a window ($0A/$22) -- and they must come after the
+  -- three-cell house above, because their two roof rows are its two roof
+  -- rows and placement is first-claim-wins.
+  {
+    id = "kanto_cottage_door",
+    tiles = {
+      { 0x05, 0x06, 0x07, 0x07, 0x07, 0x07, 0x08, 0x09 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0B, 0x0C, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x1D, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  {
+    id = "kanto_cottage_window",
+    tiles = {
+      { 0x05, 0x06, 0x07, 0x07, 0x07, 0x07, 0x08, 0x09 },
+      { 0x15, 0x16, 0x17, 0x17, 0x17, 0x17, 0x18, 0x19 },
+      { 0x25, 0x26, 0x0A, 0x22, 0x0A, 0x0A, 0x28, 0x29 },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 16, roofBack = 2, roofFront = 4, roofCycle = { 2, 11 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- ------------------------------------------------------------------
+  -- THE CLIPPED ONES, and they have to come LAST.  Both grids below are
+  -- sub-rectangles of a whole block above, so first-claim-wins is the only
+  -- thing keeping them from stealing ordinary placements: every full
+  -- drawing must have had its chance before these two are offered.
+  --
+  -- THE KANTO RADIO TOWER at Lavender: six cells wide, six storeys, and
+  -- its cap is off the north edge of the map, so the roof is supplied by
+  -- `topRows` instead of being read off the drawing.
+  {
+    id = "kanto_tower_clipped",
+    topRows = {
+      { 0x4C, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4D },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5A, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5E, 0x5A },
+      { 0x5C, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5F, 0x5D },
+    },
+    tiles = {
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x0A, 0x32, 0x32, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x32, 0x0A, 0x32, 0x32, 0x0A, 0x0A, 0x32, 0x0A, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x32, 0x0A, 0x0A, 0x32, 0x4B, 0x4B, 0x32, 0x32, 0x0A, 0x32, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x0F, 0x4B, 0x4B, 0x4B, 0x0B, 0x0C, 0x0A, 0x0A, 0x4B, 0x4B, 0x4B, 0x1F },
+      { 0x1D, 0x1A, 0x1A, 0x1A, 0x1B, 0x1C, 0x1A, 0x1A, 0x1A, 0x1A, 0x1A, 0x3C },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+  -- the Safari Zone's west block at Fuchsia, whose eastern half is off the
+  -- map: only the two western cells of a four-cell office survive, so the
+  -- silhouette is sealed on the east and nothing is inferred beyond it.
+  {
+    id = "kanto_office_2x4_clipped_e",
+    tiles = {
+      { 0x4C, 0x4E, 0x4E, 0x4E },
+      { 0x5A, 0x5E, 0x5E, 0x5E },
+      { 0x5A, 0x5E, 0x5E, 0x5E },
+      { 0x5C, 0x5F, 0x5F, 0x5F },
+      { 0x0F, 0x32, 0x0A, 0x0A },
+      { 0x0F, 0x4B, 0x4B, 0x4B },
+      { 0x0F, 0x4B, 0x4B, 0x4B },
+      { 0x1D, 0x1A, 0x1A, 0x1A },
+    },
+    roofRows = 32, roofBack = 2, roofFront = 4, roofCycle = { 2, 27 },
+    slab = 4, frontEave = 4, ledge = nil,
+  },
+}
+
+-- ---------------------------------------------------------------------------
+-- THE INTERIORS.
+--
+-- Nothing indoors in Generation 2 had a pin of any kind, so every room in
+-- the game came out of `forMap`'s fallback as a field of identical 16px
+-- cubes: the Centers' healing machine, their PC, the Marts' stock shelves,
+-- the tables you sit at and the stools you sit on were all the same grey
+-- box in the same place, each wearing its own drawing in relief.
+--
+-- Most of it is fixed one storey up, in the `collision` table: the ROM
+-- names a bookshelf, a PC, a radio, a Mart shelf, a TV and a burner
+-- outright, and eight rows there reach all twenty-odd indoor tilesets at
+-- once.  What is left over is the furniture the ROM does NOT name -- it is
+-- all plain class $07, the same class as the wall behind it -- and that
+-- takes a tile pin per tileset, which is what follows.
+--
+-- Two shapes carry most of the load:
+--
+--   `bookcase`  for a drawing that is TALL rather than deep -- a machine
+--               or a shelf standing against a wall, drawn across two cell
+--               rows because that is how you draw height on a flat map.
+--               Structures collapses its drawn ranks onto ONE cell of
+--               plot at full 32px height, which is the difference between
+--               a healing machine and two crates stacked front to back.
+--   `table` /   for furniture drawn from ABOVE at its real footprint --
+--   `stool`     a 12px table you can see the top of, an 8px seat a
+--               character stands at the right height on.
+--
+-- ---------------------------------------------------------------------------
+-- TilesetPokecenter -- every Pokemon Center in Johto and Kanto.
+
+-- ---------------------------------------------------------------------------
+-- POKEMON PRISM
+--
+-- Prism's tilesets are NUMBERED, not named -- its own source calls them
+-- Tileset00..Tileset56 and nothing else -- so none of the lists above can ever
+-- match one, and every solid tile in the game falls to rule 4's `wall`: a 16px
+-- upright fold.  That is why its forests read as rows of boxes.
+--
+-- The art is redrawn from scratch: not one tile of any Prism tileset matches
+-- Crystal's at the same index, byte for byte, checked across all 57.  But the
+-- INDEX LAYOUT is inherited -- ground is still $05/$06, open water still $14,
+-- the fence rail still $59/$5A, and the tree is still the $1E/$1F, $2E/$2F,
+-- $3E/$3F column Johto draws it with -- so the vocabulary above transfers even
+-- though the drawings do not.
+--
+-- Nothing below rests on that resemblance alone.  Every row is a hypothesis
+-- taken from Johto's layout and then CHECKED against the tileset's own
+-- tilesets/NN_metatiles.bin and NN_collision.asm, with land/water/wall read
+-- from Prism's own permission table rather than assumed:
+--
+--   ground    overwhelmingly LANDTILE, but lands in a blocked cell sometimes
+--             -- the grass beside a cliff post, which the cell rules cannot
+--             rescue and which stands up as a box unpinned
+--   water     overwhelmingly WATERTILE
+--   cylinder  ONLY ever in a WALLTILE cell, AND drawn directly above the next
+--             course of the same tree column.  An ordinary building wall
+--             passes the first test and fails the second, which is the whole
+--             reason the second exists.  Whole PAIRS only -- a tree is two
+--             tiles wide, and half a tree standing in a wall is worse than the
+--             box it replaces.
+--
+-- Regenerate (and re-verify) with:
+--   python3 tools/prism_voxel_pins.py <pokeprism src> --env <env.json> \
+--       --lua /tmp/pins.lua
+-- and read the sheet they were checked against with:
+--   python3 tools/tileset_blocks.py <pokeprism src> 56 -o /tmp/ts56.png
+--
+-- Tileset00, 01 and 56 are the same INCBIN under three names (tilesets.asm
+-- aliases them), which is why they carry identical lists; between them they
+-- are 61 of Prism's maps.  The rest are its other biomes, and a biome that
+-- reuses only some of Johto's indices gets only the rows that verified -- a
+-- partial list is the honest answer, not a gap.
+-- ---------------------------------------------------------------------------
+
+profile.tilesets.Tileset00 = {
+  ground = { 0x05, 0x06 },
+  water = { 0x14 },
+  cylinder = { 0x13, 0x15, 0x1D, 0x1E, 0x1F, 0x32, 0x33, 0x3E, 0x3F, 0x45, 0x4A, 0x5B },
+  planter = { 0x2E, 0x2F },
+  post = { 0x59, 0x5A },
+  rail_face = { 0x5A, 0x59 },
+  when_below = {
+    [0x1E] = { { below = { 0x2E }, class = "planter" } },
+    [0x1F] = { { below = { 0x2F }, class = "planter" } },
+    -- $32/$33 IS THE SAME CROWN, one course further down.  Naljo's forest
+    -- wall is not two cells of tree, it is a RUN: block $61 -- the border
+    -- block every route rings itself with -- is $32/$33 over $2E/$2F and
+    -- then $32/$33 over $2E/$2F again, and blocks $8C/$8D/$EE/$F0 stack it
+    -- deeper under a $1E/$1F cap.  Only $1E/$1F was armed, so in every one
+    -- of those cells the top tile row stayed a 16px `cylinder` while the
+    -- bottom row was a 32px `planter` -- and a cell whose four tiles
+    -- disagree cannot be carved as one hull, which is the wall of flat
+    -- green panels the routes came out as.  Armed off exactly the same
+    -- course, the cell is uniform and the run rounds off.
+    [0x32] = { { below = { 0x2E }, class = "planter" } },
+    [0x33] = { { below = { 0x2F }, class = "planter" } },
+  },
+  -- ...AND NOT AS A SPRAY.  `planter` caps the drawing's top 24 rows to a
+  -- five-voxel slab, because a potted plant's crown is a flat fan of leaves.
+  -- A CONIFER'S IS A BALL.  Capped, every course of every tree in the region
+  -- came out as a thin card standing on edge -- the flat green panels the
+  -- routes showed -- while the trunk course under it, which falls outside
+  -- the cap, rounded properly.  Off, every drawn row turns the full 16px it
+  -- is drawn at and the whole column reads as one round tree.
+  planter_spray = false,
+  -- THE FOOT COURSE IS PART OF THE TREE, and leaving it out is what put the
+  -- crowns on the floor.  Naljo draws a conifer as a RUN of one-cell
+  -- courses, read off the block sheet and counted over all 27 maps that use
+  -- these sets: a CROWN ($1E/$1F over $2E/$2F), zero or more MIDDLES
+  -- ($32/$33 over $2E/$2F), and a FOOT ($3E/$3F over $4A/$5B) -- the course
+  -- with the trunk drawn on it, which is where the tree touches the ground.
+  -- The commonest run in the region is the plain two-course tree, crown
+  -- straight onto foot: 221 of 1503 runs, more than any other shape.
+  --
+  -- Only the crown and middle were pinned.  `planter` stands its 32px hull
+  -- in the cell BELOW the anchor and only carves when that cell is planter
+  -- too, so on every one of those 221 trees the crown found a `cylinder`
+  -- foot, refused to pair, and fell through to the mesher -- and a crown
+  -- that carves nothing is a crown lying flat on the plot BEHIND its own
+  -- trunk, which is exactly what the forests looked like.
+  --
+  -- The foot is armed off what is drawn one row above it, and both kinds of
+  -- course put the same tile there: crown and middle alike end on $2E/$2F.
+  -- So a foot with $2E/$2F over it is a tree's foot and takes the pin; a
+  -- foot with anything else over it is not part of a run and keeps the
+  -- 16px hull it always had.
+  when_above = {
+    [0x3E] = { { above = { 0x2E }, class = "planter" } },
+    [0x3F] = { { above = { 0x2F }, class = "planter" } },
+    [0x4A] = { { above = { 0x2E }, rows = 2, class = "planter" } },
+    [0x5B] = { { above = { 0x2F }, rows = 2, class = "planter" } },
+  },
+  -- WHERE A TREE ENDS.  $3E/$3F over $4A/$5B is the foot course -- the one
+  -- with the trunk drawn on it -- so a column that reaches it has reached
+  -- the ground and stops there.  Naljo stacks trees directly on top of one
+  -- another (blocks $8C/$8D put a foot straight under the next crown), and
+  -- without this the two would carve as a single tree of twice the height.
+  column_foot = { 0x3E, 0x3F, 0x4A, 0x5B },
+  -- THE TOWN SIGN, and it is Johto's drawing unchanged.  $4E/$4F over $5E/$5F
+  -- is a board on a post -- hashed tile for tile, Tileset01, Tileset02 and
+  -- Tileset56 carry the SAME four tiles as TilesetJohtoModern, which pins them
+  -- `signpost` for exactly this reason.  Prism's sets were never given the
+  -- pin, so all 72 of the region's signs fell to their collision class, came
+  -- out `wall`, and stood as solid 16px cubes -- the brown crate beside the
+  -- player in the bug report.  `signpost` is the thin per-pixel plate a sign
+  -- is: board and post, not furniture.
+  --
+  -- Only these three sets get it.  Tileset28, Tileset34, Tileset35 and
+  -- Tileset03 draw something else entirely at the same four indices (a
+  -- boulder, a framed panel, two wall textures -- all four hash differently),
+  -- and pinning them would stand those on a post.
+  signpost = { 0x4E, 0x4F, 0x5E, 0x5F },
+}
+
+-- Tileset01 is TILESET_NALJO_1 -- Prism names its tilesets in
+-- constants/tilemap_constants.asm even though tilesets.asm only numbers the
+-- INCBINs, and 01 is the set 21 of Naljo's towns and routes are drawn in
+-- (Spurge, Heath, Laurel, Phacelia, Saxifrage and fourteen routes).  Its
+-- terrain numbering IS Johto's -- ground $05/$06, water $14, the tree stack
+-- $1E/$1F over $2E/$2F over $3E/$3F -- which is why the derived pins below
+-- transplanted cleanly.  What they were missing is the MOUNTAIN.
+profile.tilesets.Tileset01 = {
+  ground = { 0x05, 0x06, 0x07, 0x03 },
+  -- THE MOUNTAIN TOP, conditioned on the CELL.  $3C is the walkable deck on
+  -- top of Naljo's rock AND one of the courses the rock FACE is drawn from
+  -- (block $0A is $2B/$2C/$2D over three courses of $3B/$3C/$3D over
+  -- $4B/$4C/$4D), so a flat pin stood 16px of top-faced terrace inside solid
+  -- rock -- 97 cells on Route 80, 48 on Route 72, 44 on Route 69 North, a
+  -- texture seam down every cliff in the region.
+  --
+  -- Nothing above or below splits the two: $3C sits under $2C in both.  What
+  -- splits them is what the ROM already records -- the deck's cell is
+  -- walkable and the rock's is not -- which is what `when_cell` asks (see
+  -- TileShape's authoredConditions).  Conditioned, the terrace lands only
+  -- where the player can stand, and the cliffs keep their upright fold.
+  --
+  -- $2C comes with it.  It is the same deck with its north LIP drawn on --
+  -- a shadow band under a lit rim, the terrace seen edge-on -- and Johto
+  -- pins the pair together for exactly this reason.  Left out, the lip row
+  -- stayed flat ground under a raised deck and every terrace on the region's
+  -- routes had a one-cell step cut into its north edge (26 cells on Route
+  -- 72, 18 in Laurel City).  Conditioned the same way it cannot reach the
+  -- rock, where $2C is the face's top course.
+  when_cell = {
+    [0x2C] = { { walkable = true, class = "terrace" } },
+    [0x3C] = { { walkable = true, class = "terrace" } },
+  },
+  water = { 0x14 },
+  cylinder = { 0x13, 0x15, 0x1D, 0x1E, 0x1F, 0x32, 0x33, 0x3E, 0x3F, 0x45, 0x4A, 0x5B },
+  planter = { 0x2E, 0x2F },
+  post = { 0x59, 0x5A },
+  rail_face = { 0x5A, 0x59 },
+  when_below = {
+    [0x1E] = { { below = { 0x2E }, class = "planter" } },
+    [0x1F] = { { below = { 0x2F }, class = "planter" } },
+    -- $32/$33 IS THE SAME CROWN, one course further down.  Naljo's forest
+    -- wall is not two cells of tree, it is a RUN: block $61 -- the border
+    -- block every route rings itself with -- is $32/$33 over $2E/$2F and
+    -- then $32/$33 over $2E/$2F again, and blocks $8C/$8D/$EE/$F0 stack it
+    -- deeper under a $1E/$1F cap.  Only $1E/$1F was armed, so in every one
+    -- of those cells the top tile row stayed a 16px `cylinder` while the
+    -- bottom row was a 32px `planter` -- and a cell whose four tiles
+    -- disagree cannot be carved as one hull, which is the wall of flat
+    -- green panels the routes came out as.  Armed off exactly the same
+    -- course, the cell is uniform and the run rounds off.
+    [0x32] = { { below = { 0x2E }, class = "planter" } },
+    [0x33] = { { below = { 0x2F }, class = "planter" } },
+  },
+  -- ...AND NOT AS A SPRAY.  `planter` caps the drawing's top 24 rows to a
+  -- five-voxel slab, because a potted plant's crown is a flat fan of leaves.
+  -- A CONIFER'S IS A BALL.  Capped, every course of every tree in the region
+  -- came out as a thin card standing on edge -- the flat green panels the
+  -- routes showed -- while the trunk course under it, which falls outside
+  -- the cap, rounded properly.  Off, every drawn row turns the full 16px it
+  -- is drawn at and the whole column reads as one round tree.
+  planter_spray = false,
+  -- THE FOOT COURSE IS PART OF THE TREE, and leaving it out is what put the
+  -- crowns on the floor.  Naljo draws a conifer as a RUN of one-cell
+  -- courses, read off the block sheet and counted over all 27 maps that use
+  -- these sets: a CROWN ($1E/$1F over $2E/$2F), zero or more MIDDLES
+  -- ($32/$33 over $2E/$2F), and a FOOT ($3E/$3F over $4A/$5B) -- the course
+  -- with the trunk drawn on it, which is where the tree touches the ground.
+  -- The commonest run in the region is the plain two-course tree, crown
+  -- straight onto foot: 221 of 1503 runs, more than any other shape.
+  --
+  -- Only the crown and middle were pinned.  `planter` stands its 32px hull
+  -- in the cell BELOW the anchor and only carves when that cell is planter
+  -- too, so on every one of those 221 trees the crown found a `cylinder`
+  -- foot, refused to pair, and fell through to the mesher -- and a crown
+  -- that carves nothing is a crown lying flat on the plot BEHIND its own
+  -- trunk, which is exactly what the forests looked like.
+  --
+  -- The foot is armed off what is drawn one row above it, and both kinds of
+  -- course put the same tile there: crown and middle alike end on $2E/$2F.
+  -- So a foot with $2E/$2F over it is a tree's foot and takes the pin; a
+  -- foot with anything else over it is not part of a run and keeps the
+  -- 16px hull it always had.
+  when_above = {
+    [0x3E] = { { above = { 0x2E }, class = "planter" } },
+    [0x3F] = { { above = { 0x2F }, class = "planter" } },
+    [0x4A] = { { above = { 0x2E }, rows = 2, class = "planter" } },
+    [0x5B] = { { above = { 0x2F }, rows = 2, class = "planter" } },
+  },
+  -- WHERE A TREE ENDS.  $3E/$3F over $4A/$5B is the foot course -- the one
+  -- with the trunk drawn on it -- so a column that reaches it has reached
+  -- the ground and stops there.  Naljo stacks trees directly on top of one
+  -- another (blocks $8C/$8D put a foot straight under the next crown), and
+  -- without this the two would carve as a single tree of twice the height.
+  column_foot = { 0x3E, 0x3F, 0x4A, 0x5B },
+  -- THE TOWN SIGN, and it is Johto's drawing unchanged.  $4E/$4F over $5E/$5F
+  -- is a board on a post -- hashed tile for tile, Tileset01, Tileset02 and
+  -- Tileset56 carry the SAME four tiles as TilesetJohtoModern, which pins them
+  -- `signpost` for exactly this reason.  Prism's sets were never given the
+  -- pin, so all 72 of the region's signs fell to their collision class, came
+  -- out `wall`, and stood as solid 16px cubes -- the brown crate beside the
+  -- player in the bug report.  `signpost` is the thin per-pixel plate a sign
+  -- is: board and post, not furniture.
+  --
+  -- Only these three sets get it.  Tileset28, Tileset34, Tileset35 and
+  -- Tileset03 draw something else entirely at the same four indices (a
+  -- boulder, a framed panel, two wall textures -- all four hash differently),
+  -- and pinning them would stand those on a post.
+  signpost = { 0x4E, 0x4F, 0x5E, 0x5F },
+}
+
+-- Tileset02 is TILESET_NALJO_2 -- CAPER RIDGE, the town the game proper
+-- starts in, plus Phlox Town and Routes 70/71W/84/85.  It shares Naljo_1's
+-- roof and door vocabulary but NOT its terrain: scanned over its own maps
+-- $05 is 72 cells and the ground the player actually walks on is $06 and
+-- $5B, which touch each other 34 times and so are one level.
+profile.tilesets.Tileset02 = {
+  ground = { 0x05, 0x06, 0x5B },
+  -- THE MOUNTAIN TOP, conditioned on the CELL.  $3C is the walkable deck on
+  -- top of Naljo's rock AND one of the courses the rock FACE is drawn from
+  -- (block $0A is $2B/$2C/$2D over three courses of $3B/$3C/$3D over
+  -- $4B/$4C/$4D), so a flat pin stood 16px of top-faced terrace inside solid
+  -- rock -- 97 cells on Route 80, 48 on Route 72, 44 on Route 69 North, a
+  -- texture seam down every cliff in the region.
+  --
+  -- Nothing above or below splits the two: $3C sits under $2C in both.  What
+  -- splits them is what the ROM already records -- the deck's cell is
+  -- walkable and the rock's is not -- which is what `when_cell` asks (see
+  -- TileShape's authoredConditions).  Conditioned, the terrace lands only
+  -- where the player can stand, and the cliffs keep their upright fold.
+  --
+  -- $2C comes with it.  It is the same deck with its north LIP drawn on --
+  -- a shadow band under a lit rim, the terrace seen edge-on -- and Johto
+  -- pins the pair together for exactly this reason.  Left out, the lip row
+  -- stayed flat ground under a raised deck and every terrace on the region's
+  -- routes had a one-cell step cut into its north edge (26 cells on Route
+  -- 72, 18 in Laurel City).  Conditioned the same way it cannot reach the
+  -- rock, where $2C is the face's top course.
+  when_cell = {
+    [0x2C] = { { walkable = true, class = "terrace" } },
+    [0x3C] = { { walkable = true, class = "terrace" } },
+  },
+  water = { 0x14, 0x58 },
+  -- THE TREES, read off blocks $A6/$A7/$A8 and $67.  $A7 is the repeating
+  -- forest wall: $64/$65 over $66/$67 is one conifer, one cell tall, stacked.
+  -- $A6 caps the run with the crown $20/$21/$22/$2E, and $A8 and $67 stand a
+  -- single tree on its trunks $1D/$2F/$47/$48.  All twelve are drawn ROUND,
+  -- so all twelve take the per-pixel hull rather than a box -- the same
+  -- treatment Johto's canopies get.
+  -- CAPER RIDGE'S TREE IS ONE CELL, NOT TWO -- and that is what separates it
+  -- from Johto's.  Block $A7, the forest wall, is $64/$65 over $66/$67 and
+  -- then $64/$65 over $66/$67 AGAIN: two whole conifers, one per cell, with
+  -- no middle course and no underside between them.  Johto's wall alternates
+  -- a crown cell with an underside cell, which is why `planter` -- 32px, a
+  -- round drawing two cells high on ONE cell of plot -- is right there and
+  -- wrong here.  Pinned planter, every cell of this wall stood 32 tall in a
+  -- 16 slot and the whole run interpenetrated: that is the banded slab the
+  -- front rows came out as.
+  --
+  -- So every crown tile takes the plain 16px hull, uniform across the cell.
+  -- Uniform matters on its own: the group build reads all four tiles of a
+  -- cell, and a cell whose tiles disagree cannot be carved as one hull.
+  --
+  -- MEASURED, not guessed.  Block $77 -- the lone tree standing on paving --
+  -- is $5B/$5B over $5B/$5B over $20/$21/$5B/$5B over $1D/$2F/$5B/$5B: the
+  -- crown's top row and the TRUNK sit in the SAME 16x16 cell.  So the trunk
+  -- cannot take a class of its own here; pinned `stump` beside a `cylinder`
+  -- crown it made a cell whose four tiles disagree, and such a cell cannot
+  -- be carved as one hull -- which is the tree that came out as a bush with
+  -- a separate block under it.  The two-cell version (blocks $67/$A8) puts
+  -- the trunk in its own cell and would have taken `stump` happily; one
+  -- class across both is what serves both, and the hull is cut from the
+  -- drawing either way.
+  --
+  -- Checked with the headless shape harness: Caper Ridge now resolves ZERO
+  -- cells in which a round class shares a cell with anything else.
+  cylinder = { 0x20, 0x21, 0x22, 0x2E, 0x64, 0x65, 0x66, 0x67,
+               0x1D, 0x2F, 0x47, 0x48 },
+  -- ...AND THE FRONT ROW IS THE OTHER TREE.  Where a crown cell has a TRUNK
+  -- cell under it (blocks $67 and $A8) the drawing really is two cells of
+  -- one tree, and `planter` is the class for that: Structures stamps its
+  -- hull 32 tall into the cell BELOW the pin (mz = (cy+1)*16+8), carving
+  -- from both cells' art, so the crown ends up over the trunk instead of
+  -- beside it.  Where the cell under it is another CROWN -- the forest wall,
+  -- block $A7 -- it must stay the plain 16px hull or the run interpenetrates.
+  --
+  -- Telling those apart needs to see the TRUNK, and from the crown's top
+  -- row that is two tile rows down, which is what `rows = 2` is for (see
+  -- TileShape's authoredConditions).  Both rows of the cell are armed off
+  -- the same evidence so the cell stays uniform -- checked with the harness:
+  -- Caper Ridge still resolves zero cells in which a round class shares a
+  -- cell with anything else.
+  -- EVERY COURSE OF A TREE IS PART OF THE TREE.  Caper Ridge draws an ice
+  -- tree as a CROWN ($20/$21 over $22/$2E), zero or more MIDDLES ($64/$65
+  -- over $66/$67) and a TRUNK ($1D/$2F over $47/$48) -- block $67 is crown
+  -- straight onto trunk, $A6 puts a middle between them, $A7 repeats the
+  -- middle and $A8 lands the run on the trunk.  Counted over the three maps
+  -- that use this set, the commonest ice tree is FOUR cells: crown, middle,
+  -- middle, trunk.
+  --
+  -- Only the crown used to be promoted, and only where a trunk was drawn two
+  -- rows under it -- which is true for the two-cell tree and false for every
+  -- taller one.  So on a four-cell tree not one course was `planter`: all
+  -- four took the 16px hull, each standing on its own cell, and a stand of
+  -- them came out as the grid of loose blobs lying on the ice that the
+  -- screenshots show, instead of trees.
+  --
+  -- Armed off what is drawn in the cell BELOW -- another middle ($64/$65) or
+  -- the trunk ($1D/$2F) -- every course of a run resolves `planter`, and the
+  -- column carve takes the whole run as one hull standing on the trunk.
+  when_below = {
+    [0x20] = { { below = { 0x64, 0x1D }, rows = 2, class = "planter" } },
+    [0x21] = { { below = { 0x65, 0x2F }, rows = 2, class = "planter" } },
+    [0x22] = { { below = { 0x64, 0x1D }, class = "planter" } },
+    [0x2E] = { { below = { 0x65, 0x2F }, class = "planter" } },
+    [0x64] = { { below = { 0x64, 0x1D }, rows = 2, class = "planter" } },
+    [0x65] = { { below = { 0x65, 0x2F }, rows = 2, class = "planter" } },
+    [0x66] = { { below = { 0x64, 0x1D }, class = "planter" } },
+    [0x67] = { { below = { 0x65, 0x2F }, class = "planter" } },
+  },
+  -- THE ICE CLIFFS.  Blocks $21-$2A and $A6-$A8 are Caper Ridge's rock mass
+  -- -- $00 over $56, the $43 hatch, the $30/$42/$50/$55/$57 corners -- and
+  -- every cell of every one of them is WALL.  Unpinned they reach the volume
+  -- detector, which measures a drawn thing's height off the art: a cliff run
+  -- eight cells long reads as one very tall object, which is the wall of
+  -- knitting standing three storeys over the town.  One course is what a
+  -- cliff face is here, the same 16px Johto's mountain walls stand at.
+  wall = { 0x00, 0x30, 0x42, 0x43, 0x50, 0x55, 0x56, 0x57,
+           -- THE CAVE MOUTH, block $2D: $68/$69 over $6A/$6B, the black
+           -- arch cut into the $56 rock face.  Its cell is a DOOR -- a warp
+           -- the player walks into -- so the cell rule floored it, and the
+           -- entrance came out as a flat notch at the foot of a standing
+           -- wall.  It is a hole in rock, so it stands with the rock and
+           -- the arch is drawn on the face, which is where it is drawn.
+           0x68, 0x69, 0x6A, 0x6B },
+  post = { 0x59, 0x5A },
+  rail_face = { 0x5A, 0x59 },
+  -- ...AND NOT AS A SPRAY, for the same reason Naljo's are not: the class
+  -- flattens the drawing's top 24 rows to a five-voxel slab because a potted
+  -- plant's crown is a flat fan, and an ice tree's is a ball.
+  planter_spray = false,
+  -- AND THE TRUNK COURSE TAKES THE PIN TOO.  The rule below promotes a crown
+  -- to `planter` wherever a trunk is drawn under it, which is right -- but
+  -- `planter` stands its hull in the cell BELOW and only carves when that
+  -- cell is planter as well, and the trunk course ($1D/$2F over $47/$48) was
+  -- pinned `cylinder`.  Measured with the headless harness: 8 planter cells
+  -- on Caper Ridge, 0 pairs, 8 left over.  Every promoted crown carved
+  -- nothing and sat as a flat lid on the ground behind a trunk that had
+  -- rounded properly -- the ice tree with a 3D base and a boxed top.
+  --
+  -- Armed off the course drawn directly above it -- $22/$2E for the single
+  -- tree, $66/$67 for the forest wall -- the trunk is planter exactly where
+  -- it is a tree's trunk, the pair forms, and the crown stands ON it.
+  when_above = {
+    [0x1D] = { { above = { 0x22, 0x66 }, class = "planter" } },
+    [0x2F] = { { above = { 0x2E, 0x67 }, class = "planter" } },
+    [0x47] = { { above = { 0x22, 0x66 }, rows = 2, class = "planter" } },
+    [0x48] = { { above = { 0x2E, 0x67 }, rows = 2, class = "planter" } },
+  },
+  -- WHERE A TREE ENDS.  $1D/$2F over $47/$48 is the trunk course, and block
+  -- $7C is exactly the case this exists for: a trunk drawn directly over the
+  -- next tree's crown.  The column stops on the trunk, inclusive, so a stack
+  -- of ice trees stays a stack of ice trees.
+  column_foot = { 0x1D, 0x2F, 0x47, 0x48 },
+  -- THE TOWN SIGN, and it is Johto's drawing unchanged.  $4E/$4F over $5E/$5F
+  -- is a board on a post -- hashed tile for tile, Tileset01, Tileset02 and
+  -- Tileset56 carry the SAME four tiles as TilesetJohtoModern, which pins them
+  -- `signpost` for exactly this reason.  Prism's sets were never given the
+  -- pin, so all 72 of the region's signs fell to their collision class, came
+  -- out `wall`, and stood as solid 16px cubes -- the brown crate beside the
+  -- player in the bug report.  `signpost` is the thin per-pixel plate a sign
+  -- is: board and post, not furniture.
+  --
+  -- Only these three sets get it.  Tileset28, Tileset34, Tileset35 and
+  -- Tileset03 draw something else entirely at the same four indices (a
+  -- boulder, a framed panel, two wall textures -- all four hash differently),
+  -- and pinning them would stand those on a post.
+  signpost = { 0x4E, 0x4F, 0x5E, 0x5F },
+}
+
+profile.tilesets.Tileset03 = {
+  -- The opening campsite's set, and it follows NONE of Johto's numbering: its
+  -- tree is $40/$41 over $50/$51, an index pair Johto uses for something else
+  -- entirely.  The border block ($0F) is what names it -- an outdoor map rings
+  -- with its tree wall -- and the rest was read off the block sheet and then
+  -- checked against 03_collision.asm.
+  --
+  -- WHICH SURFACE IS THE HIGH ONE.  The first cut read $39 as the plateau
+  -- top and stood it up, and it is the opposite: $39 is the pale SAND that
+  -- the whole canyon floor is paved with -- 7875 cells across the 33 Rijon
+  -- maps, second only to the water -- and standing it up raised the ground
+  -- the player walks on.  $11 is the high one, and the block sheet says so
+  -- without any ambiguity:
+  --
+  --   * every one of the 26 blocks that contains $11 either is solid $11
+  --     (block $2C) or pairs it with a rock FACE in the same block -- $37
+  --     along the bottom edge, $27 down a side, $24 on the far side, the
+  --     $13/$34/$36/$1E corners.  There is no $11 block without a cliff.
+  --   * scanned over all 33 maps, $11 sits horizontally beside $39 or $2C
+  --     14 times out of 6376.  A surface at the same height as the sand
+  --     would touch it everywhere; one above it can only ever meet it
+  --     through a face, and that is what the sheet draws.
+  --   * block $57 is the plain south edge: two tile rows of $11 over two
+  --     of $37.  Two rows IS 16px, so `terrace` -- one course -- is the
+  --     height the artist drew the face at, and the face lands flush.
+  --
+  -- $01 is the same surface seen along the NORTH rim (block $3F is a row
+  -- of $01 over three rows of $11, TOP_WALL over FLOOR), so it carries the
+  -- terrace with it or the back edge of every plateau sinks to the sand.
+  -- $5B is the town paving and $03/$04 the boardwalk decking (block $05 is
+  -- solid $04, and what sits above and below it is the water $14 and the
+  -- piles $31) -- all three touch the sand freely, so all three are the
+  -- sand's own level.
+  ground = { 0x39, 0x2C, 0x5B, 0x03, 0x04 },
+  terrace = { 0x11, 0x01 },
+  water = { 0x14 },
+  -- $40/$41 over $50/$51 is the tree; $3B is the forest INTERIOR, 116 cells
+  -- and every one of them WALL; $2D/$2E over $3D/$3E is the cuttable tree,
+  -- COLL_CUT_TREE in all five of its cells and nothing else.
+  cylinder = { 0x40, 0x41, 0x50, 0x51, 0x3B, 0x2D, 0x2E, 0x3D, 0x3E },
+  -- THE CAVE MOUTHS.  $48/$49 over $58/$59 is the dark doorway cut into the
+  -- cliff (blocks $06, $5B, $70), and its cell is COLL_CAVE or COLL_DOOR --
+  -- walkable, so the cell rule laid it flat and the entrance read as a patch
+  -- of ground at the base of a 16px face rather than an opening in it.  The
+  -- $7A/$7B over $7C/$7D mouth (blocks $8C, $8D) already sits in solid cells
+  -- and needs no pin; these are the ones the warp classes flattened.
+  wall = { 0x48, 0x49, 0x58, 0x59 },
+  -- The FACE is deliberately NOT pinned.  `cliff` is 32px -- two courses, for
+  -- masonry like the Indigo Plateau's rim -- and a plateau's face is one, so
+  -- pinning it there stands the rock twice as tall as the terrace it carries.
+  -- Unpinned it falls to `wall`, which is 16 and flush.  Johto's own profile
+  -- pins its terraces and leaves its faces alone for the same reason.  $24
+  -- stays out either way: it is the shoreline cliff and carries 14 WATER
+  -- cells, so folding it up would stand a wall in the river.
+}
+
+-- ---------------------------------------------------------------------------
+-- Tileset05 is TILESET_HOUSE_2 -- Prism's ordinary house interior, and the
+-- set the Ilk brothers' place on Route 69 is drawn in.  It had NO ENTRY AT
+-- ALL, so every stick of furniture in it fell to its collision class: the
+-- dining tables came out `wall` and stood 16 voxels of solid box, the chairs
+-- came out `ground` and lay flat in the floor with no body at all, and the
+-- bed stood as two upright blocks wearing its own blanket on all four faces.
+--
+-- Its furniture indices are Johto's.  Read off the map's own cells and
+-- checked against the drawings tile by tile, the round seat is $02/$03 over
+-- $12/$13 and the table slab is $15/$22-$25/$32-$35 -- the same numbers
+-- TilesetPlayersHouse pins, which is why those two lists are copied across
+-- verbatim.  The rest is NOT: $50-$53 is a STOVE here where Johto draws a
+-- bookcase, so the bookcase list is deliberately left off and the kitchen
+-- keeps the upright wall it should have.
+-- ---------------------------------------------------------------------------
+-- Tileset04 is TILESET_HOUSE_1 -- Prism's commonest interior by a distance,
+-- 44 maps.  It had no entry, and it carries the same television as HOUSE_2 at
+-- the same indices: $06/$07 over $16/$17 over $1E/$1F, three rows with the top
+-- one stranded in the wall cell above.
+profile.tilesets.Tileset04 = {
+  console = { 0x06, 0x07 },
+  -- THE ROUND SEAT, drawn from above as a cushion on legs -- $02/$03 over
+  -- $12/$13, the same four tiles HOUSE_2 uses and the same drawing.  With no
+  -- pin it took the floor's class and lay flat IN the floorboards with no body
+  -- at all, which is what the chairs in the Ilk brothers' house were doing
+  -- before Tileset05 got its entry.  44 maps use this set.
+  stool = { 0x02, 0x03, 0x12, 0x13 },
+  -- THE LOW FURNITURE, and this list is Johto's verbatim.  TilesetHouse pins
+  -- exactly these eleven indices, and Prism draws the same kind of thing at
+  -- every one of them -- a flat top with a dark base, seen from above.  Left
+  -- unpinned they resolved `wall` and stood 16 voxels of box; 6 is what a
+  -- piece you look down onto is, which is the height Johto's own houses use.
+  table = { 0x05, 0x15, 0x26, 0x27, 0x29, 0x2F, 0x36, 0x39,
+            0x3A, 0x3B, 0x3C },
+  -- THE POTTED PLANT and the lamp beside it: $08/$09 over $18/$19 and
+  -- $0A/$0B over $1A/$1B, a crown over a base drawn two cells high on one
+  -- cell of plot -- which is what `planter` is for and what those indices
+  -- are in Johto too.  Not as a spray: these are round, not a flat fan.
+  planter = { 0x08, 0x09, 0x0A, 0x0B, 0x18, 0x19, 0x1A, 0x1B },
+  planter_spray = false,
+  -- $3B/$3C are also the bookcase's base course, and what is drawn one row
+  -- above tells them apart -- the shelving's own ranks, or more furniture.
+  when_above = {
+    [0x3B] = { { above = { 0x0E, 0x0F }, class = "bookcase" } },
+    [0x3C] = { { above = { 0x0E, 0x0F }, class = "bookcase" } },
+  },
+  -- the same drawing HOUSE_2 uses, so the same heights
+  heights = { table = 6, stool = 5 },
+}
+
+-- ---------------------------------------------------------------------------
+-- Tileset06 is TILESET_POKECENTER, 29 maps.  Its PC is the same shape of
+-- drawing as the houses' television and breaks the same way: $20/$21 is the
+-- monitor's top band, $30/$31 the screen and keyboard, $40/$41 the base, and
+-- only the lower two ever shared a cell.  Unpinned, the top band took the
+-- north wall's class and the screen stood in the wall behind the terminal --
+-- which is the PC doing "something similar" to the TV in the report.
+profile.tilesets.Tileset06 = {
+  console = { 0x20, 0x21 },
+}
+
+profile.tilesets.Tileset05 = {
+  -- THE TELEVISION'S TOP ROW, which is drawn in the CELL ABOVE IT.  The set
+  -- is three tile rows tall -- $06/$07 the top band, $16/$17 the screen,
+  -- $18/$19 the base -- and only the lower two share a cell.  The top row
+  -- lands in the north wall band, where it took the wall's class and stood
+  -- INSIDE the wall a cell behind its own base: the screen glitching into
+  -- the wall, unstacked, in the report.  Naming the stray row `console` too
+  -- is what Johto's TilesetHouse does for the same drawing, and it puts the
+  -- whole set in one standee.
+  console = { 0x06, 0x07 },
+  -- the round seats around both dining tables (5 placements in this house)
+  stool = { 0x02, 0x03, 0x12, 0x13 },
+  -- the table slab.  `table` at the class default would still read as a
+  -- block; 6 voxels is a dining table seen from a standing eye, which is the
+  -- height Johto's own houses use.
+  table = { 0x15, 0x22, 0x23, 0x24, 0x25, 0x32, 0x33, 0x34, 0x35 },
+  -- THE BED, two cells of it: $28/$29 over $38/$39 is the pillow end and
+  -- $48/$49 over $58/$59 the foot.  Left unpinned both stood as 16px boxes
+  -- and the blanket drawing repeated on every side of each -- the doubled
+  -- texture in the report.  `bed` lays the drawing flat on a 7-voxel body,
+  -- which is what a bed seen from above is.
+  bed = { 0x28, 0x29, 0x38, 0x39, 0x48, 0x49, 0x58, 0x59 },
+  -- the games console on the floor by the shelves.  A box 16 tall for a
+  -- thing the size of a shoe is the "way too tall" in the report; `counter`
+  -- stands it 8.
+  counter = { 0x4A, 0x4B, 0x5A, 0x5B },
+  heights = { table = 6, stool = 5 },
+}
+
+profile.tilesets.Tileset08 = {
+  water = { 0x14 },
+}
+
+-- PRISM'S CAVES -- Tileset48 through Tileset53 (CAVE2..CAVE7) are ONE
+-- blockset: their 86 metatiles and their collision table are byte-identical
+-- files, and only the 2bpp art differs, so the 27 maps they cover take one
+-- entry.  Tileset21 (CAVE) and Tileset33 (FIRELIGHT_CAVERNS) draw their own
+-- blocks but number their tiles the same way, so they take it too.
+--
+-- And that numbering is CRYSTAL'S CAVE numbering, checked against this
+-- profile's own `cave` table at the bottom of this file: $00/$01 the floor,
+-- $16/$24 the raised floor, $14 the surfable water, $36/$37 the staircase,
+-- $0E/$0F/$1E/$1F the cave mouth (collision CAVE, exactly as Gold has it),
+-- and $0C/$0D/$1C/$1D solid.  Ten of the twelve tiles Crystal's `cliff`
+-- group names come out solid here as well.
+--
+-- What is pinned is the BOULDER.  $0C/$0D over $1C/$1D is the round rock
+-- Prism scatters through every mine -- blocks $18-$1A, $1D and $19's row of
+-- two -- and it is drawn as a boulder with a lit top in all three of the
+-- blocksets above.  Its cells are MINING, so unpinned it falls to the flat
+-- 16px upright panel and reads as a square post.  The hull is the same one
+-- the tree canopies get, cut from the drawing's own outline.
+--
+-- The floor levels are deliberately NOT pinned.  $16/$24 are Crystal's
+-- raised floor, but Prism's block $02 lays the whole $4A-$5D / $11-$26 /
+-- $2E-$3F patch down as ONE 32x32 floor texture, so which of those ids is
+-- raised is a question the block sheet does not answer -- and a wrong
+-- terrace under the player is worse than none.
+-- Prism's caves draw their ROCK MASS as a $00/$01 checkerboard, and the ROM
+-- leaves that mass on collision class $00 -- LANDTILE, "walkable" -- because
+-- the player can never reach it: the rooms are sealed off by the blocks
+-- around them, so what the class says about the rock in between never comes
+-- up.  In 2D that is invisible.  In a voxel world it is the whole map:
+-- measured on AcquaRoom, block 9 -- four rows of $00/$01 and nothing else --
+-- is 179 of that map's 360 blocks, every one class $00, and it resolved to
+-- FLAT GROUND.  The mine rendered as three little walled rooms sitting on an
+-- endless floor, which is exactly what the Acqua Mines looked like.
+--
+-- sealedCells cannot rescue it.  That fills pockets the edge flood cannot
+-- reach, and here the relationship is inverted: the rock is the connected
+-- mass that touches the map border and the ROOMS are the pockets.
+--
+-- So the discriminator has to be the art, and it is clean: $00 and $01 are
+-- drawn in the rock and nowhere else.  The walkable cave floor is block 2, a
+-- separate drawing ($4A-$4D / $5A-$5D / $11 $16 $24 $26 / $2E $2F $3E $3F)
+-- carrying neither id.
+local prismCave = {
+  water = { 0x14 },
+  cylinder = { 0x0C, 0x0D, 0x1C, 0x1D },
+  -- $34/$35 go with them: they are the lit LIP the rock mass wears along its
+  -- lower edge, drawn between the $00/$01 top and the $55-$58 face.  Left as
+  -- ground they split their own cell -- two wall tiles over two ground tiles,
+  -- 80 such cells on AcquaRoom alone -- which is the one shape a single hull
+  -- cannot carve.  Across the five exported cave maps they appear 40-odd
+  -- times inside rock blocks and exactly twice in a block that is genuine
+  -- floor, so the pin is right everywhere it matters.
+  -- and $51-$58 with them: the rock's upper cap ($51-$54, block 5's top row)
+  -- and the wall face under the lip ($55-$58).  Same measurement, same
+  -- answer -- 12 to 24 appearances each inside rock blocks across the six
+  -- exported cave maps, and zero in a pure-floor block except $52/$53, which
+  -- manage three apiece.  Leaving them out was the whole of the remaining
+  -- split-cell count.
+  wall = { 0x00, 0x01, 0x34, 0x35, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 },
+}
+
+-- ---------------------------------------------------------------------------
+-- Tileset09 is TILESET_LAB -- Prism's two research labs.  Its work benches
+-- were the last of the boxy-table cases: $06/$15/$16/$17 over $25/$26/$27 is
+-- a slab you look down onto, and unpinned the top of it stood 16 voxels of
+-- wall while its near edge lay flat in the floor.
+--
+-- TWO OF ITS TILES ARE NOT ALWAYS A BENCH, which is why this needs rules and
+-- not just a list.  Enumerated over both maps, $05 and $07 carry the bench's
+-- left and right corners in `05 06 / 15 16` and `06 07 / 16 17` -- but the
+-- SAME two indices draw the wall cabinets in `05 07 / 03 04`, eighteen of
+-- them, more placements than the benches themselves.  A flat pin would have
+-- cut the cabinet run down to bench height all along the north wall.
+--
+-- What separates them is what is drawn directly under the tile: the bench's
+-- own second course ($15/$17), or the cabinet's doors ($03/$04).
+--
+-- The machines are left alone deliberately.  $0A-$0D, $20-$23 and $4C-$4F are
+-- upright consoles and cabinets, and `wall` at 16 is the height they should
+-- stand at already.
+profile.tilesets.Tileset09 = {
+  table = { 0x06, 0x15, 0x16, 0x17, 0x25, 0x26, 0x27 },
+  when_below = {
+    [0x05] = { { below = { 0x15 }, class = "table" } },
+    [0x07] = { { below = { 0x17 }, class = "table" } },
+  },
+  heights = { table = 6 },
+}
+
+-- ---------------------------------------------------------------------------
+-- Tileset12 is TILESET_MANSION -- Prof. Ilk's lab and one more room.  Its
+-- work desk is `36 38 / 46 48`, a grey slab on legs with the computer and the
+-- Poke Ball standing on it.  Unpinned it stood 16 voxels of wall.
+--
+-- $36 AND $38 ARE MOSTLY SOMETHING ELSE, which is why this is a rule and not
+-- a list: NINE placements of `36 38 / 22 23` are the plain grey band capping
+-- the shelving units along the north wall, against ONE desk.  A flat pin
+-- would have cut the top off all nine cabinets.  What separates them is the
+-- course drawn one row below -- the desk's legs ($46/$48), or shelves.
+--
+-- `03 03 / 36 38` is NOT the desk either, and an earlier cut of this rule got
+-- that wrong: walked down the map its cell sits directly over `22 23 / 32 33`,
+-- so it is another cabinet cap, and arming $03 off the course beneath it
+-- flattened the top half of a bookcase.  $03 is left alone.
+profile.tilesets.Tileset12 = {
+  -- the desk's leg course, drawn nowhere else in the set
+  table = { 0x46, 0x48 },
+  when_below = {
+    [0x36] = { { below = { 0x46 }, class = "table" } },
+    [0x38] = { { below = { 0x48 }, class = "table" } },
+  },
+  heights = { table = 6 },
+}
+
+-- ---------------------------------------------------------------------------
+-- Tileset15 is TILESET_KURT_HOUSE -- Kurt's place, the Heath inn and gym
+-- house, the jewellers, the fighting dojo: 11 maps of ordinary furnished
+-- room, and it had no entry.  Enumerated over all eleven, the two things it
+-- draws most are a round SEAT and a hatched TABLE slab, and neither was
+-- pinned: 24 seats lay flat in the floor with no body and every table stood
+-- as a 16-voxel box.
+profile.tilesets.Tileset15 = {
+  -- $02/$03 over $12/$13 again -- the same four tiles, and the same drawing,
+  -- that HOUSE_1 and HOUSE_2 seat their dining tables with.
+  stool = { 0x02, 0x03, 0x12, 0x13 },
+  -- The table's top slab, read off the cells the eleven maps actually place:
+  -- $22-$24 over $32-$34 is the body, $15/$42/$43 the drawn corners where it
+  -- meets a wall.  Its foot row ($25/$26/$51) is left alone deliberately --
+  -- those indices also carry floor trim, and a wrong pin there would cut a
+  -- notch out of the boards.
+  table = { 0x15, 0x22, 0x23, 0x24, 0x32, 0x33, 0x34, 0x42, 0x43 },
+  heights = { table = 6, stool = 5 },
+}
+
+profile.tilesets.Tileset21 = prismCave
+
+profile.tilesets.Tileset27 = {
+  ground = { 0x05 },
+  water = { 0x14 },
+}
+
+profile.tilesets.Tileset28 = {
+  ground = { 0x05 },
+  water = { 0x14 },
+}
+
+profile.tilesets.Tileset32 = {
+  water = { 0x14 },
+}
+
+profile.tilesets.Tileset33 = prismCave
+
+-- Tileset34 is TILESET_JOHTO, Prism's own cut of the Johto set.  Its tree is
+-- Johto's exactly -- block $05 is $1E/$1F over $13/$15 over $3E/$3F -- but
+-- the derived pin also carried $32/$33 across, and in THIS set neither is
+-- foliage: $33 appears in three blocks and all three are the picket FENCE
+-- ($20/$21 over $30/$33 over $42/$43, blocks $25/$29/$2A), and $32 in three
+-- more that are all the hipped shop ROOF ($31/$32/$34 over $41/$46 over
+-- $51/$52).  Swept over the nine Johto maps that pin put a tree hull inside
+-- a fence or a roof cell 88 times; dropped, the count is zero.
+profile.tilesets.Tileset34 = {
+  ground = { 0x05, 0x06 },
+  water = { 0x14 },
+  cylinder = { 0x13, 0x15, 0x1E, 0x1F, 0x3E, 0x3F },
+}
+
+-- Tileset35 is TILESET_KANTO, and it is TILESET_RIJON REPAINTED: 45 of its
+-- 128 tiles are byte-identical to Tileset03's at the same index, and every
+-- one that carries STRUCTURE is among them -- the north rim $01, the rock
+-- faces $27/$37, the paving $5B/$23/$10/$20, the boardwalk $04, the cut tree
+-- $2D/$2E/$3D/$3E.  What differs is the surfaces and the foliage, which is
+-- what a repaint changes.  So Rijon's reading carries over whole, and its
+-- own maps agree independently: $11 is 4310 cells that touch the low ground
+-- $39/$2C seven and six times, and $23 not once.
+profile.tilesets.Tileset35 = {
+  ground = { 0x39, 0x2C, 0x23, 0x5B, 0x10, 0x67, 0x03 },
+  terrace = { 0x11, 0x01 },
+  water = { 0x14 },
+  -- block $0F is the tree wall ($40/$41 over $50/$51) and block $82 stands a
+  -- cut tree ($2D/$2E over $3D/$3E) beside it.  Blocks $13 and $1C are the
+  -- round BOULDERS -- $2A/$2B over $3A/$3B -- drawn as barrels with a flat
+  -- lid, so they take the hull too rather than standing as square posts.
+  cylinder = { 0x40, 0x41, 0x50, 0x51, 0x2D, 0x2E, 0x3D, 0x3E,
+               0x2A, 0x2B, 0x3A, 0x3B },
+}
+
+profile.tilesets.Tileset44 = {
+  water = { 0x14 },
+  cylinder = { 0x12, 0x13, 0x1D, 0x3E, 0x3F, 0x45 },
+}
+
+-- Tileset45 is TILESET_TUNOD, and NONE of Johto's numbering survives into
+-- it.  The derived entry pinned $1E/$1F/$32/$33 as canopy and $2E/$2F as
+-- planter on the strength of Johto's ids; swept over Tunod's own maps that
+-- left a tree hull sharing a cell with plain wall 594 times -- more broken
+-- cells than every other tileset in the game put together.
+--
+-- What Tunod actually draws is a leafy canopy in its own vocabulary, read
+-- off blocks $05/$06/$07/$09/$0A: $22-$27 across the crown, $32/$33/$35/$36
+-- the middle course, $42/$43/$45 and $52/$53/$55 the underside.  Its border
+-- block ($31) is not foliage at all but OCEAN -- $06/$07 over $08/$09, 2334
+-- WATER cells apiece -- because Tunod is an island region.
+profile.tilesets.Tileset45 = {
+  water = { 0x06, 0x07, 0x08, 0x09 },
+  cylinder = { 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+               0x32, 0x33, 0x35, 0x36,
+               0x42, 0x43, 0x45, 0x52, 0x53, 0x55 },
+  -- NO `canopy` HERE, and the reason is worth writing down because the
+  -- obvious reading of block $04 is wrong.  It looks like one big round
+  -- crown 32px across, so an earlier pass anchored a 2x2 `canopy` hull on
+  -- it.  Carved headlessly the mask comes back 815 pixels of 1024 -- a
+  -- near-solid block, not a tree -- and the reason is in the art: Tunod is
+  -- drawn in ICE colours, so the snow BACKGROUND and the crown's own body
+  -- both fall in the `light` shade band, and the drawing runs edge to edge
+  -- with no margin to flood from.  The outline pass walks in through the
+  -- crown's dark speckles and keeps 10 pixels; the fallback pass cannot get
+  -- in at all and keeps almost everything.  Either way there is no
+  -- silhouette to cut.
+  --
+  -- And the group made it worse rather than better: measured on Southerly
+  -- City, 68 anchors formed but only 50 found three round partners -- the
+  -- other 18 fell through to the mesher's plain box, which is the row of
+  -- 32px cubes the ice trees came out as.  Per-cell `cylinder` at least
+  -- never produces a cube.
+  --
+  -- The real fix is in the CARVE, not in a pin: roundTemplate needs a way
+  -- to be told which shade is background for a tileset whose art has no
+  -- margin (the same problem `prop_bg` solves for standing cutouts).  Until
+  -- it has one, every cell here is a plain 16px hull.
+  -- TWO OF THE TREE'S TILES ARE ALSO MASONRY.  $52 is the quay course under
+  -- $40/$41/$51 (blocks $9A/$9E/$A3/$A6 -- Southerly City's waterfront) and
+  -- $33 the dark band under $60 in the same set; round-pinned they put a
+  -- hull inside 57 cells of wall.  What is ABOVE splits them cleanly: over
+  -- the tree $52 always sits under $42 and $33 under a crown, over the quay
+  -- never.  Dropping the two ids instead was measured and is WORSE -- it
+  -- breaks the trunk cell itself and takes the count from 57 to 182.
+  when_above = {
+    [0x52] = { { above = { 0x40, 0x51, 0x52 }, class = "wall" } },
+    [0x33] = { { above = { 0x60 }, class = "wall" } },
+  },
+
+  post = { 0x59, 0x5A },
+  rail_face = { 0x5A, 0x59 },
+}
+
+profile.tilesets.Tileset48 = prismCave
+
+profile.tilesets.Tileset49 = prismCave
+
+profile.tilesets.Tileset50 = prismCave
+
+profile.tilesets.Tileset51 = prismCave
+
+profile.tilesets.Tileset52 = prismCave
+
+profile.tilesets.Tileset53 = prismCave
+
+profile.tilesets.Tileset54 = {
+  cylinder = { 0x0B, 0x0E, 0x0F, 0x1E },
+}
+
+-- Tileset56 is TILESET_NALJO_3, the set tilesets.asm aliases to the same
+-- INCBIN as 01 ("temporary until 0.96" in Prism's own comment), so it takes
+-- Naljo's pins unchanged -- including the mountain top.
+profile.tilesets.Tileset56 = {
+  ground = { 0x05, 0x06, 0x07, 0x03 },
+  -- THE MOUNTAIN TOP, conditioned on the CELL.  $3C is the walkable deck on
+  -- top of Naljo's rock AND one of the courses the rock FACE is drawn from
+  -- (block $0A is $2B/$2C/$2D over three courses of $3B/$3C/$3D over
+  -- $4B/$4C/$4D), so a flat pin stood 16px of top-faced terrace inside solid
+  -- rock -- 97 cells on Route 80, 48 on Route 72, 44 on Route 69 North, a
+  -- texture seam down every cliff in the region.
+  --
+  -- Nothing above or below splits the two: $3C sits under $2C in both.  What
+  -- splits them is what the ROM already records -- the deck's cell is
+  -- walkable and the rock's is not -- which is what `when_cell` asks (see
+  -- TileShape's authoredConditions).  Conditioned, the terrace lands only
+  -- where the player can stand, and the cliffs keep their upright fold.
+  --
+  -- $2C comes with it.  It is the same deck with its north LIP drawn on --
+  -- a shadow band under a lit rim, the terrace seen edge-on -- and Johto
+  -- pins the pair together for exactly this reason.  Left out, the lip row
+  -- stayed flat ground under a raised deck and every terrace on the region's
+  -- routes had a one-cell step cut into its north edge (26 cells on Route
+  -- 72, 18 in Laurel City).  Conditioned the same way it cannot reach the
+  -- rock, where $2C is the face's top course.
+  when_cell = {
+    [0x2C] = { { walkable = true, class = "terrace" } },
+    [0x3C] = { { walkable = true, class = "terrace" } },
+  },
+  water = { 0x14 },
+  cylinder = { 0x13, 0x15, 0x1D, 0x1E, 0x1F, 0x32, 0x33, 0x3E, 0x3F, 0x45, 0x4A, 0x5B },
+  planter = { 0x2E, 0x2F },
+  post = { 0x59, 0x5A },
+  rail_face = { 0x5A, 0x59 },
+  when_below = {
+    [0x1E] = { { below = { 0x2E }, class = "planter" } },
+    [0x1F] = { { below = { 0x2F }, class = "planter" } },
+    -- $32/$33 IS THE SAME CROWN, one course further down.  Naljo's forest
+    -- wall is not two cells of tree, it is a RUN: block $61 -- the border
+    -- block every route rings itself with -- is $32/$33 over $2E/$2F and
+    -- then $32/$33 over $2E/$2F again, and blocks $8C/$8D/$EE/$F0 stack it
+    -- deeper under a $1E/$1F cap.  Only $1E/$1F was armed, so in every one
+    -- of those cells the top tile row stayed a 16px `cylinder` while the
+    -- bottom row was a 32px `planter` -- and a cell whose four tiles
+    -- disagree cannot be carved as one hull, which is the wall of flat
+    -- green panels the routes came out as.  Armed off exactly the same
+    -- course, the cell is uniform and the run rounds off.
+    [0x32] = { { below = { 0x2E }, class = "planter" } },
+    [0x33] = { { below = { 0x2F }, class = "planter" } },
+  },
+  -- ...AND NOT AS A SPRAY.  `planter` caps the drawing's top 24 rows to a
+  -- five-voxel slab, because a potted plant's crown is a flat fan of leaves.
+  -- A CONIFER'S IS A BALL.  Capped, every course of every tree in the region
+  -- came out as a thin card standing on edge -- the flat green panels the
+  -- routes showed -- while the trunk course under it, which falls outside
+  -- the cap, rounded properly.  Off, every drawn row turns the full 16px it
+  -- is drawn at and the whole column reads as one round tree.
+  planter_spray = false,
+  -- THE FOOT COURSE IS PART OF THE TREE, and leaving it out is what put the
+  -- crowns on the floor.  Naljo draws a conifer as a RUN of one-cell
+  -- courses, read off the block sheet and counted over all 27 maps that use
+  -- these sets: a CROWN ($1E/$1F over $2E/$2F), zero or more MIDDLES
+  -- ($32/$33 over $2E/$2F), and a FOOT ($3E/$3F over $4A/$5B) -- the course
+  -- with the trunk drawn on it, which is where the tree touches the ground.
+  -- The commonest run in the region is the plain two-course tree, crown
+  -- straight onto foot: 221 of 1503 runs, more than any other shape.
+  --
+  -- Only the crown and middle were pinned.  `planter` stands its 32px hull
+  -- in the cell BELOW the anchor and only carves when that cell is planter
+  -- too, so on every one of those 221 trees the crown found a `cylinder`
+  -- foot, refused to pair, and fell through to the mesher -- and a crown
+  -- that carves nothing is a crown lying flat on the plot BEHIND its own
+  -- trunk, which is exactly what the forests looked like.
+  --
+  -- The foot is armed off what is drawn one row above it, and both kinds of
+  -- course put the same tile there: crown and middle alike end on $2E/$2F.
+  -- So a foot with $2E/$2F over it is a tree's foot and takes the pin; a
+  -- foot with anything else over it is not part of a run and keeps the
+  -- 16px hull it always had.
+  when_above = {
+    [0x3E] = { { above = { 0x2E }, class = "planter" } },
+    [0x3F] = { { above = { 0x2F }, class = "planter" } },
+    [0x4A] = { { above = { 0x2E }, rows = 2, class = "planter" } },
+    [0x5B] = { { above = { 0x2F }, rows = 2, class = "planter" } },
+  },
+  -- WHERE A TREE ENDS.  $3E/$3F over $4A/$5B is the foot course -- the one
+  -- with the trunk drawn on it -- so a column that reaches it has reached
+  -- the ground and stops there.  Naljo stacks trees directly on top of one
+  -- another (blocks $8C/$8D put a foot straight under the next crown), and
+  -- without this the two would carve as a single tree of twice the height.
+  column_foot = { 0x3E, 0x3F, 0x4A, 0x5B },
+  -- THE TOWN SIGN, and it is Johto's drawing unchanged.  $4E/$4F over $5E/$5F
+  -- is a board on a post -- hashed tile for tile, Tileset01, Tileset02 and
+  -- Tileset56 carry the SAME four tiles as TilesetJohtoModern, which pins them
+  -- `signpost` for exactly this reason.  Prism's sets were never given the
+  -- pin, so all 72 of the region's signs fell to their collision class, came
+  -- out `wall`, and stood as solid 16px cubes -- the brown crate beside the
+  -- player in the bug report.  `signpost` is the thin per-pixel plate a sign
+  -- is: board and post, not furniture.
+  --
+  -- Only these three sets get it.  Tileset28, Tileset34, Tileset35 and
+  -- Tileset03 draw something else entirely at the same four indices (a
+  -- boulder, a framed panel, two wall textures -- all four hash differently),
+  -- and pinning them would stand those on a post.
+  signpost = { 0x4E, 0x4F, 0x5E, 0x5F },
+}
+
+profile.tilesets.TilesetPokecenter = {
+  -- THE HEALING MACHINE, the drawing this whole pass was reported for.
+  -- It is 2x2 cells in the room's north-west corner and every one of the
+  -- four is class $07, indistinguishable from the wall it stands against,
+  -- so it stood as four cubes with the console printed on their faces.
+  -- The drawing is two cells TALL and one deep -- the upper rank is the
+  -- machine's height, not a second machine behind the first -- which is
+  -- the `bookcase` archetype exactly.
+  --
+  -- The tiles are the whole 2x2 as Cherrygrove draws it and as every
+  -- other Center repeats it: $1C-$1F and $2C-$2F the head with its two
+  -- green monitors, $3C-$3F and $4C-$4F the console body and the bay
+  -- the balls sit in.
+  bookcase = { 0x1C, 0x1D, 0x1E, 0x1F, 0x2C, 0x2D, 0x2E, 0x2F,
+               0x3C, 0x3D, 0x3E, 0x3F, 0x4C, 0x4D, 0x4E, 0x4F,
+               -- and the cabinet standing beside it ($04/$05 over
+               -- $14/$15, on $0A/$0B over $1A/$1B), the same two-rank
+               -- drawing one cell wide
+               0x04, 0x05, 0x0A, 0x0B, 0x14, 0x15, 0x1A, 0x1B,
+               -- THE PC on the east wall.  One cell wide and TWO cells
+               -- tall -- $20/$21 the screen, $30/$31 the body twice over,
+               -- $40/$41 the base -- and nothing named it, so the upper
+               -- cell stood as a 16px wall panel and the lower one as the
+               -- $93 `console` standee: the machine came out cut in half
+               -- with a slab of wall balanced on it.  Same two-rank
+               -- drawing as the healing machine, so the same class.
+               0x20, 0x21, 0x30, 0x31, 0x40, 0x41,
+               -- THE DRINKS COOLER at the counter's east end, drawn from
+               -- the wall down onto the counter top ($0F the wall rank,
+               -- $03/$25 the middle, $13/$35 over $46/$47 the body).  All
+               -- three of its cells are plain $07, so it was three 16px
+               -- wall panels in a row running out into the room -- the
+               -- column that stood between the camera and the nurse.
+               0x0F, 0x03, 0x25, 0x13, 0x35, 0x46, 0x47 },
+  -- THE FLOOR, pinned.  The strip the nurse stands on behind the counter
+  -- is blocked ($07) simply because the counter is in the way, but it is
+  -- DRAWN as the same floor as the lobby ($01 over $11).  Unpinned it fell
+  -- to rule 4's wall fallback and put a 16px slab either side of her.
+  ground = { 0x01, 0x11 },
+  -- The nurse's counter.  Its run carries class $90 and the collision
+  -- table already reaches that, but the cell holding the ball tray
+  -- ($0C, which is the ball itself) is plain $07 and would have stayed a
+  -- wall stub in the middle of the counter.  The apron ($24) and the top
+  -- band ($34) are pinned with it so the whole run is one 8px band
+  -- whether or not a given cell got the class.
+  counter = { 0x0C, 0x24, 0x34 },
+  -- the lounge tables, four cells of them along the east wall
+  table = { 0x48, 0x49, 0x58, 0x59 },
+  heights = { table = 6 },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetMart -- the Poke Marts.
+--
+-- The stock shelves are the one drawing here the class table does not
+-- finish.  Each is two cell rows: the lower carries $96 (the ROM's own
+-- MerchandiseShelfScript class) and is now a 32px bookcase, but the upper
+-- rank is plain $07 and stayed a 16px wall panel standing behind it -- a
+-- shelf with a shelf-shaped step parked at its back.  Pinning the upper
+-- rank into the same class folds both onto one cell of plot, which is
+-- what the drawing means.
+profile.tilesets.TilesetMart = {
+  bookcase = { 0x0C, 0x0D, 0x40, 0x41, 0x42, 0x2B, 0x45, 0x50, 0x51,
+               0x52, 0x56, 0x57, 0x26, 0x27, 0x36, 0x37, 0x28, 0x29,
+               0x38, 0x39 },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetHouse -- the ordinary Johto town home (the Olivine fisherman's,
+-- Tim's, and the two dozen others cut from the same room).  Nothing in it
+-- was pinned, so every stick of furniture fell to the wall fallback its
+-- blocked collision class hands out and stood a full 16px course.
+profile.tilesets.TilesetHouse = {
+  -- THE DINING TABLE, four cells of it.  6px is the table family's own
+  -- height (see PLAYERS_HOUSE below for why the number matters as much as
+  -- the size); at 16 it stood shoulder-high on the man sitting at it.
+  table = { 0x05, 0x15, 0x26, 0x27, 0x29, 0x2F, 0x36, 0x39,
+            0x3A, 0x3B, 0x3C },
+  heights = { table = 6 },
+  -- THE TELEVISION, and the set along the same wall.  Each is drawn three
+  -- tile rows tall and the top row lands in the CELL ABOVE -- the north
+  -- wall band -- so the screen stood inside the wall a cell behind its own
+  -- base.  `console` is what the lower cell already resolves to through
+  -- its collision class, so naming the stray row the same puts the whole
+  -- set in one standee.
+  console = { 0x06, 0x07, 0x0C, 0x0D },
+  -- THE POTTED TREES in the two south corners: a round drawing stacked two
+  -- cells high on one cell of plot, which is what `planter` is for.  BOTH
+  -- cells take the pin -- the crown anchors the carve and the pot cell is
+  -- the plot it stands in, and with only one of them pinned Structures
+  -- refuses the hull and the two halves came out as separate objects, the
+  -- bush sitting behind its own pot instead of on it.
+  planter = { 0x08, 0x09, 0x0A, 0x0B, 0x18, 0x19, 0x1A, 0x1B },
+  -- ...and not as a SPRAY.  The class caps the crown to a five-voxel slab
+  -- because a pot plant's leaves are a flat fan; this one is a little tree
+  -- and reads as a ball, so every drawn row turns the full 16px.
+  planter_spray = false,
+  -- $3B/$3C are the table's south rim AND the bookcase's base course, and
+  -- a bookcase is 32px of shelving.  What is drawn one row above tells
+  -- them apart: the bookcase's own ranks, or more table.
+  when_above = {
+    [0x3B] = { { above = { 0x0E, 0x0F }, class = "bookcase" } },
+    [0x3C] = { { above = { 0x0E, 0x0F }, class = "bookcase" } },
+  },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetPlayersHouse -- the ground floor of the player's house, and the
+-- ordinary Johto home that shares its drawings.
+profile.tilesets.TilesetPlayersHouse = {
+  -- THE STOOLS around the dining table, four of them, drawn from above as
+  -- a round cushion.  Their cells are class $00 -- the game lets you walk
+  -- onto a stool -- so they were flat floor rather than boxes, which is
+  -- the opposite failure and just as wrong: a character crossing the
+  -- kitchen walked through the seats. 8px is the seat, and a character
+  -- standing on one stands on it.
+  stool = { 0x02, 0x03, 0x12, 0x13 },
+  -- the dining table between them, and the kitchen counter along the
+  -- north wall, which are the same drawing in the same ids -- including
+  -- the one-cell-wide run of it that goes north-south beside the stairs,
+  -- which is $25 and $35 side by side rather than stacked
+  table = { 0x15, 0x22, 0x23, 0x24, 0x25, 0x32, 0x33, 0x34, 0x35 },
+  -- the sink unit under the window and the cabinet beside the stairs.
+  -- Both are drawn two cell rows tall against the north wall, so both are
+  -- height rather than depth: one cell of plot at full height.
+  bookcase = { 0x18, 0x19, 0x43, 0x45, 0x50, 0x51, 0x52, 0x53,
+               0x0A, 0x0B, 0x1A, 0x1B, 0x2A, 0x2B },
+  -- THE TABLE FAMILY'S OWN HEIGHT.  The global `table` is 12 and the Gen 1
+  -- tilesets all override it to 6, which is what their crafted models
+  -- measure -- and 6 is not just a size here, it is what makes a tabletop
+  -- READ.  A pinned upright box tops itself with the drawn row
+  -- `front - floor(h/8)` (ChunkMesher), so at 12 a table drawn TWO cells
+  -- deep wears its north row across the whole lid: the drawn south rim
+  -- never lands, the surface comes out as one smeared band, and the thing
+  -- stands three quarters as tall as the player.  At 6 the divisor is zero,
+  -- every cell wears its own drawn row, and the rim, the highlight course
+  -- and the field fall where the artist put them.
+  heights = { table = 6, stool = 5 },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetPlayersRoom -- the player's bedroom, and the one room every save
+-- file starts in.
+-- Three machines stand in a row along one desk here -- the computer, the
+-- stereo beside it and the games console under the television -- and a
+-- standee pool clusters whatever touches it. Put all three in `console`
+-- and they merge into a single drawing, whereupon that class's one-object
+-- contract keeps the largest connected shape and throws the rest away.
+-- Each takes its own pool so each is measured, and stands, alone.
+profile.tilesets.TilesetPlayersRoom = {
+  -- the bed, drawn from above like every bed in the game
+  bed = { 0x10, 0x11, 0x12, 0x20, 0x21, 0x22 },
+  -- the computer: monitor over keyboard, two cell rows of drawing on one
+  -- cell of desk. A standee and not a box, because a box lids itself with
+  -- its own north row -- which prints the screen a second time, lying
+  -- flat on the machine's top, and hands the cell above it to the wall.
+  console = { 0x0B, 0x0C, 0x1B, 0x1C, 0x2B, 0x2C },
+  -- the stereo, and the lamp arm reaching over it: mostly silhouette, so
+  -- the thin pool
+  prop = { 0x42, 0x43, 0x52, 0x53 },
+  -- the television: $3B/$3C for the set's upper case, $4B/$4C for the
+  -- screen, $5B/$5C for the stand it rests on.  The top row is drawn in
+  -- the cell ABOVE, which is wall -- so the screen stood inside the wall
+  -- band while only the stand came forward.  Naming those two tiles takes
+  -- them out of the wall and into the same standee as the rest of the
+  -- set; the $02 planks either side of them stay wall, which is what they
+  -- are.  All four tiles of the lower cell are named too: a tile left out
+  -- of a pin does not become scenery, it falls through to the cell's
+  -- collision class -- $97, the television -- and builds a SECOND standee
+  -- from the leftovers, standing in the same place as the first.
+  billboard = { 0x3B, 0x3C, 0x4B, 0x4C, 0x5B, 0x5C },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetLab -- Elm's lab, Oak's, and the Cinnabar and Union Cave labs.
+profile.tilesets.TilesetLab = {
+  -- the long benches down the middle of the floor: one cell row with
+  -- their own shadow drawn on the walkable cell south of them, so they
+  -- are furniture standing in the room rather than anything against a
+  -- wall.  6px is the table family's own height (see PLAYERS_HOUSE): at
+  -- the global 12 the bench stood three quarters as tall as the player
+  -- and lost its drawn rim off the lid.
+  table = { 0x05, 0x06, 0x07, 0x15, 0x16, 0x17, 0x0E, 0x0F, 0x1E, 0x1F },
+  -- Elm's machine bank along the north and west walls -- the terminals,
+  -- the incubator and the tape reels.  `console` rather than `desk` for
+  -- the reason the PC classes take it: the upright fold repeats a box's
+  -- north row across its lid, so a terminal wore its own screen twice.
+  console = { 0x0A, 0x0B, 0x0C, 0x0D, 0x1A, 0x1B, 0x1C, 0x1D,
+              0x22, 0x23, 0x32, 0x33,
+              0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x49,
+              0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59 },
+  heights = { table = 6 },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetTower -- Sprout Tower, the Burned Tower, the Tin Tower and the
+-- Ecruteak gym, which is built in the same timber.
+profile.tilesets.TilesetTower = {
+  -- $01 is not a wall, it is NOTHING: the black surround these maps are
+  -- padded out to a full 20 cells with, two columns of it down each side
+  -- of every floor.  Its cells are class $07 like everything solid, so it
+  -- came out as a 16px black kerb ringing the tower -- a room inside a
+  -- box.  Flat, and the tower stands in the dark it is drawn in.
+  void = { 0x01 },
+  -- $02 is the plain planking.  $0A/$0B/$1A/$1B are the DARK bays laid
+  -- around the spine on the upper floors -- close-set joists seen from
+  -- above, a floor pattern and nothing more.  Their cells are blocked
+  -- ($07) like everything else here, so unpinned they fell to the wall
+  -- fallback and stood as four 16px slabs boxing the beam in.
+  ground = { 0x02, 0x0A, 0x0B, 0x1A, 0x1B },
+  -- the great square beam through the middle of every floor, two cells
+  -- wide and three tall: the tower's spine, and the one thing here that
+  -- genuinely runs past the ceiling.  32px, twice a wall, so it leaves
+  -- the top of the frame instead of stopping at head height.
+  cliff = { 0x2D, 0x2E, 0x2F, 0x3C, 0x3D, 0x3E, 0x3F,
+            0x4D, 0x4E, 0x4F, 0x5D, 0x5E, 0x5F },
+  -- The RAILING, in its two projections.  $11/$21 is the east-west run
+  -- seen face on -- balusters with daylight between them -- and the post
+  -- pool cuts that per pixel and stands each cell alone.  $41/$31 is the
+  -- same railing seen END ON, one cell wide and repeated seamlessly down
+  -- the whole run, with $40/$20 the corner cell where the two meet.  Read
+  -- as columns flanking the beam they took the beam's 32px and were cut
+  -- per cell like the face-on rows, so the north-south rail came out as a
+  -- chain of separate slabs stepping away from the camera at twice the
+  -- height of the rail it turns into.  `fence` is the continuous kerb the
+  -- end-on view depicts, at the face-on run's own height.
+  fence = { 0x41, 0x31, 0x40, 0x20 },
+  post = { 0x11, 0x21 },
+  -- ...and `rail_face` is what the end-on run is BUILT from: the panel
+  -- stands 6px thick down the middle of its cells and wears the face-on
+  -- drawing on both flanks, so walking beside it in first person shows a
+  -- railing rather than the end grain of a plank.  See Structures'
+  -- buildRails.
+  rail_face = { 0x11, 0x21 },
+  heights = { fence = 16 },
+  -- the gilded Bellsprout statues flanking the stairs, drawn over one
+  -- cell of plot and two cell rows: $4A/$4B over $5A/$5B for the head and
+  -- body, $4C/$5C for the leaves it holds out, $36/$37 for the stone base
+  -- under them.  Every tile of both cells, because a tile left out of a
+  -- pin does not become scenery -- it falls through to the cell's
+  -- collision class, $07, and stands as a plank slab through the middle
+  -- of the statue.  `billboard` and not `bookcase`: the collapse a
+  -- bookcase does is onto a BOX, and a box lids itself by repeating its
+  -- north row, so each statue wore a second copy of its own face flat
+  -- across the top of its head.
+  billboard = { 0x4A, 0x4B, 0x5A, 0x5B, 0x4C, 0x5C, 0x36, 0x37,
+                -- and the OTHER statue on the same atlas: the lidded urn on
+                -- its pedestal that flanks the Burned Tower's and the Tin
+                -- Tower's entrances (blocks $19/$1A and $21/$22, mirrored).
+                -- It shares the Bellsprout's $36/$37 base and nothing else,
+                -- so its own six tiles fell through to the cell's class,
+                -- $07, and each urn stood as a pair of plain wall cubes --
+                -- the "statue that isn't drawn like the other statues".
+                0x22, 0x23, 0x32, 0x33, 0x12, 0x13 },
+  -- The statue is gilded in the same GB shades the floor is planked in,
+  -- and it fills its own cell edge to edge, so the rim vote read its body
+  -- as background and drained it: what stood was the black outline alone,
+  -- a charred shell with the gold surviving only where the flood could not
+  -- reach.  There is no shade to name here -- `dark` is the floorboard
+  -- around the head AND the gold's own shading, and draining it guts the
+  -- body a second time (tried, and it does).  Nothing is background.
+  prop_bg = { { tiles = { 0x4A, 0x4B, 0x5A, 0x5B, 0x4C, 0x5C, 0x36, 0x37,
+                          0x22, 0x23, 0x32, 0x33, 0x12, 0x13 },
+                shades = { "none" } } },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetEliteFourRoom -- despite the name, this is the JOHTO GYM set:
+-- Violet, Azalea and Goldenrod are all built from it.
+profile.tilesets.TilesetEliteFourRoom = {
+  ground = { 0x01, 0x11 },
+  -- the same black padding TilesetTower has, and the same failure: six
+  -- columns of it down each side of a gym, every cell class $07, standing
+  -- as a black wall around a room that already has walls.
+  void = { 0x00 },
+  -- the badge statues either side of the leader's mat -- the ones you
+  -- read for the gym's inscription -- one cell of plot and two cell rows
+  -- of drawing ($20/$21 over $30/$31, standing on $22/$23 over $32/$33).
+  -- Cut per pixel rather than collapsed onto a box, which would lid each
+  -- one with a repeat of its own inscribed face.
+  billboard = { 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x33 },
+  -- and the same trap Sprout Tower's statues fell into: the statue fills
+  -- its cells edge to edge, so the rim vote reads its own body as
+  -- background, drains it, and leaves the black outline standing alone.
+  prop_bg = { { tiles = { 0x20, 0x21, 0x22, 0x23, 0x30, 0x31, 0x32, 0x33 },
+                shades = { "none" } } },
+  -- the pedestals ranged along the walls, in their own pool so a statue
+  -- standing next to one is still measured as a separate object
+  prop = { 0x55, 0x56, 0x57, 0x58 },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetRuinsOfAlph -- the four Unown chambers.
+profile.tilesets.TilesetRuinsOfAlph = {
+  -- the stone floor
+  ground = { 0x02, 0x03 },
+  -- the carved pillars flanking the Unown wall: $0E/$0F over $1E/$1F for
+  -- the capital, $2E/$2F over $3E/$3F for the shaft. A pillar is the one
+  -- thing in a ruin that is unmistakably tall, and both cells of it were
+  -- separate 16px cubes standing one behind the other, each capped with a
+  -- repeat of the carving on its face.
+  billboard = { 0x0E, 0x0F, 0x1E, 0x1F, 0x2E, 0x2F, 0x3E, 0x3F },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetForest -- Ilex Forest, and only Ilex Forest.
+--
+-- Its big trees are drawn as one 4x4-TILE mass ($0C-$0F over $1C-$1F over
+-- $2C-$2F over $3C-$3F, blocks $00 and $05), which is TWO CELLS square, and
+-- every one of those cells carries class $07.  The volume path read that as
+-- what it looks like from above -- a flat-topped green plateau with the
+-- canopy pattern printed on its lid -- which is the failure Viridian
+-- Forest's trees have upstairs, and it takes the same answer: `canopy` pins
+-- the drawing's top-left tile as the group anchor and carves the whole 2x2
+-- as ONE 32px voxel hull, with every other tile of the mass left `cylinder`
+-- so the group build can verify and claim its cells (and so a drawing cut
+-- by a map edge degrades to per-cell hulls rather than back to a box).
+--
+-- The small round tree ($26/$27/$36/$37) and the berry tree ($28/$38/$39/$3A)
+-- need no pin: their cells carry classes $15 and $12, which the collision
+-- map already rounds.  Neither is the cut tree -- Ilex's is a map OBJECT,
+-- not a tile -- so nothing here touches one.
+profile.tilesets.TilesetForest = {
+  ground = { 0x05 },
+  water = { 0x14 },
+  flower = { 0x03 },
+  canopy = { 0x0C },
+  cylinder = { 0x0D, 0x0E, 0x0F, 0x1C, 0x1D, 0x1E, 0x1F,
+               0x2C, 0x2D, 0x2E, 0x2F, 0x3C, 0x3D, 0x3E, 0x3F },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetPark -- the National Park, the Bug-Catching Contest's arena.
+--
+-- Two things here are grass and only one of them was being drawn as grass.
+-- Block $03 is the ordinary tall grass, class $18, which the collision map
+-- already stands up as tufts.  Block $13 -- the long clumped grass the
+-- contest is fought in, and the one drawing a player spends the whole event
+-- looking at -- carries class $14 instead, which is not one of
+-- CheckGrassCollision's ten and is plain LAND, so the cell rules painted it
+-- flat: a contest in a meadow with no meadow in it.  A tile pin reaches
+-- what the class cannot.
+--
+-- The big trees are the same 4x4-tile mass FOREST draws (blocks $00 and $06
+-- here) and take the same canopy treatment.
+profile.tilesets.TilesetPark = {
+  ground = { 0x01 },
+  -- the ornamental pond.  $14 is its surface and $15 the pale shallow rim,
+  -- and neither is drawn anywhere else in the set -- but only the four cells
+  -- of open water in the middle carry a WATER class ($21); every rim cell is
+  -- plain $07, because the pond cannot be surfed.  So the cell rules read
+  -- the whole shoreline as wall and stood the rim up as a ring of blue
+  -- crates around a flat pool.  Same fix Johto's $58 shore takes.
+  water = { 0x14, 0x15 },
+  -- the contest's long grass ($3A/$3B over $4A/$4B, block $13 alone)
+  grass = { 0x3A, 0x3B, 0x4A, 0x4B },
+  -- No `post` pin: $4F's cells (blocks $0A/$0B) carry $70/$7E, which
+  -- CheckWarpCollision matches, so it is the park gate's entrance mat.
+  canopy = { 0x0C },
+  cylinder = { 0x0D, 0x0E, 0x0F, 0x1C, 0x1D, 0x1E, 0x1F,
+               0x2C, 0x2D, 0x2E, 0x2F, 0x3C, 0x3D, 0x3E, 0x3F },
+}
+
+-- ---------------------------------------------------------------------------
+-- TilesetCave / TilesetDarkCave -- byte for byte the same blockset and the
+-- same 96 tiles (Union Cave, Mt. Mortar, Dark Cave, Slowpoke Well: 32 maps
+-- between them), so one description serves both.
+--
+-- The rocks are drawn ROUND -- one boulder per cell, $0C/$0D over $1C/$1D,
+-- fifteen blocks of them and drawn nowhere else -- and their cells are plain
+-- $07, so the volume path boxed every one and a cavern floor came out
+-- cobbled with 16px crates.
+--
+-- Everything else solid is ONE rock family.  Counted over all 52 maps the
+-- two sets serve, the blocked tiles are exactly $05 $07 $0A $0B $10 $15
+-- $17 $1A $1B $25 $26 $27 -- $26 alone is 19,000 cells -- and not one of
+-- them was named, so every one fell through to rule 4's 16px `wall`.  That
+-- is the Burned Tower basement's whole complaint: a cavern rendered as a
+-- floor plan of knee-high kerbs you see straight over, with the volume
+-- path picking a different height for each run it decided was an object.
+-- Pinned they skip detection, and `cliff` is the same upright fold two
+-- courses tall -- which is what the inside of a mountain wants.
+--
+-- The rest is walkable: $01/$16 are the two floor shades and $24 the band
+-- drawn along a raised floor's edge (also the doorstep under an exit,
+-- $B2), $36/$37 the staircase, $20-$23/$28-$2B/$30-$33/$38-$3B the ladder
+-- ($72), and $0E/$0F/$1E/$1F the cave mouth ($7B).  $40 is the WATERFALL
+-- sheet (collision $33) and is shaped by class, not by tile id -- see
+-- profile.collision.
+local cave = {
+  -- $01 is the LOW floor and $16/$24 the HIGH one.  Gen 2 records no
+  -- elevation at all -- both are collision $00 -- so the only statement
+  -- that a cave has two levels is the change of floor shade, and the rock
+  -- band drawn between them is the same $26 family as any other wall.
+  -- Read as one floor the Burned Tower's basement came out as a maze of
+  -- kerbs on a billiard table, with the plateau the three beasts stand on
+  -- flush with the pit you fall into to reach it.  `terrace` is the class
+  -- for exactly this (see TileShape): raised GROUND, drawn on the top face
+  -- of its box, at the height of the cliff that holds it up.
+  ground = { 0x01 },
+  terrace = { 0x16, 0x24 },
+  water = { 0x14 },
+  cylinder = { 0x0C, 0x0D, 0x1C, 0x1D },
+  cliff = { 0x05, 0x07, 0x0A, 0x0B, 0x10, 0x15, 0x17,
+            0x1A, 0x1B, 0x25, 0x26, 0x27 },
+  -- $40 is the FALL itself: a band of it laid across the river, eight
+  -- blocks wide, four cells deep at Mt. Mortar and the same shape at
+  -- Tohjo Falls, Whirl Island B2F and Silver Cave.  Its cells are
+  -- COLL_WATERFALL and its neighbours COLL_WATER, and a class pin cannot
+  -- reach it -- the cell is water as far as the water pass is concerned,
+  -- so the river came out one flat sheet with a texture change across the
+  -- middle.  A TILE pin outranks every cell rule, and `waterfall` stands
+  -- the falling water on its face the way it falls -- at the height the
+  -- map DRAWS it, with the river it pours out of raised to its crest
+  -- (Structures.buildFalls).  Pinned `cliff` at a flat 32px instead, the
+  -- fall was a kerb and the upper river sat at the bottom of it.
+  waterfall = { 0x40 },
+  -- One course, wall and raised floor alike.  The rock band drawn between
+  -- two cave levels is the same $26 family as the chamber walls, so the
+  -- face that holds a terrace up can only ever be as tall as a `cliff` --
+  -- and the flight that climbs it ($36) is a single block.  At 32 the deck
+  -- stood a block clear of the top step.
+  heights = { cliff = 16, terrace = 16 },
+  -- ...but a rock lip you can HOP down is a ledge like any other, and the
+  -- caves draw theirs out of the same $26 band as the walls, so the lip
+  -- has to be found from the neighbouring $A1/$A3/$A5 cell.  See
+  -- TileShape's HOP_LIP.
+  hop_lips = true,
+  -- The staircase is set INTO the floor it serves and nothing in its
+  -- drawing says which of the two that is, so on the raised floor it came
+  -- out as a pit through the deck (Mt. Mortar's sand shelf, the flight up
+  -- to the Burned Tower's plateau).  What is drawn north of it does say:
+  -- a flight is always entered from its own level, and the run above the
+  -- top step is either raised floor or more of the same flight.
+  when_above = {
+    [0x36] = { { above = { 0x16, 0x24, 0x36 }, class = "terrace" } },
+    [0x37] = { { above = { 0x16, 0x24, 0x37 }, class = "terrace" } },
+  },
+}
+profile.tilesets.TilesetCave = cave
+profile.tilesets.TilesetDarkCave = cave
+
+-- TilesetLighthouse had an entry here that was assigned AFTER the table
+-- literal above and therefore replaced whatever that table said.  It was
+-- guessed rather than read, and every line of it was wrong: $08/$09/$18/$19
+-- pinned `stool` as "staircase tiles" is the right half of a stool ($07/$08
+-- over $17/$18) welded to the left half of a table ($09/$19), and the
+-- "crate/box props" pinned `table` are the bulkhead's own courses -- plus
+-- $23, which is not a prop at all but the shadow strip along the top of the
+-- FLOOR cell, raised into a 12px box on 88 tiles of open deck.  That is the
+-- boxy ship.  The replacement is in the tilesets table above, swept against
+-- all eleven maps; nothing is assigned here any more.
+
+return profile

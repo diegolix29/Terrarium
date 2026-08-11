@@ -36,6 +36,15 @@ function Grass3D.wantsMesh()
   return Grass3D.setting:get() == "mesh"
 end
 
+-- Simplified meshes for road/ground/decor (much faster, less detailed)
+Grass3D.simpleMeshes = ModSetting.new("simplemeshes", "SIMPLE MESHES",
+                                       { "on", "off" },
+                                       { "ON", "OFF" })
+
+function Grass3D.wantsSimpleMeshes()
+  return Grass3D.simpleMeshes:get() == "on"
+end
+
 Grass3D.ASSET_DIR = "assets/ground/grass/"
 Grass3D.META = "grass.meta.json"
 Grass3D.BIN = "grass.mesh.bin"
@@ -45,6 +54,11 @@ Grass3D.TEX = "grass.png"
 local tpl = nil          -- nil = untried, false = unavailable
 local tex = nil          -- Image | false
 local meta = nil
+
+-- Simplified quad templates for road/ground/decor (4 verts, 2 tris) - much faster than grass mesh
+local roadTpl = nil      -- nil = untried, false = unavailable
+local groundTpl = nil    -- nil = untried, false = unavailable
+local decorTpl = nil     -- nil = untried, false = unavailable
 
 local function assetPath(name)
   return V.path .. "/" .. Grass3D.ASSET_DIR .. name
@@ -180,6 +194,42 @@ local function loadTemplate()
   return tpl
 end
 
+-- Create a simple quad template (4 verts, 2 triangles) for road/ground
+-- Much faster than using the complex grass mesh
+local function loadQuadTemplate()
+  local verts = {
+    { -4, 0, -4, 0, 0, 0.8 },   -- bottom-left
+    { 4, 0, -4, 1, 0, 0.8 },    -- bottom-right
+    { 4, 0, 4, 1, 1, 0.8 },     -- top-right
+    { -4, 0, 4, 0, 1, 0.8 },    -- top-left
+  }
+  local indices = { 1, 2, 3, 1, 3, 4 }  -- two triangles
+  return {
+    verts = verts,
+    indices = indices,
+    height = 0,
+    radius = 5.66,
+  }
+end
+
+local function loadRoadTemplate()
+  if roadTpl ~= nil then return roadTpl or nil end
+  roadTpl = loadQuadTemplate()
+  return roadTpl
+end
+
+local function loadGroundTemplate()
+  if groundTpl ~= nil then return groundTpl or nil end
+  groundTpl = loadQuadTemplate()
+  return groundTpl
+end
+
+local function loadDecorTemplate()
+  if decorTpl ~= nil then return decorTpl or nil end
+  decorTpl = loadQuadTemplate()
+  return decorTpl
+end
+
 function Grass3D.available()
   -- Player chose the classic slab, or the bake is not on disk: Structures
   -- takes the tileset path. Checking the setting first so a VOXEL preference
@@ -213,13 +263,61 @@ function Grass3D.setting:row()
   }
 end
 
+function Grass3D.simpleMeshes:row()
+  local self_ = self
+  return {
+    id = ((V.mod and V.mod.id) or "TERRARIUM") .. ":" .. self.key,
+    label = self.label,
+    value = function() return self_.labels[self_:read()] end,
+    step = function(game, dir)
+      self_:cycle(game, dir)
+      remesh()
+      return true
+    end,
+  }
+end
+
 function Grass3D.onOptionsChanged(value)
   Grass3D.setting:sync(value)
   remesh()
 end
 
+function Grass3D.onSimpleMeshesChanged(value)
+  Grass3D.simpleMeshes:sync(value)
+  remesh()
+end
+
 function Grass3D.texture()
   return loadTexture()
+end
+
+function Grass3D.roadTexture()
+  local ok, R = pcall(V.require, "Road3D")
+  if ok and R and R.texture then
+    return R.texture()
+  end
+  return nil
+end
+
+function Grass3D.groundTexture()
+  local ok, R = pcall(V.require, "Road3D")
+  if ok and R and R.texture then
+    -- Load ground.png from the same directory as road.png
+    local Road3D = R
+    local path = V.path .. "/" .. Road3D.ASSET_DIR .. "ground.png"
+    local okA, Assets = pcall(require, "src.render.Assets")
+    if okA and Assets then
+      local okE, exists = pcall(Assets.exists, path)
+      if okE and exists then
+        local ok, img = pcall(Assets.image, path)
+        if ok and img then
+          pcall(img.setFilter, img, "nearest", "nearest")
+          return img
+        end
+      end
+    end
+  end
+  return nil
 end
 
 function Grass3D.meta()
@@ -236,12 +334,16 @@ local function unit(tx, ty, salt)
 end
 
 -- Append one rotated/scaled instance of the template into verts/indices.
-local function stamp(verts, indices, tplV, tplI, ox, oz, yaw, scale)
+local function stamp(verts, indices, tplV, tplI, ox, oz, yaw, scale, heightScale)
   local c, s = math.cos(yaw), math.sin(yaw)
   local base = #verts
   for i = 1, #tplV do
     local v = tplV[i]
     local x, y, z = v[1] * scale, v[2] * scale, v[3] * scale
+    -- Apply height scale only to Y component (height), not X/Z (width)
+    if heightScale then
+      y = v[2] * scale * heightScale
+    end
     local rx = x * c - z * s
     local rz = x * s + z * c
     -- VertexShade: magnitude is cel shade, sign is face-up (snow). Positive
@@ -256,24 +358,122 @@ local function stamp(verts, indices, tplV, tplI, ox, oz, yaw, scale)
 end
 
 -- Build the whole-map grass mesh from instance records
--- `{ wx, wz [, yaw, scale] }` (world-pixel tile origin, not cell centre).
+-- `{ wx, wz [, yaw, scale, heightScale, texture] }` (world-pixel tile origin, not cell centre).
 function Grass3D.meshFromInstances(instances)
   local t = loadTemplate()
   if not t or not instances or #instances == 0 then return nil end
   local verts, indices = {}, {}
   local tplV, tplI = t.verts, t.indices
+  
+  -- Build grass mesh (only non-road/ground/decor instances)
+  for i = 1, #instances do
+    if instances[i].texture ~= "road" and instances[i].texture ~= "ground" and instances[i].texture ~= "decor" then
+      local inst = instances[i]
+      local wx = inst.wx or 0
+      local wz = inst.wz or 0
+      local yaw = inst.yaw or 0
+      local scale = inst.scale or 1
+      local heightScale = inst.heightScale or nil
+      stamp(verts, indices, tplV, tplI, wx + 4, wz + 4, yaw, scale, heightScale)
+    end
+  end
+  
+  local mesh = Voxel3D.newMesh(verts, indices)
+  if mesh and loadTexture() then
+    pcall(mesh.setTexture, mesh, loadTexture())
+  end
+  return mesh
+end
+
+-- Build decorative grass mesh (no effects)
+function Grass3D.decorMeshFromInstances(instances)
+  local t
+  if Grass3D.wantsSimpleMeshes() then
+    t = loadDecorTemplate()
+  else
+    t = loadTemplate()
+  end
+  if not t or not instances or #instances == 0 then return nil end
+  local verts, indices = {}, {}
+  local tplV, tplI = t.verts, t.indices
+  
   for i = 1, #instances do
     local inst = instances[i]
     local wx = inst.wx or 0
     local wz = inst.wz or 0
     local yaw = inst.yaw or 0
     local scale = inst.scale or 1
-    -- centre the tuft in its 8x8 tile
-    stamp(verts, indices, tplV, tplI, wx + 4, wz + 4, yaw, scale)
+    local heightScale = inst.heightScale or 0.5  -- Decorative grass half height
+    stamp(verts, indices, tplV, tplI, wx + 4, wz + 4, yaw, scale, heightScale)
   end
+  
   local mesh = Voxel3D.newMesh(verts, indices)
   if mesh and loadTexture() then
     pcall(mesh.setTexture, mesh, loadTexture())
+  end
+  return mesh
+end
+
+-- Build road mesh from road instances
+function Grass3D.roadMeshFromInstances(instances)
+  local t
+  if Grass3D.wantsSimpleMeshes() then
+    t = loadRoadTemplate()
+  else
+    t = loadTemplate()
+  end
+  if not t or not instances or #instances == 0 then return nil end
+  local verts, indices = {}, {}
+  local tplV, tplI = t.verts, t.indices
+  
+  for i = 1, #instances do
+    local inst = instances[i]
+    local wx = inst.wx or 0
+    local wz = inst.wz or 0
+    local yaw = inst.yaw or 0
+    local scale = inst.scale or 1
+    local heightScale = inst.heightScale or 0.05  -- Roads always 0.05 height
+    stamp(verts, indices, tplV, tplI, wx + 4, wz + 4, yaw, scale, heightScale)
+  end
+  
+  local mesh = Voxel3D.newMesh(verts, indices)
+  if mesh then
+    local roadTex = Grass3D.roadTexture()
+    if roadTex then
+      pcall(mesh.setTexture, mesh, roadTex)
+    end
+  end
+  return mesh
+end
+
+-- Build ground mesh from ground instances
+function Grass3D.groundMeshFromInstances(instances)
+  local t
+  if Grass3D.wantsSimpleMeshes() then
+    t = loadGroundTemplate()
+  else
+    t = loadTemplate()
+  end
+  if not t or not instances or #instances == 0 then return nil end
+  local verts, indices = {}, {}
+  local tplV, tplI = t.verts, t.indices
+  
+  for i = 1, #instances do
+    local inst = instances[i]
+    local wx = inst.wx or 0
+    local wz = inst.wz or 0
+    local yaw = inst.yaw or 0
+    local scale = inst.scale or 1
+    local heightScale = inst.heightScale or 0.1  -- Ground always 0.1 height
+    stamp(verts, indices, tplV, tplI, wx + 4, wz + 4, yaw, scale, heightScale)
+  end
+  
+  local mesh = Voxel3D.newMesh(verts, indices)
+  if mesh then
+    local groundTex = Grass3D.groundTexture()
+    if groundTex then
+      pcall(mesh.setTexture, mesh, groundTex)
+    end
   end
   return mesh
 end

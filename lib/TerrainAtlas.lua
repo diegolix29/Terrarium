@@ -360,6 +360,43 @@ local function gbcPixels(map)
   return ok and out or nil
 end
 
+-- Gen 2's equivalent, and the same argument for re-baking rather than
+-- reading back -- with teeth, because here the readback does not merely
+-- cost a GPU sync: taking a canvas mid-mesh-build left the terrain missing
+-- from the frame entirely.
+--
+-- The engine's bake is TileRenderer.getGen2Atlas, and everything it reads
+-- is public on the tileset: `palMap` gives each tile graphic its palette
+-- index and `palColors` holds the seven four-colour CGB palettes, both off
+-- the ROM. Same clamp, same recolorSample cutoffs.
+local function gen2Pixels(map)
+  local tileset = map.tileset
+  local palMap, palColors = tileset and tileset.palMap, tileset and tileset.palColors
+  if not (palMap and palColors and #palMap > 0 and #palColors > 0
+          and love.image and love.image.newImageData) then
+    return nil
+  end
+  local ok, out = pcall(function()
+    local src = Assets.imageData(tileset.image)
+    local iw, ih = src:getDimensions()
+    local perRow = tileset.tilesPerRow or 16
+    local dst = love.image.newImageData(iw, ih)
+    for t = 0, (iw / 8) * (ih / 8) - 1 do
+      local colors = palColors[math.min(palMap[t + 1] or 0, #palColors - 1) + 1]
+      local ox, oy = (t % perRow) * 8, math.floor(t / perRow) * 8
+      for py = 0, 7 do
+        for px = 0, 7 do
+          local r, g, b, a = src:getPixel(ox + px, oy + py)
+          r, g, b, a = TileRenderer.recolorSample(r, g, b, a, colors)
+          dst:setPixel(ox + px, oy + py, r, g, b, a)
+        end
+      end
+    end
+    return dst
+  end)
+  return ok and out or nil
+end
+
 -- The pixels behind the atlas texture the engine is drawing with, for the
 -- frames where we did not bake one ourselves (staticAtlas returns `false`
 -- for its own bake whenever the palette is absent, RED++ already baked, or
@@ -385,6 +422,17 @@ local function rendererPixels(map)
   end
   if renderer.gbcAtlas then
     return gbcPixels(map) or readback(renderer.image)
+  end
+  -- Gen 2 is a THIRD engine bake: TileRenderer.getGen2Atlas paints the
+  -- tileset's per-tile CGB palettes (palMap/palColors) into renderer.image
+  -- and flags it `trueColor`, not `gbcAtlas` -- and like RED++ it drops the
+  -- ImageData once the texture exists. Falling through to the art on disk
+  -- handed back the RAW GREYSCALE, so every tileset with animated water --
+  -- Johto, JohtoModern, Kanto, Forest, Park, Port, Tileset0, i.e. every
+  -- OUTDOOR one -- rebuilt its atlas colourless while interiors, which
+  -- animate nothing and so keep the static bake, stayed correct.
+  if renderer.trueColor and not map.tileset.trueColor then
+    return gen2Pixels(map)
   end
   local ok, data = pcall(Assets.imageData, map.tileset.image)
   return ok and data or nil

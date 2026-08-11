@@ -128,8 +128,8 @@ ShadowMap.slack = ShadowMap.BIAS
 local SHADER = [[
   varying float vDepth;
 #ifdef VERTEX
-  uniform mat4 lightVP;
-  uniform mat4 model;
+  uniform highp mat4 lightVP;
+  uniform highp mat4 model;
   vec4 position(mat4 transform_projection, vec4 vertex_position) {
     vec4 c = lightVP * (model * vertex_position);
     // the projection is orthographic, so w is 1 and clip z IS the depth,
@@ -158,6 +158,7 @@ local drawing = false
 local ready = false
 local lastSig = nil
 local prevBlend, prevAlphaMode = nil, nil
+local spriteCasters = false
 
 local IDENTITY = Mat4.identity()
 
@@ -566,9 +567,9 @@ end
 function ShadowMap.draw(mesh, texture, model)
   if not (drawing and mesh) then return end
   local sh = getShader()
-  if texture then mesh:setTexture(texture) end
+  if texture then pcall(mesh.setTexture, mesh, texture) end
   pcall(sh.send, sh, "model", "row", model or IDENTITY)
-  love.graphics.draw(mesh)
+  pcall(love.graphics.draw, mesh)
 end
 
 -- Close the pass and stamp it with the signature it was drawn for.
@@ -590,6 +591,17 @@ function ShadowMap.invalidate()
   canvas, canvasRes, blank = nil, 0, nil
   drawing, ready, lastSig = false, false, nil
   deferred = 0
+end
+
+-- Mark whether subsequent casters are sprites (so water can decline them).
+-- When true, casters are marked as sprite casters; when false, they are not.
+function ShadowMap.sprites(enabled)
+  spriteCasters = enabled or false
+end
+
+-- Query whether sprite casters are currently being marked.
+function ShadowMap.isSpriteCasters()
+  return spriteCasters
 end
 
 return ShadowMap

@@ -1,4 +1,4 @@
-﻿-- Voxel world mode: assemble and draw one frame of the 3D scene.
+-- Voxel world mode: assemble and draw one frame of the 3D scene.
 --
 -- World space is world pixels and shares its origin with the 2D paths, so
 -- the terrain mesh needs no transform at all and a connected map just
@@ -15,6 +15,7 @@ local V = ...
 local Mat4 = V.require("Mat4")
 local Voxel3D = V.require("Voxel3D")
 local ShadowMap = V.require("ShadowMap")
+local Shadows = V.require("Shadows")
 local ChunkMesher = V.require("ChunkMesher")
 local SpriteBillboards = V.require("SpriteBillboards")
 local TileShape = V.require("TileShape")
@@ -26,12 +27,24 @@ local GroundFX = V.require("GroundFX")
 local Quality = V.require("Quality")
 local Wind = V.require("Wind")
 local Water = V.require("Water")
-local WaterBody = V.require("WaterBody")
-local FloorArt = V.require("FloorArt")
-local Underpass = V.require("Underpass")
+local Ceiling = V.require("Ceiling")
+local Backdrop = V.require("Backdrop")
+local SkyLayer = V.require("SkyLayer")
+local Flora = V.require("Flora")
 local Roamer = V.require("Roamer")
 local StreetLamps = V.require("StreetLamps")
 local Skyline = V.require("Skyline")
+local HorizonArt = V.require("HorizonArt")
+local FirstPerson = V.require("FirstPerson")
+local VoxelGrid = V.require("VoxelGrid")
+local BattleBillboard = V.require("BattleBillboard")
+local Pokedex = V.require("Pokedex")
+local Diorama = V.require("Diorama")
+local ViewBox = V.require("ViewBox")
+local DrawDistance = V.require("DrawDistance")
+local PlayerModel = V.require("PlayerModel")
+local StadiumFollower = V.require("StadiumFollower")
+local StadiumWilds = V.require("StadiumWilds")
 local PaletteFX = require("src.render.PaletteFX")
 local Map = require("src.world.Map")
 
@@ -97,7 +110,7 @@ VoxelScene._modeColors = modeColors   -- named for the suite
 -- sky.
 local SKY_SHADES = { { 222, 242, 255 }, { 135, 196, 240 },
                      { 64, 120, 192 }, { 16, 40, 80 } }
-local SKY_SHADE = 2       -- the ramp's "sky" proper; 1 is its highlight
+local SKY_SHADE = 2        -- the ramp's "sky" proper; 1 is its highlight
 
 -- the ramp as the display mode has it, which is the only form anything here
 -- should be reading it in
@@ -165,7 +178,7 @@ local function skyFor(map)
   return sky
 end
 
-VoxelScene._skyFor = skyFor           -- named for the suite
+VoxelScene._skyFor = skyFor            -- named for the suite
 VoxelScene._skyStrength = skyStrength
 
 -- A facing as a yaw about +Y, kept for callers that reason about which way
@@ -191,7 +204,18 @@ local function groundAt(map, cellX, cellY)
   -- exactly one step -- the "hops like a ledge" seam bug.
   if not map:inBounds(cellX, cellY) then return 0 end
   local shapes = TileShape.forMap(map)
-  local s = shapes[map:cellTile(cellX, cellY)]
+  local tile = map:cellTile(cellX, cellY)
+  -- Gen 2 tilesets carry NO per-tile fallback in `shapes` (forMap skips it
+  -- deliberately -- see its `perTile` comment): an unauthored tile there
+  -- resolves only through TileShape.at's cell-level rules -- the collision
+  -- class table (a counter, a bookcase, a console...) and the plain
+  -- walkable/water checks. Indexing `shapes[tile]` straight past those, as
+  -- this used to, answers `wall` (16px, upright) for every one of them, so
+  -- Gen 2 furniture -- and Gen 2 floor tiles with no explicit ground pin --
+  -- stood characters at wall height instead of the furniture's own, or the
+  -- floor's 0. Gen 1 never had a class table, so its `shapes[tile]` was
+  -- already the fully-resolved answer and this changes nothing for it.
+  local s = TileShape.at(map, shapes, tile, cellX * 2, cellY * 2 + 1)
   if not s then return 0 end
   -- a recessed class (water) still supports whatever stands on it; only
   -- raised ground lifts the model.  Stairs never do: the class height is
@@ -199,6 +223,18 @@ local function groundAt(map, cellX, cellY)
   -- warp fires as they step in -- lifting them onto the geometry read as
   -- climbing an invisible block
   if s.art == "stair" then return 0 end
+  -- Doors are the same "invisible block" bug as stairs, and for the same
+  -- root cause: a door tile carries no collision class of its own, so it
+  -- falls through to whatever generic class the tileset's table gives it
+  -- -- almost always `wall` (upright, 16px), since door art lives in the
+  -- wall band of the tileset. Structures' door fold already special-cases
+  -- these for the MESH (see doorFold), but that pass never touches
+  -- groundAt, so the entity walking onto/off of the tile was still being
+  -- placed at wall height instead of the floor. Force floor level here,
+  -- exactly like stairs above, so entering reads as walking through the
+  -- doorway instead of stepping up onto it, and exiting doesn't look like
+  -- dropping down off it.
+  if map.doorTiles and map.doorTiles[tile] then return 0 end
   -- Recessed water sits at TileShape.water (-2).  Callers that need the
   -- LIVE surface (swell under a surfer / water roamer) ask Water.surfaceAt
   -- with the entity's pixel position; this answer is only the still floor.
@@ -264,7 +300,10 @@ local ROUND_ART = {
 local function flatTop(map, cellX, cellY)
   if not map:inBounds(cellX, cellY) then return false end
   local shapes = TileShape.forMap(map)
-  local s = shapes[map:cellTile(cellX, cellY)]
+  local tile = map:cellTile(cellX, cellY)
+  -- Same reasoning as groundAt above: Gen 2 needs TileShape.at's cell rules
+  -- to resolve a class at all, so this has to ask the same way groundAt does.
+  local s = TileShape.at(map, shapes, tile, cellX * 2, cellY * 2 + 1)
   -- no shape is flat ground at zero, which groundAt already reports as 0 and
   -- every caller here rejects on its own
   if not s then return true end
@@ -288,9 +327,34 @@ end
 -- The sheet frame and mirror flag the 2D path would draw for this pose
 -- (same tables as SpriteRenderer). Shared by the billboard pass and the
 -- shadow pass so a walking character's shadow swings its legs too.
-local function frameFor(def, facing, phase, flip)
+local function frameFor(def, facing, phase, flip, yaw)
   local SR = require("src.render.SpriteRenderer")
   local frame, mirror = 0, false
+
+  -- Adjust facing based on camera yaw (ported from ADVANCED_SHAPE): as the
+  -- orbit camera turns, a sprite drawn "facing down" from due south should
+  -- read as facing whichever way is actually toward the camera now.
+  if yaw and yaw ~= 0 then
+    local yawDeg = math.deg(yaw)
+    -- Normalize to handle both 180 and -180
+    while yawDeg > 180 do yawDeg = yawDeg - 360 end
+    while yawDeg < -180 do yawDeg = yawDeg + 360 end
+
+    -- Map camera rotation to facing adjustments with tolerance
+    local map = nil
+    if math.abs(yawDeg - (-90)) < 5 then
+      map = { up = "left", right = "up", down = "right", left = "down" }  -- Camera left
+    elseif math.abs(yawDeg - 90) < 5 then
+      map = { up = "right", right = "down", down = "left", left = "up" }  -- Camera right
+    elseif math.abs(yawDeg - 180) < 5 or math.abs(yawDeg - (-180)) < 5 then
+      map = { up = "down", right = "left", down = "up", left = "right" }  -- Camera back
+    end
+
+    if map then
+      facing = map[facing] or facing
+    end
+  end
+
   if (def.frames or 1) > 1 then
     frame = (def.walker and phase == 1) and SR.WALK[facing]
             or SR.STAND[facing]
@@ -300,19 +364,48 @@ local function frameFor(def, facing, phase, flip)
   return frame, mirror
 end
 
+-- The facing a pose SHOWS this camera. The flat frames are "how this pose
+-- looks from the south", which is where the orbit always stands; a
+-- first-person eye stands anywhere, so deep enough into the blend the
+-- facing is remapped to how the pose looks from THERE -- walk behind an
+-- NPC and their card wears the back sprite. Used by the camera draw and
+-- the sun pass BOTH: the card the sun stored and the transform a lit card
+-- reads its own shadowing with must describe the same frame, or the
+-- mirror-flip half of the pair asks the map about texels the sun filed
+-- under the other cheek.
+-- The player's own card asks a different function for the same answer:
+-- their body's bearing is what the camera is derived FROM, so it is known
+-- continuously rather than as one of four directions, and measuring
+-- against the compass point instead flicks the card to a profile for a
+-- frame or two when the camera is spun fast (see playerFacing).
+local function viewFacing(p)
+  local facing = p.facing or "down"
+  if FirstPerson.cardBlend() > 0.5 then
+    if p.isPlayer then
+      facing = FirstPerson.playerFacing(facing, p.px + 8, p.py + 8) or facing
+    else
+      facing = FirstPerson.apparentFacing(facing, p.px + 8, p.py + 8) or facing
+    end
+  end
+  return facing
+end
+
 -- FALLBACK ONLY (see castShadows below). Draw one entity's drop shadow as
 -- a decal: its current sprite frame as a single quad, flattened onto the
 -- ground along the sun line (Voxel3D.shadowMatrix). Runs inside
 -- beginShadows, which supplies the translucent black; the texture is only
 -- consulted for its alpha, so no palette work is needed.
 local function drawShadow(sprite, px, py, facing, phase, flip, gh, lift,
-                          waterline)
+                          waterline, yaw)
   local def = sprite.def
-  local frame, mirror = frameFor(def, facing, phase, flip)
+  local frame, mirror = frameFor(def, facing, phase, flip, yaw)
   local mesh = SpriteBillboards.shadowQuad(def, frame, waterline or 0)
   if not mesh then return end
+  
+  -- Get sprite dimensions for dynamic sizing (texture dims and world dims)
+  local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
   Voxel3D.draw(mesh, sprite:resolveImage(),
-               Voxel3D.shadowMatrix(px, py, gh, lift, mirror))
+               Voxel3D.shadowMatrix(px, py, gh, lift, mirror, worldWidth, worldHeight))
 end
 
 -- Where a billboard character's card stands: on the middle of its cell at
@@ -323,17 +416,64 @@ end
 -- Shared by the solid draw and the silhouette below, so the two can never
 -- drift apart -- a silhouette standing anywhere but exactly behind the
 -- figure would read as a second character.
-local function billboardMatrix(px, py, y, mirror)
-  local Voxel = V.require("VoxelState")
-  local m = Mat4.mul(Mat4.translate(px + 8, y, py + 8),
-                     Mat4.rotateX(Voxel.angle - math.pi / 2))
+--
+-- IN FIRST PERSON the card stops leaning and starts TURNING: upright, yawed
+-- about its feet to face the eye (cylindrical billboarding). A south-facing
+-- card is invisible edge-on to an eye standing east of it, which no orbit
+-- camera could ever do and a first-person one does constantly. The blend
+-- carries one pose into the other -- the lean eases out as the yaw eases in
+-- -- and cardBlend is zero for every camera that is not the first-person
+-- rig, the battle's placed shot included, so nothing else moves.
+-- The pitch the sprite cards lean back by -- normally the rung's own
+-- camera angle, overridable in radians. VR sets the override to the top
+-- rung's 75 degrees for every diorama and battle frame: a table watched
+-- from a freely moving head has no one camera pitch for the cards to
+-- match, and the near-upright top-rung lean is the pose that reads as
+-- "standing" from anywhere around it. nil (the default, and the flat
+-- screen always) leans with the rung as ever.
+VoxelScene.spriteLean = nil
+
+local function leanAngle()
+  return VoxelScene.spriteLean or V.require("VoxelState").angle
+end
+
+-- Composition order matters here and is easy to get backwards: Mat4.mul(m,
+-- X) RIGHT-multiplies, so the LAST matrix chained on is the FIRST one
+-- applied to a vertex. Correct billboard behavior is to tip the card back
+-- by pitch in its OWN local frame first, then swing the already-tipped
+-- card around the world +Y axis to face the camera's yaw.
+local function billboardMatrix(px, py, y, mirror, yaw, spriteWidth, spriteHeight)
+  local w = spriteWidth or 16
+  local h = spriteHeight or 16
+  local halfW = w / 2
+  local halfH = h / 2
+  local b = FirstPerson.cardBlend()
+  local m = Mat4.translate(px + halfW, y, py + halfH)
+
+  -- In first/third person mode, rotate the sprite with the camera's yaw
+  -- instead of always facing the camera (billboard behavior)
+  if b > 0 then
+    -- Use the camera's yaw to rotate the sprite
+    local okFP, FirstPerson = pcall(V.require, "FirstPerson")
+    if okFP and FirstPerson then
+      m = Mat4.mul(m, Mat4.rotateY(FirstPerson.yaw * b))
+    end
+  else
+    -- Swing the card around the world +Y axis to face the camera's yaw
+    -- (ported from ADVANCED_SHAPE), THEN tip it back by the lean -- composed
+    -- in this order so the lean happens in the card's own local frame first.
+    if yaw and yaw ~= 0 then
+      m = Mat4.mul(m, Mat4.rotateY(yaw))
+    end
+  end
+  m = Mat4.mul(m, Mat4.rotateX((leanAngle() - math.pi / 2) * (1 - b)))
+
   if mirror then m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) end
-  return Mat4.mul(m, Mat4.translate(-8, 0, 0))
+  return Mat4.mul(m, Mat4.translate(-halfW, 0, 0))
 end
 
 local function billboardPull()
-  local Voxel = V.require("VoxelState")
-  return VoxelScene.pull(math.max(Voxel.angle, 0.05))
+  return VoxelScene.pull(math.max(leanAngle(), 0.05))
 end
 
 -- An authored FIGURE's card -- a person the tileset draws INTO a piece of
@@ -345,10 +485,24 @@ end
 -- the Pokemon Center couch reads face-on at every tilt like the NPCs
 -- around him. No cell centring: unlike a character he is not standing on a
 -- cell, he is standing where he was drawn, which may straddle two.
+--
+-- First person turns him at the eye like the walkers (see billboardMatrix)
+-- -- about his own middle, because unlike a character card his local space
+-- starts at x = 0 rather than being anchored by a -8 shift, and a yaw about
+-- his edge would swing him off his seat. The width rode in on the record
+-- for exactly this (ChunkMesher.buildFigureMeshes).
 local function figureMatrix(f, offX, offZ)
   local Voxel = V.require("VoxelState")
-  return Mat4.mul(Mat4.translate(f.wx + (offX or 0), f.y, f.wz + (offZ or 0)),
-                  Mat4.rotateX(Voxel.angle - math.pi / 2))
+  local b = FirstPerson.cardBlend()
+  local wx, wz = f.wx + (offX or 0), f.wz + (offZ or 0)
+  local m = Mat4.translate(wx, f.y, wz)
+  if b > 0 and f.w and f.w > 0 then
+    local half = f.w / 2
+    m = Mat4.mul(m, Mat4.translate(half, 0, 0))
+    m = Mat4.mul(m, Mat4.rotateY(FirstPerson.cardYaw(wx + half, wz) * b))
+    m = Mat4.mul(m, Mat4.translate(-half, 0, 0))
+  end
+  return Mat4.mul(m, Mat4.rotateX((leanAngle() - math.pi / 2) * (1 - b)))
 end
 
 -- What the sun sees: the same card UNLEANED and flattened, exactly as
@@ -375,14 +529,22 @@ end
 -- `lift` raises the figure off the ground plane (ledge hops arc UP in 3D,
 -- where the 2D path could only slide the sprite north).
 local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
-                          lift, waterline)
+                          lift, waterline, isPlayer, yaw)
   local def = sprite.def
   local tex = sprite:resolveImage()
   if colors and not def.trueColor then
     tex = TerrainAtlas.forSprite(def.image, colors) or tex
   end
   local y = gh + (lift or 0)
-
+    -- In first/third person, use the camera-relative facing
+  local okFP, FirstPerson = pcall(V.require, "FirstPerson")
+  if okFP and FirstPerson and FirstPerson.cardBlend() > 0.5 then
+    if isPlayer then
+      facing = FirstPerson.playerFacing(facing, px + 8, py + 8) or facing
+    else
+      facing = FirstPerson.apparentFacing(facing, px + 8, py + 8) or facing
+    end
+  end
   -- pick the very frame the 2D path would draw (same tables). The card
   -- always faces SOUTH -- the direction the 2D game implies -- and only
   -- LEANS BACK, pivoting at its feet, by exactly the camera's pitch, so
@@ -391,9 +553,22 @@ local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
   -- waterline > 0: only the top of the card is built, origin at the
   -- waterline (SpriteBillboards), so a swimming mon is cut by the pond
   -- rather than standing on it.
-  local frame, mirror = frameFor(def, facing, phase, flip)
+  local frame, mirror = frameFor(def, facing, phase, flip, yaw)
   local mesh = SpriteBillboards.mesh(def, frame, waterline or 0)
   if not mesh then return false end
+  
+  -- Get sprite dimensions for dynamic sizing (texture dims and world dims)
+  local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
+  
+  -- Apply LOD bias for sharpness when scaling down
+  local scale = def.scale or 1.0
+  if scale < 1.0 then
+    local lodBias = SpriteBillboards.getLodBiasForScale(scale)
+    if lodBias ~= 0.0 then
+      Voxel3D.setLodBias(lodBias)
+    end
+  end
+
   -- Camera-ward pull (applied per vertex in the shader, along each
   -- vertex's own eye ray, so it is a PURE depth bias with zero screen
   -- drift): lets the leaned-back head win against the wall it leans
@@ -403,13 +578,89 @@ local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
   -- (castShadows draws this mesh through ShadowMap.snug) -- is where each
   -- vertex asks whether the light reached it; see ShadowMap.snug for why
   -- the lookup must match the stored transform to the letter
-  Voxel3D.draw(mesh, tex, billboardMatrix(px, py, y, mirror),
+  Voxel3D.draw(mesh, tex, billboardMatrix(px, py, y, mirror, yaw, worldWidth, worldHeight),
                billboardPull(),
-               ShadowMap.snug(Voxel3D.casterMatrix(px, py, y, mirror)))
+               ShadowMap.snug(Voxel3D.casterMatrix(px, py, y, mirror, worldWidth, worldHeight)))
   return true
 end
 
 VoxelScene.drawEntity = drawEntity
+
+
+
+-- debug frame counter for the throttled "StadiumWilds enabled" log below;
+-- drawCast is a plain local function (no self), so this lives as a module
+-- upvalue instead of the old (broken) self._debugFrameCount
+local debugFrameCount = 0
+
+-- ------- the cast
+--
+-- Everybody standing on the map: the walkers, and the authored FIGURES the
+-- tileset draws into its own furniture (they ARE characters as far as the
+-- artwork is concerned, just ones drawn by the tileset instead of by a
+-- sprite sheet, so they get the same lean and the same camera-ward pull).
+local function drawCast(state, posed, atlasFor, yaw)
+  Voxel3D.glass(false)
+  Voxel3D.seams(false)
+  
+  -- Characters, normally depth-tested: the camera-ward pull inside
+  -- drawEntity resolves the lean-over-the-wall-in-front case, and a
+  -- character genuinely behind a building is far deeper and loses the
+  -- test, so buildings and trees really occlude.
+  --
+  -- In first person two of them change: the player's own card is left out
+  -- (the eye is standing in it), and every other card wears the frame its
+  -- pose SHOWS this eye (viewFacing) rather than the one it shows the
+  -- south. Both run through here, so the water's reflection copy -- drawn
+  -- by this same function -- agrees with the frame to the pixel.
+  local hideMe = FirstPerson.hidePlayer()
+  for _, p in ipairs(posed) do
+    if not (p.isPlayer and hideMe) then
+      -- Check if this is the player and a custom model is loaded
+      if p.isPlayer and PlayerModel.loaded() then
+        -- Draw custom 3D model instead of sprite
+        PlayerModel.draw(p.px, p.py, p.gh + (p.lift or 0), viewFacing(p), p.flip)
+      -- Check if this is the Pikachu follower and Stadium follower is loaded
+      elseif p.isFollower and StadiumFollower.loaded() then
+        -- Update follower animation
+        StadiumFollower.update(1 / 60)
+        -- Draw Stadium follower model instead of sprite
+        StadiumFollower.draw(p.px, p.py, viewFacing(p))
+      -- Check if this is a wild Pokemon and Stadium wilds is enabled
+      elseif StadiumWilds.enabled() and StadiumWilds.isWildPokemon(p) then
+        print("[VoxelScene] Stadium Wilds path taken for entity")
+        -- Try to load the model if not already loaded
+        if not StadiumWilds.hasModel(p) then
+          StadiumWilds.loadEntityModel(p)
+        end
+        -- If model is available, draw it
+        if StadiumWilds.hasModel(p) then
+          StadiumWilds.updateEntity(p, 1 / 60)
+          StadiumWilds.drawEntity(p)
+        else
+          -- Fall back to sprite if model not available
+          drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
+                     p.colors, p.lift, p.waterline, yaw)
+        end
+      else
+        --.Draw normal sprite entity
+        drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
+                   p.colors, p.lift, p.waterline, yaw)
+      end
+    end
+  end
+  
+  -- Debug: print entity count once per second (60 frames)
+  debugFrameCount = debugFrameCount + 1
+  if debugFrameCount % 60 == 0 then
+    local okCheck, enabledCheck = pcall(function() return StadiumWilds.enabled() end)
+    -- silent debug catch
+  end
+  
+  -- back on for everything textured from the atlas again -- figures, grass
+  -- and flowers all sample it, where the mask's coordinates are honest
+  Voxel3D.glass(true)
+end
 
 -- The player's silhouette, for wherever the scenery is standing in front of
 -- them (Voxel3D.beginGhost inverts the depth test around this call).
@@ -421,9 +672,9 @@ VoxelScene.drawEntity = drawEntity
 -- not. One quad cannot do that, and cannot double-blend into a mottled
 -- patch either. A silhouette is an outline, so an outline is the right
 -- mesh for it.
-local function drawGhost(p)
+local function drawGhost(p, yaw)
   local def = p.sprite.def
-  local frame, mirror = frameFor(def, p.facing, p.phase, p.flip)
+  local frame, mirror = frameFor(def, viewFacing(p), p.phase, p.flip, yaw)
   local mesh = SpriteBillboards.shadowQuad(def, frame)
   if not mesh then return end
   local tex = p.sprite:resolveImage()
@@ -431,7 +682,10 @@ local function drawGhost(p)
     tex = TerrainAtlas.forSprite(def.image, p.colors) or tex
   end
   local y = p.gh + (p.lift or 0)
-  Voxel3D.draw(mesh, tex, billboardMatrix(p.px, p.py, y, mirror),
+  
+  -- Get sprite dimensions for dynamic sizing (texture dims and world dims)
+  local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
+  Voxel3D.draw(mesh, tex, billboardMatrix(p.px, p.py, y, mirror, yaw, worldWidth, worldHeight),
                billboardPull())
 end
 
@@ -465,10 +719,28 @@ function VoxelScene.prefetch(state)
   -- ever visited.
   local liveKey = state.map.id
   local live = { [state.map.id] = true }
-  for _, nb in ipairs(state.neighbors or {}) do
+  
+  -- Limit neighbors based on DrawDistance setting for performance
+  local neighborLimit = DrawDistance.neighborLimit()
+  local limitedNeighbors = {}
+  
+  -- If neighborLimit is nil (OFF setting), use all neighbors (original behavior)
+  if neighborLimit == nil then
+    limitedNeighbors = state.neighbors or {}
+  else
+    -- Apply neighbor limiting
+    for i, nb in ipairs(state.neighbors or {}) do
+      if i <= neighborLimit then
+        limitedNeighbors[#limitedNeighbors + 1] = nb
+      end
+    end
+  end
+  
+  for _, nb in ipairs(limitedNeighbors) do
     live[nb.map.id] = true
     liveKey = liveKey .. "|" .. nb.map.id
   end
+  
   if liveKey ~= lastLiveKey then
     lastLiveKey = liveKey
     ChunkMesher.setLive(live)
@@ -476,21 +748,11 @@ function VoxelScene.prefetch(state)
     -- and is bounded by the same neighbourhood
     TerrainAtlas.setLive(live)
   end
-  -- How big the water is, measured over the same neighbourhood the meshes
-  -- are built from. Its own key rather than this one: the size of a lake
-  -- depends on where the neighbours SIT and not only on which they are, and
-  -- the two differ on a map reached from more than one seam. Cheap on a
-  -- frame that changes nothing -- it compares a string and returns.
-  pcall(WaterBody.refresh, state)
-  -- Which sheet this map wears, for the paving art. Pushed rather than
-  -- pulled: FloorArt has no business knowing about the overworld, and the
-  -- frame already knows what it is drawing.
-  pcall(FloorArt.setMap, state.map)
 
   -- masks: where connected neighbour BODIES sit, so the border ring is
   -- suppressed under them (see runGeometry)
   local masks = {}
-  for _, nb in ipairs(state.neighbors or {}) do
+  for _, nb in ipairs(limitedNeighbors) do
     masks[#masks + 1] = { nb.ox, nb.oy,
                           nb.ox + nb.map.def.width * 32,
                           nb.oy + nb.map.def.height * 32 }
@@ -533,22 +795,26 @@ function VoxelScene.prefetch(state)
   if not terrain then
     terrain = ChunkMesher.peek(state.map, true)
   end
+  
   local nbMesh = {}
   for i, nb in ipairs(state.neighbors or {}) do
-    -- A neighbour holding NEITHER variant is a gap in the world: nothing
-    -- is drawn at its offset and the sky clear behind the scene shows
-    -- through it. One holding the other variant is only waiting on an
-    -- upgrade -- its ground is covered either way -- so it stays idle and
-    -- does not compete with a map that is showing sky. The difference is
-    -- exactly the one the priority tier exists for, and it is answered
-    -- here rather than in ChunkMesher because this is the loop that knows
-    -- what is about to be drawn.
+    if neighborLimit == nil or i <= neighborLimit then
+      -- A neighbour holding NEITHER variant is a gap in the world: nothing
+      -- is drawn at its offset and the sky clear behind the scene shows
+      -- through it. One holding the other variant is only waiting on an
+      -- upgrade -- its ground is covered either way -- so it stays idle and
+      -- does not compete with a map that is showing sky. The difference is
+      -- exactly the one the priority tier exists for, and it is answered
+      -- here rather than in ChunkMesher because this is the loop that knows
+      -- what is about to be drawn.
     local held = ChunkMesher.peek(nb.map, true)
                  or ChunkMesher.peek(nb.map, false)
     nbMesh[i] = ChunkMesher.request(nb.map, true, nil,
                                     (not held) and ChunkMesher.HOLE or nil)
                 or ChunkMesher.peek(nb.map, false)
   end
+  end
+  
   Voxel.ready = terrain ~= nil
   return terrain, nbMesh
 end
@@ -597,7 +863,7 @@ local function posesOf(state, spriteColors)
       colors = spriteColors(g.map or state.map),
     }
   end
-  for _, e in ipairs(state.entities or {}) do
+  for ei, e in ipairs(state.entities or {}) do
     if not (state.flyAnim and e == state.player) then
       local sprite, vx, vy, facing, phase, flip = e:pose()
       local waterRoamer = e.roamer and e.kind == "water"
@@ -640,8 +906,12 @@ local function posesOf(state, spriteColors)
         lift = onWater and 0 or (drawPy - vy),
         waterline = wl,
         colors = colors,
+        entity = e, entityIndex = ei,
       }
-      if e == state.player then me = posed[#posed] end
+      if e == state.player then
+        me = posed[#posed]
+        me.isPlayer = true
+      end
     end
   end
   return posed, me
@@ -760,6 +1030,15 @@ local function shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh)
   -- few times a minute rather than every frame.
   put(math.floor(ShadowMap.KX * 128))
   put(math.floor(ShadowMap.KZ * 128))
+  -- and the first-person head: the box is fitted around wherever it looks
+  -- and the sprite cards swap frames as it circles them, so a turn on the
+  -- spot re-fits and redraws exactly like a camera move ("" outside 1ST)
+  put(FirstPerson.signature())
+  -- and the window box, because WHICH neighbours went into the light is a
+  -- function of it (see ViewBox.signature): opening the row out brings a
+  -- map back inside the cut, and a sun map recorded without it would leave
+  -- that map standing in its own unlit shadow
+  put(ViewBox.signature())
   put(tostring(terrain))
   for i = 1, #nbMesh do put(tostring(nbMesh[i])) end
   for _, p in ipairs(posed) do
@@ -784,9 +1063,12 @@ end
 -- left out on purpose: thousands of tufts would cast a speckle no bigger
 -- than the pixels it lands on, at the cost of the mesh being drawn twice.
 local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
-                           atlasFor)
+                           atlasFor, battleCards, battleToken, yaw, neighborLimit)
   if not ShadowMap.available() then return end
   local sig = shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh)
+  -- a staged fight's pics move every frame the animation does, and the sun
+  -- has to follow them (VR frames only; see render)
+  if battleToken then sig = sig .. "|btl" .. tostring(battleToken) end
   if not ShadowMap.stale(sig) then return end
   if not ShadowMap.begin(cx, cy, vw, vh) then return end
 
@@ -802,10 +1084,15 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
 
   ShadowMap.drawGroup(terrain, atlasFor(state.map), nil, box)
   for i, nb in ipairs(casters) do
-    ShadowMap.drawGroup(nbMesh[i], atlasFor(nb.map),
-                        Mat4.translate(nb.ox, 0, nb.oy),
-                        shifted(box, nb.ox, nb.oy))
+    if neighborLimit == nil or i <= neighborLimit then
+      if nbMesh[i] then
+        ShadowMap.drawGroup(nbMesh[i], atlasFor(nb.map),
+                            Mat4.translate(nb.ox, 0, nb.oy),
+                            shifted(box, nb.ox, nb.oy))
+      end
+    end
   end
+
   -- flower billboards live outside the terrain mesh (they draw after the
   -- characters, pulled -- see render), but the sun still sees them: a
   -- handful of cutouts per meadow, unlike the grass left out below.
@@ -814,31 +1101,67 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   -- of starting a bias-width away.
   ShadowMap.draw(ChunkMesher.flowers(state.map), atlasFor(state.map),
                  ShadowMap.snug(nil))
-  for _, nb in ipairs(casters) do
-    ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                   ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+  for i, nb in ipairs(casters) do
+    if neighborLimit == nil or i <= neighborLimit then
+      ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
+                     ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+    end
   end
+
+  -- From here down it is the CAST, marked as such in the map (see
+  -- ShadowMap.sprites) so water can decline them: everything the world casts
+  -- still shades a lake, a silhouette of somebody standing beside it does
+  -- not. Ground, roofs and the characters themselves take them as before.
+  ShadowMap.sprites(true)
   -- authored figures cast too, for the same reason the flowers do: a
   -- handful of cards per map, and a person with no shadow reads as pasted on
   eachFigure(state.map, 0, 0, function(mesh, _, caster)
     ShadowMap.draw(mesh, atlasFor(state.map), ShadowMap.snug(caster))
   end)
   for _, nb in ipairs(casters) do
-    eachFigure(nb.map, nb.ox, nb.oy, function(mesh, _, caster)
-      ShadowMap.draw(mesh, atlasFor(nb.map), ShadowMap.snug(caster))
-    end)
+    if ViewBox.showsMap(nb) then
+      eachFigure(nb.map, nb.ox, nb.oy, function(mesh, _, caster)
+        ShadowMap.draw(mesh, atlasFor(nb.map), ShadowMap.snug(caster))
+      end)
+    end
   end
   for _, p in ipairs(posed) do
     local def = p.sprite.def
-    local frame, mirror = frameFor(def, p.facing, p.phase, p.flip)
+    -- viewFacing, exactly as the camera draw picks it (see viewFacing for
+    -- why the two passes must agree): in first person the sun's card
+    -- swaps frame as the eye circles, which costs a redraw the signature
+    -- already charges for (FirstPerson.signature) and keeps a card from
+    -- fringing against a mirror-flipped record of itself
+    local frame, mirror = frameFor(def, viewFacing(p), p.phase, p.flip, yaw)
     local mesh = SpriteBillboards.shadowQuad(def, frame, p.waterline or 0)
     if mesh then
+      local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
       ShadowMap.draw(mesh, p.sprite:resolveImage(),
                      ShadowMap.snug(
                        Voxel3D.casterMatrix(p.px, p.py, p.gh + (p.lift or 0),
-                                            mirror)))
+                                            mirror, worldWidth, worldHeight)))
     end
   end
+  
+  -- a staged fight's mons (VR frames only): the same cards the eye pass
+  -- stands on the arena, snugged like every thin card, marked as the cast
+  -- so the water can decline them like everybody else's silhouette
+  for _, card in ipairs(battleCards or {}) do
+    ShadowMap.draw(BattleBillboard.mesh(), card.tex, ShadowMap.snug(card.model))
+  end
+  ShadowMap.sprites(false)
+  
+  -- and the STADIUM models, outside the sprite flag and un-snugged, for
+  -- the reasons the flat battle pass gives (BattleScene.castShadows):
+  -- these are geometry, not cut-outs
+  pcall(function()
+    local stageArena, stageY = V.require("OverworldBattle").stage()
+    if stageArena and stageArena.discs then
+      V.require("StadiumStage").cast(ShadowMap, stageArena, stageY or 0)
+    end
+    V.require("Stadium").cast(ShadowMap)
+  end)
+
   -- town street lamps cast from their poles (heads are small and would
   -- speck the pavement).  Neighbour-map lamps are skipped: their sites are
   -- in the neighbour's own coordinates and a wrong offset lands the shadow
@@ -848,7 +1171,13 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   ShadowMap.finish(sig)
 end
 
-function VoxelScene.render(state, w, h, vw, vh, paletteFor)
+-- Render the world. Without `eyes`, one frame into one canvas -- the flat
+-- path every rung has always taken. With `eyes` -- a list of
+-- { camera, w, h, slot, adopt } records, plus optional cx/cy for the
+-- scene centre -- the same frame is drawn once per entry and the list of
+-- canvases comes back: the VR path, two eyes over one shared shadow map,
+-- pose capture and glint step.
+function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- With nothing cached at all (the first frame of a fresh toggle),
   -- return nil: the engine keeps the 2D path for the frame and
   -- Voxel.ready holds the camera tween at flat, so the switch waits
@@ -858,6 +1187,18 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor)
 
   local cam = state.camera
   local cx, cy = cam.x + vw / 2, cam.y + vh / 2
+  -- The same compass camera-rotate angle the flat and tilt ground passes
+  -- spin their canvas by (see src.render.Camera / Renderer.lua), ported
+  -- from ADVANCED_SHAPE: without reading it here, turning the camera had
+  -- no effect on the voxel pass at all. :angle() is 0 whenever the camera
+  -- hasn't been turned (or has settled back to north), so an unrotated
+  -- camera is unaffected.
+  local yaw = cam.angle and cam:angle() or 0
+  -- If a placed camera exists (e.g., from a free-fly mod), use its yaw if
+  -- available.
+  if Voxel3D.camera and Voxel3D.camera.yaw then
+    yaw = Voxel3D.camera.yaw
+  end
 
   -- the hour's light, before anything is cast or drawn: point the shared
   -- rig at the clock (or at noon, indoors -- a cave at midnight is exactly
@@ -873,26 +1214,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor)
   Voxel3D.skyAmount = outdoor and 1 or 0
   DayNight.applyRig(outdoor)
   Voxel3D.tint = DayNight.tint(outdoor or DayNight.isCanopy(state.map))
-  -- A PASSAGE HAS NO AMBIENT WORTH THE NAME, and dimming it is what makes
-  -- the fittings below visible at all. Measured: with the interior's normal
-  -- tint the corridor is already lit end to end, so adding eight point
-  -- lights on top moved almost nothing -- an A/B of lamps on against lamps
-  -- off came back nearly identical, because there was no dark for them to
-  -- push back. The light was never missing; the DARK was.
-  --
-  -- So the tint carries the emergency minimum -- enough that a wall out of
-  -- every pool is still a wall and not a hole -- and the lamps carry the
-  -- rest. That is also what a real tunnel looks like: bright under the
-  -- fittings, gloomy between them, never actually black.
-  if Underpass.matches(state.map) and Underpass.ENABLED then
-    local t = Voxel3D.tint
-    local k = Underpass.AMBIENT
-    if type(t) == "table" and t[3] then
-      -- cooled as well as dimmed: what little fill there is down here has
-      -- bounced off concrete under the same cold tubes
-      Voxel3D.tint = { t[1] * k * 0.92, t[2] * k * 0.96, t[3] * k * 1.06 }
-    end
-  end
+  
   -- and the window glass: the tileset's own panes (found in its art --
   -- GlassMask), lit after dark. Outdoors only, like everything the clock
   -- touches, which also keeps any pane-shaped art in an interior tileset
@@ -900,7 +1222,11 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor)
   local GlassMask = V.require("GlassMask")
   Voxel3D.glassMask = outdoor and GlassMask.texture(state.map.tileset) or nil
   Voxel3D.glassNight = outdoor and DayNight.windowLight() or 0
+  -- The existing day/night ramp is also a darkness factor. Fireflies fade
+  -- in naturally at dusk and reach full contrast only at deepest night.
+  Voxel3D.fireflyNight = outdoor and DayNight.windowLight() or 0
   Voxel3D.lampColor = DayNight.lampColor()
+  
   -- Send only the nearby active posts to the shader.  This belongs before
   -- beginScene: the ground is the first mesh drawn and must receive the same
   -- warm pools as the post itself.
@@ -915,42 +1241,34 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor)
     -- and the box models put theirs somewhere else entirely.
     local okH, y = pcall(StreetLamps.flameHeight)
     Voxel3D.lampHeight = okH and y or nil
-    -- back to the shader's own default: the passage below overrides it, and
-    -- a value left behind would follow the player out into the street
-    Voxel3D.lampCore = nil
     -- The gas clock. Wrapped so a long session cannot walk sin() out into the
     -- range where a float has no fraction left and the flicker freezes.
-    Voxel3D.lampFlicker =
-      (Voxel3D.lampLights and #Voxel3D.lampLights > 0)
-      and ((love.timer and love.timer.getTime and love.timer.getTime() or 0)
-           * 2.4) % 6283.185
+    Voxel3D.lampFlicker = (Voxel3D.lampLights and #Voxel3D.lampLights > 0)
+      and ((love.timer and love.timer.getTime and love.timer.getTime() or 0) * 2.4) % 6283.185
       or 0
-  elseif Underpass.matches(state.map) then
-    -- A PASSAGE IS WIRED. Indoors used to mean "no local lights" full stop,
-    -- which is right for a house (the room's own ambient is the light) and
-    -- wrong for a tunnel between two cities: there is no sun down here and
-    -- no window, so with the list nil every surface takes one flat ambient
-    -- and the corridor has no shape -- a black void with a lit floor in it.
-    --
-    -- Same eight point lights the street uses, in a row down the middle of
-    -- the corridor, pale and cold instead of gas-warm. See lib/Underpass.lua
-    -- for why the colour is most of what says "built" rather than "cave".
-    local ok, lamps = pcall(Underpass.lights, state.map, cx, cy)
-    Voxel3D.lampLights = ok and lamps or nil
-    Voxel3D.lampHeight = Underpass.HEIGHT
-    Voxel3D.lampColor = Underpass.COLOR
-    Voxel3D.lampCore = Underpass.CORE
-    -- flat zero: a tube on a ballast does not wander, and the uniform being
-    -- constant is also what folds the flicker's sin() away
-    Voxel3D.lampFlicker = Underpass.FLICKER
   else
     Voxel3D.lampLights = nil
     Voxel3D.lampFlicker = 0
-    Voxel3D.lampHeight = nil
-    Voxel3D.lampCore = nil
   end
+
   local g = VoxelScene.glintStep(glint, cx, cy)
   Voxel3D.glassPhase, Voxel3D.glassGlint = g.phase, g.amp
+
+  -- and the map's atmosphere, if it has one (see ForestAtmos): the haze
+  -- the scene shader folds every surface into, in the hour's colour.
+  -- nil for every map without an entry -- a clear day, exactly as before.
+  local ForestAtmos = V.require("ForestAtmos")
+  local atmos = ForestAtmos.frame(state.map)
+  Voxel3D.fog = atmos and atmos.fog or nil
+
+  -- and the DIORAMA modes' viewport and chroma key (lib/Diorama, driven by
+  -- the headset -- lib/VR sets them for the length of one frame). Both are
+  -- put back to nil at the end of this function, so no other pass in the
+  -- frame -- the battle screen's own arena shot above all -- can inherit a
+  -- cut world or a green background.
+  local dioFrame = (eyes and Diorama.on) and true or false
+  Voxel3D.cull = dioFrame and Diorama.cull or nil
+  Voxel3D.keyColor = dioFrame and Diorama.keyColor() or nil
 
   local function atlasFor(map)
     return TerrainAtlas.forMap(map, modeColors(paletteFor, map))
@@ -964,302 +1282,553 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor)
   end
 
   local posed, me = posesOf(state, spriteColors)
-  castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh, atlasFor)
 
-  if not Voxel3D.beginScene(w, h, cx, cy, vw, vh, skyFor(state.map)) then
-    return nil
-  end
-
-  -- Terrain, chunked and culled: only the cells of this map -- and only
-  -- the connected maps -- that the camera can still see ground on. This is
-  -- the pass that made a route heavy and a house free, because the cost was
-  -- never the camera, it was how much map was being submitted behind it.
-  -- SNOW ON THE WORLD ITSELF, for the length of the terrain pass and no
-  -- longer. Every up-facing voxel goes white -- the ground, the top of a
-  -- stone wall, the crown of a tree, a roof, a ledge -- which is what snow
-  -- does and what no decal ever quite did: a quad laid over a rounded crown
-  -- either sinks into it or hovers over it, and the second is the one you
-  -- cannot stop seeing. There is nothing to float here. The face the camera
-  -- is already looking at is the face that turns white.
-  -- THE HORIZON FIRST, before anything real. The far silhouettes
-  -- (lib/Skyline.lua) are the most distant thing in the frame by an order
-  -- of magnitude, so they go down first and the depth buffer lets every
-  -- actual map overwrite them -- which is also why they need no culling
-  -- box and no sort. Ahead of the snow tint on purpose: a silhouette is a
-  -- shape, not a surface, and whitening its crowns would put a snowfield
-  -- on a hill nobody can reach.
-  Skyline.frame()
-  Skyline.draw(state, cx, cy, vh)
-
-  Voxel3D.snowTop = GroundFX.snowTint(state.map)
-  local box = VoxelScene.bounds(cx, cy, vw, vh, false)
-  Voxel3D.drawGroup(terrain, atlasFor(state.map), nil, nil, nil, box)
-  for i, nb in ipairs(state.neighbors or {}) do
-    Voxel3D.drawGroup(nbMesh[i], atlasFor(nb.map),
-                      Mat4.translate(nb.ox, 0, nb.oy), nil, nil,
-                      shifted(box, nb.ox, nb.oy))
-  end
-  -- and off again before anything that is not the world is drawn: a
-  -- character's card is a sprite facing the camera, and its shade is 1 for
-  -- the same reason a voxel's top is -- so leaving this on would put snow on
-  -- everybody's face. It goes back on for the WORLD's other passes below --
-  -- the authored figures, the grass and the flowers are all things snow
-  -- falls on, and the bushes a town is hedged with live in those passes
-  -- rather than in the terrain group.
-  local snowOnWorld = Voxel3D.snowTop
-  Voxel3D.snowTop = 0
-
-  -- What the weather LEFT on that ground: puddles after a shower, drifts
-  -- and footprints in the snow. Here rather than in the overlay pass every
-  -- other drawing this mod composites goes through, and the difference is
-  -- the whole reason it is a decal: a butterfly IS in front of the world,
-  -- and a puddle is underneath the person standing in it. Between the
-  -- terrain and the characters, depth-tested and never depth-writing --
-  -- the same footing the flat drop shadows below use, for the same
-  -- reasons. See lib/GroundFX.lua.
-  GroundFX.draw3D(state)
-
-  -- Without a shadow map (headless, or a driver that could not make the
-  -- canvas) the old flat decals stand in: ground-only, characters only,
-  -- but better than a world with nothing under anybody. They go down
-  -- first, as decals the characters then stand over -- depth-tested
-  -- against the terrain just drawn (a shadow behind a building stays
-  -- hidden) but never depth-writing, so the grass pass at the end of the
-  -- frame still wins its feet-overdraw fights.
-  if not Voxel3D.shadowsActive() then
-    Voxel3D.beginShadows()
-    for _, p in ipairs(posed) do
-      drawShadow(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
-                 p.lift, p.waterline)
-    end
-    Voxel3D.endShadows()
-  end
-
-  -- Sprite sheets from here to the figure pass: their texture coordinates
-  -- mean nothing to the tileset-shaped glass mask, so the glass is off or
-  -- the panes' atlas positions stripe the cast with lamplight at night
-  Voxel3D.glass(false)
-
-  -- The player's silhouette goes down BEFORE the characters, so the only
-  -- thing it can meet in the depth buffer is the WORLD -- terrain, buildings,
-  -- trees. Drawn after the solid pass it would meet the player's own card
-  -- instead, and every fragment of a figure sits behind the one that just
-  -- wrote it, so the silhouette would paint over the player at all times.
-  -- Every character then draws on top as usual, which leaves the silhouette
-  -- showing in exactly one situation: where the world hides them.
-  if me then
-    Voxel3D.beginGhost()
-    drawGhost(me)
-    Voxel3D.endGhost()
-  end
-
-  -- Characters carry no wireframe out here, whatever the V-GRID row says.
-  -- The seams are what makes the WORLD read as built out of voxels, and
-  -- the people walking around in it are the one thing that should read as
-  -- drawn instead -- a grid over a 16x16 sprite lands a line every couple
-  -- of display pixels and turns a face into a mesh. (The battle pass makes
-  -- the opposite call for its own combatants, deliberately: that is a
-  -- staged shot rather than the world being walked around in -- see
-  -- BattleBillboard.)
+  -- The first-person rig, built (or blended) for this frame and handed to
+  -- Voxel3D BEFORE either pass runs: the sun's box is fitted around this
+  -- camera, and every card matrix asks it which way to turn. With the
+  -- blend fully out the call clears the placed camera and the orbit is
+  -- exactly what it always was. The scene centre it returns walks from
+  -- the orbit's view centre into the head, so the curve's focus and the
+  -- depth reference follow the camera actually in charge.
   --
-  -- Characters, normally depth-tested: the camera-ward pull inside
-  -- drawEntity resolves the lean-over-the-wall-in-front case, and a
-  -- character genuinely behind a building is far deeper and loses the
-  -- test, so buildings and trees really occlude.
-  Voxel3D.seams(false)
-  for _, p in ipairs(posed) do
-    drawEntity(p.sprite, p.px, p.py, p.facing, p.phase, p.flip, p.gh,
-               p.colors, p.lift, p.waterline)
-  end
-  -- back on for everything textured from the atlas again -- figures, grass
-  -- and flowers all sample it, where the mask's coordinates are honest
-  Voxel3D.glass(true)
-  -- Authored figures, alongside the characters and with the same lean and
-  -- the same camera-ward pull -- they ARE characters as far as the artwork
-  -- is concerned, just ones the tileset draws instead of a sprite sheet.
-  -- Drawn after the walkers so a player standing in front of the couch
-  -- wins the overlap, which is the order the flat game draws them in.
-  local figPull = billboardPull()
-  eachFigure(state.map, 0, 0, function(mesh, model, caster)
-    Voxel3D.draw(mesh, atlasFor(state.map), model, figPull,
-                 ShadowMap.snug(caster))
-  end)
-  for _, nb in ipairs(state.neighbors or {}) do
-    eachFigure(nb.map, nb.ox, nb.oy, function(mesh, model, caster)
-      Voxel3D.draw(mesh, atlasFor(nb.map), model, figPull,
-                   ShadowMap.snug(caster))
-    end)
-  end
-  -- and the snow is back on with them: a hedge, a tuft of grass and a flower
-  -- bed are all things a snowfall lands on, and the town's bushes are drawn
-  -- in these passes rather than in the terrain group -- which is why the
-  -- crowns stayed green while the ground and the walls went white.
-  Voxel3D.snowTop = snowOnWorld
-  -- and the seams are back on for the terrain art that follows: grass and
-  -- flowers are the world's own drawing, not people
-  Voxel3D.seams(true)
-  -- tall grass last, pulled camera-ward exactly as far as the characters
-  -- were (same per-vertex shader bias, so grass never drifts either):
-  -- relative depth between a walker and the tuft row south of their feet
-  -- is preserved, so the row still overdraws feet -- the 3D version of
-  -- the GB's grass-over-feet trick -- while grass keeps losing to the
-  -- buildings it genuinely stands behind (far deeper than the pull).
-  local Voxel = V.require("VoxelState")
-  local pull = VoxelScene.pull(math.max(Voxel.angle, 0.05))
-  -- and the wind, which only these last two passes take: the grass and the
-  -- flowers are the only things out here with a base planted in the ground
-  -- and a top free to give. Everything above is either terrain, which does
-  -- not lean, or a character, whose card is a trick played on the camera
-  -- and would read as the person swaying rather than the meadow.
-  local sway = Wind.amount()
-  -- 3D grass bake (if present) + foot-crush physics from everyone walking
-  -- through the meadow this frame.
-  local grassTex = atlasFor(state.map)
-  local Grass3D = nil
-  local GrassMod = nil
-  do
-    local ok, G = pcall(V.require, "Grass3D")
-    if ok and G then
-      -- the module is wanted either way: the springs below are physics on
-      -- whatever the grass pass is drawing, and the classic extruded slab
-      -- is crushed underfoot exactly like a bake is
-      GrassMod = G
-      if G.available and G.available() then
-        Grass3D = G
-        grassTex = G.texture() or grassTex
-      end
-    end
-  end
-  -- ------- how tall the thing that is about to lean stands
-  --
-  -- The bake knows its own height; the classic slab does not, and takes the
-  -- default. Handed over rather than assumed, so the bend curve runs over
-  -- the geometry actually in front of the shader (see Voxel3D's sway block).
-  do
-    local h = nil
-    if Grass3D and Grass3D.meta then
-      local okm, m = pcall(Grass3D.meta)
-      if okm and m and tonumber(m.height) and m.height > 0.5 then
-        h = m.height
-      end
-    end
-    Voxel3D.grassH = h
-    -- and what is lying on the blades this frame: rain, settled snow, gust
-    local wet, snow, gust = 0, 0, 0
-    local okl, a, b, c = pcall(Wind.load)
-    if okl then wet, snow, gust = a or 0, b or 0, c or 0 end
-    Voxel3D.grassLoad = { wet, snow, gust }
-  end
-  do
-    -- Everyone standing in the world parts the grass; moving parts it
-    -- harder. Handed to Grass3D rather than sent straight down, because
-    -- what the shader wants is not where the feet are this frame -- it is
-    -- how far each tuft has got in bending down and standing back up, and
-    -- that is a thing with a memory (Grass3D.crushFrame).
-    -- ------- and the player goes FIRST
+  -- A VR frame skips all of it: the caller brought its own cameras, and
+  -- its own idea of the scene centre with them.
+  local okFP, FirstPerson = pcall(V.require, "FirstPerson")
+  if okFP and FirstPerson then
+  local fpRig, fpCx, fpCy = FirstPerson.frame(me, cx, cy, vw, vh)
+    if fpRig then cx, cy = fpCx, fpCy end
+    
+    -- and the ORBIT RUNGS' own viewport (lib/ViewBox): the flat screen's
+    -- answer to the same question the diorama's box asks -- the map cut to
+    -- the window that frames it, so a tilted world reads as a model with
+    -- sides rather than a map running off every edge. Flat frames only: a
+    -- headset's cut is Diorama's above, and the two must never both be live.
     --
-    -- There are only so many live foot slots, and `posed` is in draw order
-    -- -- ghosts on neighbouring maps, then this map's cast, with the
-    -- player wherever they happen to fall in it. Filling the slots in that
-    -- order means three wild Pokemon standing near you can take all of
-    -- them, and then the one walker whose trail anybody is looking at --
-    -- yours -- silently drops out. Measured: a walk down Route 1 laid two
-    -- crumbs instead of five, all of them a Rattata's.
-    local feet = {}
-    local function foot(p)
-      if not p or #feet >= 4 then return end
-      local lift = p.lift or 0
-      local moving = math.abs(lift) > 0.15
-      feet[#feet + 1] = {
-        (p.px or 0) + 8,
-        (p.py or 0) + 8,
-        moving and 12 or 10,
-        moving and 1.0 or 0.6,
-      }
-    end
-    foot(me)
-    for _, p in ipairs(posed) do
-      if p ~= me then foot(p) end
-    end
-    -- Time since the LAST grass pass, not love.timer.getDelta(): the
-    -- springs and the trail are integrated in here, and a frame that
-    -- renders the scene twice (a staged battle over the overworld) would
-    -- otherwise step them twice and run the meadow at double speed. Asked
-    -- this way, a second pass in the same frame gets dt = 0 and changes
-    -- nothing, which is exactly right -- it is the same instant.
-    local now = (love.timer and love.timer.getTime and love.timer.getTime())
-                or 0
-    local dt = (lastGrassAt and (now - lastGrassAt)) or 0
-    lastGrassAt = now
-    if dt < 0 then dt = 0 elseif dt > 0.1 then dt = 0.1 end
-    local crush = nil
-    if GrassMod and GrassMod.crushFrame then
-      local okc, c = pcall(GrassMod.crushFrame, feet, dt)
-      if okc then crush = c end
-    end
-    if not crush then
-      -- springs unavailable: the old per-frame list, which is still right,
-      -- just instant
-      crush = { n = #feet, p = feet }
-    end
-    Voxel3D.crush = crush
+    -- After the first-person block, so the box is centred on the camera
+    -- actually in charge and opens out with a dive into a head rather than
+    -- vanishing on the frame the rung changed.
+    --
+    -- Ahead of castShadows, deliberately: the sun draws the same neighbours
+    -- the eye does (both ask ViewBox.showsMap), so a map skipped out here is
+    -- skipped out there and nothing is left casting a shadow it cannot own.
+    Voxel3D.cull = ViewBox.frame(cx, cy, vw, vh)
+  else
+    if eyes.cx then cx, cy = eyes.cx, eyes.cy end
+    ViewBox.stop()
   end
-  Voxel3D.draw(ChunkMesher.grass(state.map), grassTex, nil, pull,
-               nil, sway)
-  for _, nb in ipairs(state.neighbors or {}) do
-    local ntex = grassTex
-    if not Grass3D then ntex = atlasFor(nb.map) end
-    Voxel3D.draw(ChunkMesher.grass(nb.map), ntex,
-                 Mat4.translate(nb.ox, 0, nb.oy), pull, nil, sway)
-  end
-  -- The crush stays ON through the flowers. They are the other thing out
-  -- here with a base in the ground and a top free to give, they grow in
-  -- the same beds people walk through, and a boot that lays the grass flat
-  -- and steps over a flower bed untouched is the seam showing.
-  -- and the flowers stand on their own height again: they are the tileset's
-  -- own slab whatever the grass bake is, so a tall bake must not stretch
-  -- their bend curve with it
-  Voxel3D.grassH = nil
-  -- flower billboards: pulled like the characters and the grass, MINUS
-  -- the depth of 8 world pixels along the view (8 sin a -- the camera
-  -- looks along (0, -cos a, -sin a), so that is exactly one tile row of
-  -- northness). A pure depth handicap with zero screen drift: every
-  -- flower is judged as if it stood one tile row further north. The
-  -- character card's feet plane sits at its cell's MIDDLE (py + 8), so
-  -- a flower on the walker's own cell (z +4 or +12 across the cell)
-  -- lands behind the card and the player obscures the patch they stand
-  -- ON, while the nearest flower of the cell south (+20) stays in front
-  -- and keeps overdrawing their feet.
-  local fpull = math.max(0, pull - 8 * math.sin(math.max(Voxel.angle, 0.05)))
-  -- flowers are snugged casters too, so they read their own shadowing
-  -- through the same snugged transform the sun stored them with
-  -- flowers take a share of the wind rather than all of it: they are
-  -- shorter and stiffer than a grass tuft, and they are also the one thing
-  -- in a meadow the eye settles on
-  local fsway = sway * Wind.FLOWER_SHARE
-  Voxel3D.draw(ChunkMesher.flowers(state.map), atlasFor(state.map), nil,
-               fpull, ShadowMap.snug(nil), fsway)
-  for _, nb in ipairs(state.neighbors or {}) do
-    Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                 Mat4.translate(nb.ox, 0, nb.oy), fpull,
-                 ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)), fsway)
-  end
-  Voxel3D.crush = nil
-  Voxel3D.grassLoad = nil
 
-  -- Street lamps last among the world props: poles take the hour's light,
-  -- heads flatten to lampColor after dusk so a DEEP night still has light
-  -- on the street.  Seams off -- these are not voxel-grid props.
-  Voxel3D.seams(false)
-  pcall(StreetLamps.draw, state.map, outdoor)
-  -- and, underground, the corridor itself: slab, walls, the fittings the
-  -- lamps are supposed to be coming out of, and the LED run along the foot
-  -- of each wall. Props rather than terrain, so they belong here with the
-  -- posts and with the seams off.
-  pcall(Underpass.draw, state.map)
-  Voxel3D.seams(true)
+  -- A staged fight, seen by the VR eyes: the flat screen draws the battle
+  -- SCREEN while one is up (this pass never runs), but the headset keeps
+  -- looking at the world, so the world had better have the fight on it.
+  -- Fetched per frame for the sun, and again per EYE in drawScene, because
+  -- the cards yaw toward whichever eye is asking.
+  local battleCards, battleTex, battleToken = nil, nil, nil
+  if eyes then
+    local okB, cards, tex, token = pcall(function()
+      return V.require("OverworldBattle").worldCards()
+    end)
+    if okB and cards then
+      battleCards, battleTex, battleToken = cards, tex, token
+    end
+  end
 
-  return Voxel3D.endScene()
+  -- The sun's box, pushed along the first-person look so it covers the
+  -- ground THIS camera sees (a no-op at blend zero): the orbit's fit
+  -- reaches far north and barely south, which is right for every rung
+  -- but a head free to face south.
+  local shCx, shCy = cx, cy
+  if FirstPerson.shadowCenter then
+     shCx, shCy = FirstPerson.shadowCenter(cx, cy, vh)
+  end
+  local neighborLimit = DrawDistance.neighborLimit()
+  
+  castShadows(state, terrain, nbMesh, posed, shCx, shCy, vw, vh, atlasFor,
+              battleCards, battleToken, yaw, neighborLimit)
+
+  -- Everything between beginScene and endScene, as one function: the flat
+  -- path runs it once, a VR frame runs it once PER EYE -- same posed
+  -- list, same shadow map, same glint, so the two eyes can never disagree
+  -- about anything but their viewpoint.
+  local function drawScene()
+    -- THE HORIZON ART FIRST (lib/HorizonArt.lua, ported from ADVANCED_SHAPE):
+    -- the painted panorama that reads as ADVANCED_SHAPE's own horizon,
+    -- drawn before Skyline's real map-shaped massing so the placed towns and
+    -- routes still stand out as actual geometry in front of the painting.
+    pcall(HorizonArt.draw, state)
+
+    -- THE HORIZON FIRST, before anything real. The far silhouettes
+    -- (lib/Skyline.lua) are the most distant thing in the frame by an order
+    -- of magnitude, so they go down first and the depth buffer lets every
+    -- actual map overwrite them -- which is also why they need no culling
+    -- box and no sort. Ahead of the snow tint on purpose: a silhouette is a
+    -- shape, not a surface, and whitening its crowns would put a snowfield
+    -- on a hill nobody can reach.
+    pcall(Skyline.frame)
+    pcall(Skyline.draw, state, cx, cy, vh)
+
+    -- SNOW ON THE WORLD ITSELF, for the length of the terrain pass and no
+    -- longer. Every up-facing voxel goes white -- the ground, the top of a
+    -- stone wall, the crown of a tree, a roof, a ledge -- which is what snow
+    -- does and what no decal ever quite did: a quad laid over a rounded crown
+    -- either sinks into it or hovers over it, and the second is the one you
+    -- cannot stop seeing. There is nothing to float here. The face the camera
+    -- is already looking at is the face that turns white.
+    Voxel3D.snowTop = GroundFX.snowTint(state.map)
+    local box = VoxelScene.bounds(cx, cy, vw, vh, false)
+
+    -- the sky (lib/SkyLayer.lua) then distant horizon (lib/Backdrop.lua):
+    -- before the terrain, depth writes off, so every real surface draws over them
+    -- Sky draws first as background, then horizon draws in front of it
+    pcall(SkyLayer.draw, state)
+    pcall(Backdrop.draw, state)
+
+    -- Terrain, chunked and culled: only the cells of this map -- and only
+    -- the connected maps -- that the camera can still see ground on. This is
+    -- the pass that made a route heavy and a house free, because the cost was
+    -- never the camera, it was how much map was being submitted behind it.
+    Voxel3D.drawGroup(terrain, atlasFor(state.map), nil, nil, nil, box)
+    
+    -- interiors, then ground detail (lib/Ceiling.lua, lib/Flora.lua)
+    pcall(Ceiling.draw, state, atlasFor)
+    pcall(Flora.draw, state, atlasFor)
+    
+    -- the window box's coarse cut, exactly as the sun pass took it: the same
+    -- test on the same maps, so the light and the eye can never disagree
+    -- about which neighbours are in this frame (see ViewBox.showsMap)
+    for i, nb in ipairs(state.neighbors or {}) do
+      if (not neighborLimit or i <= neighborLimit) and ViewBox.showsMap(nb) then
+        Voxel3D.drawGroup(nbMesh[i], atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), nil, nil, shifted(box, nb.ox, nb.oy))
+      end
+    end
+
+    -- and off again before anything that is not the world is drawn: a
+    -- character's card is a sprite facing the camera, and its shade is 1 for
+    -- the same reason a voxel's top is -- so leaving this on would put snow on
+    -- everybody's face. It goes back on for the WORLD's other passes below --
+    -- the authored figures, the grass and the flowers are all things snow
+    -- falls on, and the bushes a town is hedged with live in those passes
+    -- rather than in the terrain group.
+    local snowOnWorld = Voxel3D.snowTop
+    Voxel3D.snowTop = 0
+
+    -- What the weather LEFT on that ground: puddles after a shower, drifts
+    -- and footprints in the snow. Here rather than in the overlay pass every
+    -- other drawing this mod composites goes through, and the difference is
+    -- the whole reason it is a decal: a butterfly IS in front of the world,
+    -- and a puddle is underneath the person standing in it. Between the
+    -- terrain and the characters, depth-tested and never depth-writing --
+    -- the same footing the flat drop shadows below use, for the same
+    -- reasons. See lib/GroundFX.lua.
+    GroundFX.draw3D(state)
+
+    -- Without a shadow map (headless, or a driver that could not make the
+    -- canvas) the old flat decals stand in: ground-only, characters only,
+    -- but better than a world with nothing under anybody. They go down
+    -- first, as decals the characters then stand over -- depth-tested
+    -- against the terrain just drawn (a shadow behind a building stays
+    -- hidden) but never depth-writing, so the grass pass at the end of the
+    -- frame still wins its feet-overdraw fights.
+    --
+    -- Not with the SHADOWS row off, though: that is a player saying no
+    -- shadows, and standing the fallback in would answer a machine that
+    -- cannot have them (see lib/Shadows).
+    if Shadows.enabled() and not Voxel3D.shadowsActive() then
+      Voxel3D.beginShadows()
+      for _, p in ipairs(posed) do
+        drawShadow(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
+                   p.lift, p.waterline, yaw)
+      end
+      Voxel3D.endShadows()
+    end
+
+    -- Sprite sheets from here to the figure pass: their texture coordinates
+    -- mean nothing to the tileset-shaped glass mask, so the glass is off or
+    -- the panes' atlas positions stripe the cast with lamplight at night
+    Voxel3D.glass(false)
+
+    -- The player's silhouette goes down BEFORE the characters, so the only
+    -- thing it can meet in the depth buffer is the WORLD -- terrain, buildings,
+    -- trees. Drawn after the solid pass it would meet the player's own card
+    -- instead, and every fragment of a figure sits behind the one that just
+    -- wrote it, so the silhouette would paint over the player at all times.
+    -- Every character then draws on top as usual, which leaves the silhouette
+    -- showing in exactly one situation: where the world hides them.
+    --
+    -- Not in first person: the card it silhouettes is the one the camera is
+    -- standing inside, and "the world is in front of the player" is every
+    -- wall the player faces.
+    if me and not FirstPerson.hidePlayer() then
+      Voxel3D.beginGhost()
+      drawGhost(me, yaw)
+      Voxel3D.endGhost()
+    end
+
+    -- Characters carry no wireframe out here, whatever the V-GRID row says.
+    -- The seams are what makes the WORLD read as built out of voxels, and
+    -- the people walking around in it are the one thing that should read as
+    -- drawn instead -- a grid over a 16x16 sprite lands a line every couple
+    -- of display pixels and turns a face into a mesh. (The battle pass makes
+    -- the opposite call for its own combatants, deliberately: that is a
+    -- staged shot rather than the world being walked around in -- see
+    -- BattleBillboard.)
+    drawCast(state, posed, me, atlasFor, yaw)
+
+    -- The staged fight's mons, standing on their arena cells in THIS eye's
+    -- view (VR frames only; battleTex is nil otherwise). Rebuilt per eye
+    -- because the cards yaw toward the eye that is looking. No wireframe
+    -- and no glass on them for the reasons BattleBillboard and the battle
+    -- pass each argue: the cards are not on the voxel grid, and their
+    -- texcoords mean nothing to the tileset's pane mask. The hit flash
+    -- rides the same flatten the battle pass uses, held short of solid.
+    if battleTex then
+      local okB, cards = pcall(function() return V.require("OverworldBattle").worldCards() end)
+      if okB and cards then
+        local BattleScene = V.require("BattleScene")
+        Voxel3D.glass(false)
+        Voxel3D.seams(false)
+        if battleTex.flash then
+          Voxel3D.flatten(BattleScene.FLASH_COLOR, BattleScene.FLASH_STRENGTH)
+        end
+        for _, card in ipairs(cards) do
+          Voxel3D.draw(BattleBillboard.mesh(), card.tex, card.model, BattleBillboard.PULL)
+        end
+        -- and, on the STADIUM rungs, the models -- the same skinned meshes the
+        -- flat pass and the sun already used this frame, drawn again through
+        -- THIS eye. Unlike the cards there is nothing per-eye about them: a
+        -- model faces its opponent, not the viewer, so both eyes see the same
+        -- pose from their own seats, which is what makes it read as solid.
+        --
+        -- On a disc rung the platforms come with them. In a headset the world is
+        -- still drawn -- the player is standing IN it, which is the whole point
+        -- of the headset, so the rung's "no map" does not apply here -- and the
+        -- discs then read as a stage set down on the ground, which is what they
+        -- are.
+        pcall(function()
+          local stageArena, stageY = V.require("OverworldBattle").stage()
+          if stageArena and stageArena.discs then
+            V.require("StadiumStage").draw(stageArena, stageY or 0)
+          end
+          V.require("Stadium").draw(BattleBillboard.PULL)
+        end)
+        if battleTex.flash then Voxel3D.flatten(nil) end
+        -- and the MOVE ANIMATIONS, standing on the same arena: the
+        -- engine's own effects layer on the plane through both cells
+        -- (BattleScene.fxCard), pulled a little harder than the mons so
+        -- a burst plays over the card it is bursting on
+        local okA, fxTex, fxModel = pcall(function() return V.require("OverworldBattle").worldAnim() end)
+        if okA and fxTex and fxModel then
+          Voxel3D.draw(BattleBillboard.mesh(), fxTex, fxModel, BattleBillboard.PULL + 6)
+        end
+        Voxel3D.seams(true)
+        Voxel3D.glass(true)
+      end
+    end
+
+    -- back on for everything textured from the atlas again -- figures, grass
+    -- and flowers all sample it, where the mask's coordinates are honest
+    Voxel3D.glass(true)
+    
+    -- Authored figures, alongside the characters and with the same lean and
+    -- the same camera-ward pull -- they ARE characters as far as the artwork
+    -- is concerned, just ones the tileset draws instead of a sprite sheet.
+    -- Drawn after the walkers so a player standing in front of the couch
+    -- wins the overlap, which is the order the flat game draws them in.
+    local figPull = billboardPull()
+    eachFigure(state.map, 0, 0, function(mesh, model, caster)
+      Voxel3D.draw(mesh, atlasFor(state.map), model, figPull, ShadowMap.snug(caster))
+    end)
+    for i, nb in ipairs(state.neighbors or {}) do
+      if (not neighborLimit or i <= neighborLimit) and ViewBox.showsMap(nb) then
+        eachFigure(nb.map, nb.ox, nb.oy, function(mesh, model, caster)
+          Voxel3D.draw(mesh, atlasFor(nb.map), model, figPull, ShadowMap.snug(caster))
+        end)
+      end
+    end
+
+    -- and the snow is back on with them: a hedge, a tuft of grass and a flower
+    -- bed are all things a snowfall lands on, and the town's bushes are drawn
+    -- in these passes rather than in the terrain group -- which is why the
+    -- crowns stayed green while the ground and the walls went white.
+    Voxel3D.snowTop = snowOnWorld
+    -- and the seams are back on for the terrain art that follows: grass and
+    -- flowers are the world's own drawing, not people
+    Voxel3D.seams(true)
+
+    -- tall grass last, pulled camera-ward exactly as far as the characters
+    -- were (same per-vertex shader bias, so grass never drifts either):
+    -- relative depth between a walker and the tuft row south of their feet
+    -- is preserved, so the row still overdraws feet -- the 3D version of
+    -- the GB's grass-over-feet trick -- while grass keeps losing to the
+    -- buildings it genuinely stands behind (far deeper than the pull).
+    -- the same angle the cards leaned by (leanAngle honours VR's override),
+    -- so the tuft rows keep exactly the characters' own depth handicap
+    local lean = math.max(leanAngle(), 0.05)
+    local pull = VoxelScene.pull(lean)
+    
+    -- and the wind, which only these last two passes take: the grass and the
+    -- flowers are the only things out here with a base planted in the ground
+    -- and a top free to give. Everything above is either terrain, which does
+    -- not lean, or a character, whose card is a trick played on the camera
+    -- and would read as the person swaying rather than the meadow.
+    local sway = Wind.amount()
+    
+    -- 3D grass bake (if present) + foot-crush physics from everyone walking
+    -- through the meadow this frame.
+    local grassTex = atlasFor(state.map)
+    local Grass3D = nil
+    local GrassMod = nil
+    do
+      local ok, G = pcall(V.require, "Grass3D")
+      if ok and G then
+        -- the module is wanted either way: the springs below are physics on
+        -- whatever the grass pass is drawing, and the classic extruded slab
+        -- is crushed underfoot exactly like a bake is
+        GrassMod = G
+        if G.available and G.available() then
+          Grass3D = G
+          grassTex = G.texture() or grassTex
+        end
+      end
+    end
+
+    -- ------- how tall the thing that is about to lean stands
+    --
+    -- The bake knows its own height; the classic slab does not, and takes the
+    -- default. Handed over rather than assumed, so the bend curve runs over
+    -- the geometry actually in front of the shader (see Voxel3D's sway block).
+    do
+      local h = nil
+      if Grass3D and Grass3D.meta then
+        local okm, m = pcall(Grass3D.meta)
+        if okm and m and tonumber(m.height) and m.height > 0.5 then h = m.height end
+      end
+      Voxel3D.grassH = h
+      
+      -- and what is lying on the blades this frame: rain, settled snow, gust
+      local wet, snowLd, gust = 0, 0, 0
+      local okl, a, b, c = pcall(Wind.load)
+      if okl then wet, snowLd, gust = a or 0, b or 0, c or 0 end
+      Voxel3D.grassLoad = { wet, snowLd, gust }
+    end
+
+    do
+      -- Everyone standing in the world parts the grass; moving parts it
+      -- harder. Handed to Grass3D rather than sent straight down, because
+      -- what the shader wants is not where the feet are this frame -- it is
+      -- how far each tuft has got in bending down and standing back up, and
+      -- that is a thing with a memory (Grass3D.crushFrame).
+      -- ------- and the player goes FIRST
+      --
+      -- There are only so many live foot slots, and `posed` is in draw order
+      -- -- ghosts on neighbouring maps, then this map's cast, with the
+      -- player wherever they happen to fall in it. Filling the slots in that
+      -- order means three wild Pokemon standing near you can take all of
+      -- them, and then the one walker whose trail anybody is looking at --
+      -- yours -- silently drops out. Measured: a walk down Route 1 laid two
+      -- crumbs instead of five, all of them a Rattata's.
+      local feet = {}
+      local function foot(p)
+        if not p or #feet >= 4 then return end
+        local lift = p.lift or 0
+        local moving = math.abs(lift) > 0.15
+        feet[#feet + 1] = { (p.px or 0) + 8, (p.py or 0) + 8, moving and 12 or 10, moving and 1.0 or 0.6 }
+      end
+      foot(me)
+      for _, p in ipairs(posed) do if p ~= me then foot(p) end end
+
+      -- Time since the LAST grass pass, not love.timer.getDelta(): the
+      -- springs and the trail are integrated in here, and a frame that
+      -- renders the scene twice (a staged battle over the overworld) would
+      -- otherwise step them twice and run the meadow at double speed. Asked
+      -- this way, a second pass in the same frame gets dt = 0 and changes
+      -- nothing, which is exactly right -- it is the same instant.
+      local now = (love.timer and love.timer.getTime and love.timer.getTime()) or 0
+      local dt = (lastGrassAt and (now - lastGrassAt)) or 0
+      lastGrassAt = now
+      if dt < 0 then dt = 0 elseif dt > 0.1 then dt = 0.1 end
+      local crush = nil
+      if GrassMod and GrassMod.crushFrame then
+        local okc, c = pcall(GrassMod.crushFrame, feet, dt)
+        if okc then crush = c end
+      end
+      if not crush then 
+        -- springs unavailable: the old per-frame list, which is still right,
+        -- just instant
+        crush = { n = #feet, p = feet } 
+      end
+      Voxel3D.crush = crush
+    end
+
+    Voxel3D.draw(ChunkMesher.grass(state.map), grassTex, nil, pull, nil, sway)
+    for i, nb in ipairs(state.neighbors or {}) do
+      if neighborLimit == nil or i <= neighborLimit then
+        local ntex = grassTex
+        if not Grass3D then ntex = atlasFor(nb.map) end
+        Voxel3D.draw(ChunkMesher.grass(nb.map), ntex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, sway)
+      end
+    end
+
+    -- decorative grass mesh (no effects)
+    local decorMesh = ChunkMesher.decor(state.map)
+    if decorMesh then
+      Voxel3D.draw(decorMesh, grassTex, nil, pull, nil, 0)  -- No sway for decorative grass
+    end
+    for i, nb in ipairs(state.neighbors or {}) do
+      if neighborLimit == nil or i <= neighborLimit then
+        local nbDecor = ChunkMesher.decor(nb.map)
+        if nbDecor then
+          Voxel3D.draw(nbDecor, grassTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
+        end
+      end
+    end
+
+    -- road mesh using Grass3D with road texture at 0.05 height
+    local roadMesh = ChunkMesher.road(state.map)
+    if roadMesh then
+      local roadTex = Grass3D and Grass3D.roadTexture() or nil
+      Voxel3D.draw(roadMesh, roadTex, nil, pull, nil, 0)  -- No sway for road
+    end
+    for i, nb in ipairs(state.neighbors or {}) do
+      if neighborLimit == nil or i <= neighborLimit then
+        local nbRoad = ChunkMesher.road(nb.map)
+        if nbRoad then
+          local roadTex = Grass3D and Grass3D.roadTexture() or nil
+          Voxel3D.draw(nbRoad, roadTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
+        end
+      end
+    end
+
+    -- ground mesh using Grass3D with ground texture at 0.1 height
+    local groundMesh = ChunkMesher.ground(state.map)
+    if groundMesh then
+      local groundTex = Grass3D and Grass3D.groundTexture() or nil
+      Voxel3D.draw(groundMesh, groundTex, nil, pull, nil, 0)  -- No sway for ground
+    end
+    for i, nb in ipairs(state.neighbors or {}) do
+      if neighborLimit == nil or i <= neighborLimit then
+        local nbGround = ChunkMesher.ground(nb.map)
+        if nbGround then
+          local groundTex = Grass3D and Grass3D.groundTexture() or nil
+          Voxel3D.draw(nbGround, groundTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
+        end
+      end
+    end
+
+    -- The crush stays ON through the flowers. They are the other thing out
+    -- here with a base in the ground and a top free to give, they grow in
+    -- the same beds people walk through, and a boot that lays the grass flat
+    -- and steps over a flower bed untouched is the seam showing.
+    -- and the flowers stand on their own height again: they are the tileset's
+    -- own slab whatever the grass bake is, so a tall bake must not stretch
+    -- their bend curve with it
+    Voxel3D.grassH = nil
+    
+    -- flower billboards: pulled like the characters and the grass, MINUS
+    -- the depth of 8 world pixels along the view (8 sin a -- the camera
+    -- looks along (0, -cos a, -sin a), so that is exactly one tile row of
+    -- northness). A pure depth handicap with zero screen drift: every
+    -- flower is judged as if it stood one tile row further north. The
+    -- character card's feet plane sits at its cell's MIDDLE (py + 8), so
+    -- a flower on the walker's own cell (z +4 or +12 across the cell)
+    -- lands behind the card and the player obscures the patch they stand
+    -- ON, while the nearest flower of the cell south (+20) stays in front
+    -- and keeps overdrawing their feet.
+    local fpull = math.max(0, pull - 8 * math.sin(lean))
+    
+    -- flowers are snugged casters too, so they read their own shadowing
+    -- through the same snugged transform the sun stored them with
+    -- flowers take a share of the wind rather than all of it: they are
+    -- shorter and stiffer than a grass tuft, and they are also the one thing
+    -- in a meadow the eye settles on
+    local fsway = sway * Wind.FLOWER_SHARE
+    
+    Voxel3D.draw(ChunkMesher.flowers(state.map), atlasFor(state.map), nil, fpull, ShadowMap.snug(nil), fsway)
+    for i, nb in ipairs(state.neighbors or {}) do
+      if neighborLimit == nil or i <= neighborLimit then
+        if ViewBox.showsMap(nb) then
+          Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), fpull, ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)), fsway)
+        end
+      end
+    end
+
+    Voxel3D.crush = nil
+    Voxel3D.grassLoad = nil
+    
+    -- The map's atmosphere -- god rays down from the invisible canopy, and
+    -- whatever drifts through them (see ForestAtmos). Additive over the
+    -- finished depth buffer, so the trees occlude the light and the light
+    -- writes nothing; here in the prop slot, after everything the beams
+    -- should fall across and inside drawScene so VR gets them per eye. On
+    -- the one map that has any, today.
+    ForestAtmos.draw(state.map)
+
+    -- The VR pokedex in the player's left hand, last of all: a prop over
+    -- the world drawn with real depth, so leaning it into a wall still
+    -- occludes honestly. Its frame only exists while a session is live and
+    -- the left hand is tracked (VR.lua sets it), so every flat frame skips
+    -- this in one field read. No wireframe and no glass, like the cast:
+    -- the device is a drawing riding the scene, not part of the terrain.
+    if Pokedex and Pokedex.frame then
+      Voxel3D.glass(false)
+      Voxel3D.seams(false)
+      Pokedex.draw()
+      Voxel3D.seams(true)
+      Voxel3D.glass(true)
+    end
+
+    -- HORDE MODE's handgun, in the same slot and for the same reasons: a
+    -- prop over the world with real depth, no wireframe and no glass. In VR
+    -- it rides the tracked right hand (lib/VR placed it this frame); on the
+    -- flat screen it is carried by the camera, which is why it draws here
+    -- rather than in the overlay -- a view model that is 2D cannot be
+    -- occluded by the wall the player just backed into.
+    local HordeGun = nil
+    pcall(function() HordeGun = V.require("HordeGun") end)
+    if HordeGun and HordeGun.visible and HordeGun.visible() then
+      Voxel3D.glass(false)
+      Voxel3D.seams(false)
+      HordeGun.draw()
+      Voxel3D.seams(true)
+      Voxel3D.glass(true)
+    end
+
+    -- Street lamps last among the world props: poles take the hour's light,
+    -- heads flatten to lampColor after dusk so a DEEP night still has light
+    -- on the street.  Seams off -- these are not voxel-grid props.
+    Voxel3D.seams(false)
+    pcall(StreetLamps.draw, state.map, outdoor)
+    Voxel3D.seams(true)
+  end
+
+  -- the viewport fields are this function's for the length of this
+  -- function, whichever way it leaves (see where they are set)
+  local function done(result)
+    Voxel3D.cull, Voxel3D.keyColor = nil, nil
+    ViewBox.stop()
+    return result
+  end
+
+  if not eyes then
+    if not Voxel3D.beginScene(w, h, cx, cy, vw, vh, skyFor(state.map), nil, yaw) then return nil end
+    drawScene()
+    return done(Voxel3D.endScene())
+  end
+
+  -- The VR frame: the same scene once per eye, each into its own named
+  -- canvas slot under its own placed camera. `adopt` hands the eye's
+  -- record to FirstPerson as the live rig, which is what turns the
+  -- billboards toward THIS eye in first person (cardBlend keys on rig
+  -- identity -- see FirstPerson) and leaves them leaning in the diorama,
+  -- where the blend is zero.
+  local out = {}
+  for i, eye in ipairs(eyes) do
+    Voxel3D.camera = eye.camera
+    if eye.adopt then FirstPerson.adoptVReye(eye.camera) end
+    if not Voxel3D.beginScene(eye.w, eye.h, cx, cy, vw, vh, skyFor(state.map), eye.slot, yaw) then return nil end
+    drawScene()
+    out[i] = Voxel3D.endScene()
+  end
+  return done(out)
 end
 
 return VoxelScene

@@ -32,8 +32,19 @@ local Voxel = {}
 -- Its ANGLE is 35 degrees, the same as the rung of that name. The duplicate
 -- in the table is deliberate: the ladder is a list of what each rung LOOKS
 -- like, and two rungs may look the same while meaning different things.
-Voxel.ANGLES_DEG = { 0, 35, 15, 35, 50, 75 }
-Voxel.ANGLE_LABELS = { "OFF", "FULL", "15", "35", "50", "75" }
+--
+-- 1ST and 3RD are the other rungs that are more than an angle: the camera
+-- steps off its orbit entirely and stands with the player -- in their eyes
+-- (lib/FirstPerson.lua), or on a boom behind their shoulder
+-- (lib/ThirdPerson.lua) -- with free look and free movement on both. Their
+-- ANGLE entries are 75 -- the orbit rung they hand over from -- because the
+-- tween in and out starts from whatever the orbit shows, and the lowest rung
+-- is the one a dive into a head should start from. Everything angle-derived
+-- (the sky's fade, the billboard lean the blend eases away) reads that 75
+-- while the free-roam rig owns the actual camera.
+Voxel.ANGLES_DEG = { 0, 35, 15, 35, 50, 75, 75, 75 }
+Voxel.ANGLE_LABELS = { "OFF", "FULL", "15", "35", "50", "75",
+                       "1ST (EXPERIMENTAL)", "3RD (EXPERIMENTAL)" }
 Voxel.MAX_LEVEL = #Voxel.ANGLES_DEG - 1
 
 -- the rung FULL sits on, so nothing has to hunt for it by label
@@ -41,6 +52,30 @@ Voxel.FULL_LEVEL = 1
 
 function Voxel.isFull(level)
   return (level or Voxel.level) == Voxel.FULL_LEVEL
+end
+
+-- the rung the first-person camera sits on, likewise
+Voxel.FP_LEVEL = 6
+
+function Voxel.isFirstPerson(level)
+  return (level or Voxel.level) == Voxel.FP_LEVEL
+end
+
+-- and the third-person one, which is the same rig with the eye boomed off
+-- the back of the head (lib/ThirdPerson.lua)
+Voxel.TP_LEVEL = 7
+
+function Voxel.isThirdPerson(level)
+  return (level or Voxel.level) == Voxel.TP_LEVEL
+end
+
+-- The two of them together: the rungs where the camera stands WITH the
+-- player rather than orbiting the view centre, which is what decides that
+-- the look inputs are read, the walk goes free and the cards turn to face
+-- the eye. Everything that used to ask isFirstPerson for those asks this.
+function Voxel.isFreeCam(level)
+  level = level or Voxel.level
+  return Voxel.isFirstPerson(level) or Voxel.isThirdPerson(level)
 end
 
 -- ------- what the hotkey walks
@@ -51,7 +86,12 @@ end
 -- mid-walk, would silently turn the blur to maximum and flatten the horizon
 -- with no indication that a keypress had done so. FULL stays on the OPTIONS
 -- row, which is where a preset that changes other rows belongs.
-Voxel.HOTKEY_ORDER = { 0, 2, 3, 4, 5 }   -- OFF, 15, 35, 50, 75
+--
+-- 1ST and 3RD are on the path: they change the camera and only the camera,
+-- which is exactly what the key promises -- and the key is also the way back
+-- OUT of them on a keyboard, where the mouse is captured and the OPTIONS
+-- menu is a trip.
+Voxel.HOTKEY_ORDER = { 0, 2, 3, 4, 5, 6, 7 }  -- OFF,15,35,50,75,1ST,3RD
 
 -- The rung a press moves to from `level`.
 --
@@ -82,6 +122,12 @@ Voxel.angle = 0
 Voxel.from = 0
 Voxel.goal = 0
 Voxel.t = 1
+-- FULL remains the diorama preset rung so zoom/quality routing keeps treating
+-- it as DIORAMA, but its pitch can now be changed independently from camera
+-- distance. v0.2.53 fixes the old "tilt feels like zoom" behavior by keeping
+-- DioramaZoom responsible only for distance and this value responsible only
+-- for camera pitch.
+Voxel.fullAngleDeg = 35
 
 -- Whether the scene has terrain to show for the current map. VoxelScene
 -- maintains it every frame; while the first mesh of a fresh toggle is
@@ -102,7 +148,33 @@ local function ease(t)
 end
 
 local function goalFor(level)
-  return math.rad(Voxel.ANGLES_DEG[level + 1] or 0)
+  local deg
+  if level == Voxel.FULL_LEVEL then
+    deg = tonumber(Voxel.fullAngleDeg) or 35
+  else
+    deg = Voxel.ANGLES_DEG[level + 1] or 0
+  end
+  return math.rad(deg)
+end
+
+function Voxel.setFullAngle(deg)
+  deg = tonumber(deg) or 35
+  -- The renderer can still accept 0 degrees for direct/internal callers, but
+  -- GoldVoxelBridge no longer maps Gold's fresh-install TILT=OFF to 0 while
+  -- 3D VOXEL WORLD is enabled. That native OFF value now selects the normal
+  -- 35-degree voxel diorama; explicit 15/35/50 rungs remain literal.
+  if deg < 0 then deg = 0 end
+  if deg > 85 then deg = 85 end
+  if math.abs((Voxel.fullAngleDeg or 35) - deg) < 0.001 then return false end
+  Voxel.fullAngleDeg = deg
+  -- Re-running setLevel on the same FULL rung is enough: setLevel compares the
+  -- newly-derived goal against the previous one and starts the normal tween.
+  if Voxel.level == Voxel.FULL_LEVEL then Voxel.setLevel(Voxel.level) end
+  return true
+end
+
+function Voxel.fullAngle()
+  return tonumber(Voxel.fullAngleDeg) or 35
 end
 
 function Voxel.setLevel(level)
@@ -126,6 +198,7 @@ end
 function Voxel.reset()
   Voxel.level, Voxel.angle = 0, 0
   Voxel.from, Voxel.goal, Voxel.t = 0, 0, 1
+  Voxel.fullAngleDeg = 35
 end
 
 function Voxel.levelLabel(level)
