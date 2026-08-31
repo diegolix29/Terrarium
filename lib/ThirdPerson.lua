@@ -160,10 +160,7 @@ end
 -- Required lazily and guarded: VR reaches this module through FirstPerson,
 -- and a headless run has no VR module worth loading at all.
 local function headset()
-  local ok, on = pcall(function()
-    local VR = V.require("VR")
-    return VR and VR.active()
-  end)
+  local ok, on = pcall(function() return V.require("VR").active() end)
   return ok and on or false
 end
 
@@ -380,7 +377,7 @@ function ThirdPerson.place(pivot, lx, ly, lz, focus)
   -- which for a look of (sin y, *, cos y) is (-cos y, 0, sin y) -- the same
   -- right hand FirstPerson.moveWorld strafes along.
   -- The rail rides the ZOOM as well, so it stays the same fraction of the
-  -- frame at every distance: a fixed four pixels would swarm the close shot
+  -- frame at every distance: a fixed four pixels would swamp the close shot
   -- and vanish from the wide one.
   local flat = math.sqrt(lx * lx + lz * lz)
   local sx, sz = 0, 0
@@ -393,8 +390,8 @@ function ThirdPerson.place(pivot, lx, ly, lz, focus)
   local eye = { orbit[1] - lx * len + sx,
                 orbit[2] - ly * len,
                 orbit[3] - lz * len + sz }
-  -- In third person, aim at the player's back (pivot) instead of forward focus
-  local aim = { pivot[1] + sx, pivot[2] + up, pivot[3] + sz }
+  local aim = focus and { focus[1] + sx, focus[2] + up, focus[3] + sz }
+              or nil
   return eye, aim
 end
 

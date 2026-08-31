@@ -268,8 +268,7 @@ function FreeMove.tick(state)
   -- wants left unspent). Everything below -- the walk, the wall slide and
   -- the blocked-push verbs, warps included -- keeps working, because the
   -- crowd has to be able to follow the player through a door.
-  local ok, Horde = pcall(V.require, "Horde")
-  local suppressed = (ok and Horde) and Horde.suppressWorldInput() or false
+  local suppressed = V.require("Horde").suppressWorldInput()
 
   if not suppressed and input:wasPressed("a") then
     state:interact()

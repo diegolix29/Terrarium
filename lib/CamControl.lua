@@ -41,6 +41,8 @@ local Voxel3D = V.require("Voxel3D")
 local FirstPerson = V.require("FirstPerson")
 local ThirdPerson = V.require("ThirdPerson")
 local BattleCam = V.require("BattleCam")
+local DioramaZoom = V.require("DioramaZoom")
+local BattleCinematic = V.require("BattleCinematic")
 
 local CamControl = {}
 
@@ -70,14 +72,30 @@ CamControl.SURVEY_PINCH = 2.2
 -- half frame and half world (see BattleCam.steerable, which is where the
 -- reasoning lives and which the RIG answers to as well -- so a stored
 -- angle from before the setting was switched on stands down with it).
-local function battleLive()
+local function battleShot()
   local ok, shot = pcall(function()
     return V.require("OverworldBattle").shot()
   end)
-  return (ok and shot and BattleCam.steerable) and true or false
+  return ok and shot or nil
+end
+
+local function liveWorldBattle()
+  local shot = battleShot()
+  return shot and shot.liveWorld and true or false
+end
+
+local function battleLive()
+  local shot = battleShot()
+  if not shot then return false end
+  -- Gold live-world battles use the normal voxel 1ST/3RD camera and never
+  -- initialise BattleCam.steerable. Requiring that legacy staged-camera flag
+  -- made every Android battle drag fail closed in v0.1.99.
+  if shot.liveWorld then return true end
+  return BattleCam.steerable and true or false
 end
 
 CamControl.battleLive = battleLive
+CamControl.liveWorldBattle = liveWorldBattle
 
 -- The free-roam overworld, with the 3D pass carrying it: the gate every
 -- zoom that is not a battle's answers to.
@@ -92,6 +110,7 @@ function CamControl.zoomTarget()
   if not roaming() then return nil end
   if Voxel.isThirdPerson(Voxel.level) then return "boom" end
   if Voxel.isFirstPerson(Voxel.level) then return nil end
+  if Voxel.isFull(Voxel.level) then return "diorama" end
   return "survey"
 end
 
@@ -107,8 +126,24 @@ end
 
 local function surveyStep(notches)
   local ok = pcall(function()
-    local Game = require("src.core.Game")
-    Game:zoomStep(notches > 0 and -1 or 1)
+    local Game = installedGame or (V.game and V.game)
+    local dir = notches > 0 and -1 or 1
+
+    -- Gold/Game2 owns survey zoom on the live World, not on src.core.Game.
+    -- Its wheel handler calls world:zoomStep directly. Use that exact path so
+    -- pinch changes the same zoom value the Gold voxel bridge reads each frame.
+    if Game and Game.world and type(Game.world.zoomStep) == "function" then
+      Game.world:zoomStep(dir)
+      return
+    end
+
+    -- Gen-1 compatibility for the embedded renderer suite.
+    local Gen1 = require("src.core.Game")
+    if type(Gen1.zoomStep) == "function" then
+      Gen1:zoomStep(dir)
+      return
+    end
+    error("survey zoom host unavailable")
   end)
   return ok
 end
@@ -122,6 +157,8 @@ function CamControl.zoomBy(notches)
   elseif target == "boom" then
     ThirdPerson.stepZoom(notches)
     return true
+  elseif target == "diorama" then
+    return DioramaZoom.step(notches)
   elseif target == "survey" then
     -- one call per notch: the engine's ladder is integer rungs, and a
     -- wheel spun hard should climb them all rather than one
@@ -138,6 +175,8 @@ function CamControl.pinchBy(factor)
   local target = CamControl.zoomTarget()
   if target == "boom" then
     return ThirdPerson.scaleZoom(1 / factor)
+  elseif target == "diorama" then
+    return DioramaZoom.scaleBy(1 / factor)
   elseif target == "battle" then
     -- battles take a pinch too: the wheel and the keys reach this camera
     -- and a phone has neither, so without it the lens would be the one
@@ -183,6 +222,20 @@ CamControl.surveyAccum = 0
 function CamControl.tick(dt)
   if not battleLive() then return end
   local x, y = FirstPerson.stickX(), FirstPerson.stickY()
+  local dead = 0.10
+  x = math.abs(x or 0) > dead and x or 0
+  y = math.abs(y or 0) > dead and y or 0
+  if liveWorldBattle() then
+    -- The current Gold live battle is rendered by BattleCinematic, not the
+    -- legacy BattleCam orbit. v0.2.27 was still feeding the right stick into
+    -- BattleCam, so the values changed but the visible camera did not. Route
+    -- the same right-stick axes to the camera that actually owns this frame.
+    dt = math.max(0, math.min(0.05, tonumber(dt) or 0))
+    if x ~= 0 or y ~= 0 then
+      BattleCinematic.manualLook(x * dt * 2.9, -y * dt * 2.25)
+    end
+    return
+  end
   if x ~= 0 then BattleCam.stickOrbit(x, dt) end
   if y ~= 0 then BattleCam.stickPitch(-y, dt) end
 end
@@ -190,12 +243,26 @@ end
 -- ------- the wraps
 
 local installed = false
+local installedGame = nil
 
-function CamControl.install()
-  if installed then return end
+function CamControl.install(game)
+  -- Gold/Game2 is a separate service owner from src.core.Game. v0.1.93
+  -- accidentally installed these wraps on the Gen-1 singleton, so Gold never
+  -- delivered touch events to the pinch recognizer. Accept the live host just
+  -- like FirstPerson.install(game) does and only fall back to Gen 1 when no
+  -- host was supplied.
+  game = game or (V.game and V.game) or require("src.core.Game")
+  if installed then
+    if not game or game == installedGame then return true end
+    return false, "camera controls already installed on another game host"
+  end
+  if type(game) ~= "table" then
+    return false, "no live game host for camera controls"
+  end
   installed = true
+  installedGame = game
 
-  local Game = require("src.core.Game")
+  local Game = game
 
   -- ------- the wheel
   --
@@ -206,7 +273,7 @@ function CamControl.install()
     local inner = Game.wheelmoved
     function Game:wheelmoved(dx, dy)
       local target = CamControl.zoomTarget()
-      if (target == "battle" or target == "boom") and dy and dy ~= 0 then
+      if (target == "battle" or target == "boom" or target == "diorama") and dy and dy ~= 0 then
         CamControl.zoomBy(dy > 0 and -1 or 1)
         return
       end
@@ -221,14 +288,13 @@ function CamControl.install()
   -- and the two clicks are the only buttons a Gen 1 pad layout leaves free
   -- (SELECT already walks the angle ladder).
   --
-  -- Claimed for the two cameras a pad player can actually be looking at
-  -- while pressing them -- the third-person boom and a staged battle's lens
-  -- -- and forwarded untouched everywhere else, so a player who has rebound
-  -- either click keeps it on every other screen, a rebind capture included.
-  -- Not on the orbit rungs: the survey zoom has the OPTIONS row and the
-  -- wheel already, and taking a pad button for it would be taking one from
-  -- a player who never asked.
-  local CLICK_ZOOMS = { boom = true, battle = true }
+  -- Claimed for the three cameras a pad player can actually be looking at
+  -- while pressing them -- DIORAMA, the third-person boom and a staged
+  -- battle's lens -- and forwarded untouched everywhere else, so a player who
+  -- has rebound either click keeps it on every other screen, a rebind capture
+  -- included. Survey/orbit stays forwarded: it already has the OPTIONS row
+  -- and its native rung controls.
+  local CLICK_ZOOMS = { boom = true, diorama = true, battle = true }
   do
     local inner = Game.gamepadpressed
     function Game:gamepadpressed(joystick, button)
@@ -265,10 +331,17 @@ function CamControl.install()
     local inner = love.mousemoved
     love.mousemoved = function(x, y, dx, dy, istouch)
       if battleLive() and not istouch then
-        -- dy is NEGATED for the same reason the stick's is: moving the
-        -- mouse away from you sends the camera up and over
-        if dx and dx ~= 0 then BattleCam.mouseOrbit(clamp(dx)) end
-        if dy and dy ~= 0 then BattleCam.mousePitch(-clamp(dy)) end
+        if liveWorldBattle() then
+          local w, h = 1280, 720
+          pcall(function() w, h = love.graphics.getWidth(), love.graphics.getHeight() end)
+          BattleCinematic.manualLook(-(clamp(dx) / math.max(320, w)) * 4.2,
+                                     (clamp(dy) / math.max(240, h)) * 3.0)
+        else
+          -- dy is NEGATED for the same reason the stick's is: moving the
+          -- mouse away from you sends the camera up and over
+          if dx and dx ~= 0 then BattleCam.mouseOrbit(clamp(dx)) end
+          if dy and dy ~= 0 then BattleCam.mousePitch(-clamp(dy)) end
+        end
         -- forwarded anyway: the cursor still has UI to point at, and the
         -- steer is a read of the motion rather than a claim on it
       end
@@ -336,6 +409,15 @@ function CamControl.install()
     return hit
   end
 
+  local function rightLookZone(x)
+    local osName = nil
+    pcall(function() osName = love.system.getOS() end)
+    if osName ~= "Android" then return true end
+    local w = 1280
+    pcall(function() w = love.graphics.getWidth() end)
+    return (tonumber(x) or 0) >= w * 0.45
+  end
+
   -- Whether this module has any interest in touches at all this frame.
   -- Kept deliberately wide -- a battle, or anything that zooms -- because
   -- the wrap forwards everything it does not claim regardless.
@@ -345,21 +427,22 @@ function CamControl.install()
 
   do
     local inner = Game.touchpressed
-    function Game:touchpressed(id, x, y)
-      if wantsTouch() and not onControl(x, y) then
+    function Game:touchpressed(id, x, y, ...)
+      if wantsTouch() and not onControl(x, y)
+         and (not battleLive() or rightLookZone(x) or CamControl.zoomTarget() ~= "battle") then
         free[id] = { x = x, y = y }
         if CamControl.zoomTarget() then startPinch() end
         -- forwarded even so: a single free finger is the free-roam look's
         -- to claim (FirstPerson's wrap is inside this one), and in a
         -- battle it is nobody's until it MOVES
       end
-      return inner(self, id, x, y)
+      return inner(self, id, x, y, ...)
     end
   end
 
   do
     local inner = Game.touchmoved
-    function Game:touchmoved(id, x, y)
+    function Game:touchmoved(id, x, y, ...)
       local f = free[id]
       if f then
         local px, py = f.x, f.y
@@ -378,25 +461,35 @@ function CamControl.install()
           pcall(function()
             w, h = love.graphics.getWidth(), love.graphics.getHeight()
           end)
-          BattleCam.dragOrbit((x - px) / math.max(320, w))
-          -- dragged UP sends the camera up and over, the same way the
-          -- stick and the mouse do
-          BattleCam.dragPitch(-(y - py) / math.max(240, h))
+          if liveWorldBattle() then
+            -- Gold LIVE OVERWORLD BATTLES draw the normal voxel camera, not
+            -- BattleCam's staged-arena rig. Steer the same yaw/pitch used by
+            -- free roam so right-thumb look remains continuous through the
+            -- encounter instead of moving a camera the Gold shot never reads.
+            local yaw = -((x - px) / math.max(320, w)) * 4.2
+            local pitch = ((y - py) / math.max(240, h)) * 3.0
+            BattleCinematic.manualLook(yaw, pitch)
+          else
+            BattleCam.dragOrbit((x - px) / math.max(320, w))
+            -- dragged UP sends the camera up and over, the same way the
+            -- stick and the mouse do
+            BattleCam.dragPitch(-(y - py) / math.max(240, h))
+          end
           return
         end
       end
-      return inner(self, id, x, y)
+      return inner(self, id, x, y, ...)
     end
   end
 
   do
     local inner = Game.touchreleased
-    function Game:touchreleased(id, x, y)
+    function Game:touchreleased(id, x, y, ...)
       if free[id] then
         if pinch and (id == pinch.a or id == pinch.b) then endPinch(id) end
         free[id] = nil
       end
-      return inner(self, id, x, y)
+      return inner(self, id, x, y, ...)
     end
   end
 

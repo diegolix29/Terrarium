@@ -31,6 +31,9 @@ local currentRig = nil
 local currentStadiumModel = nil
 local isStadiumModel = false
 
+-- Animation state
+local animTime = 0
+
 -- ------- OBJ file parsing (basic implementation)
 --
 -- Parses a simple .obj file to extract vertices, texture coordinates, faces, and material info.
@@ -423,7 +426,10 @@ function PlayerModel.draw(px, py, y, facing, mirror)
   if isStadiumModel and currentRig and currentStadiumModel then
     -- Update animation time
     local dt = 1 / 60  -- Assume 60 FPS for simplicity
-    currentRig:pose(1, (currentRig.frameAt or 0) + dt, true)  -- Idle animation
+    animTime = animTime + dt
+    
+    -- Use idle animation for both walking and standing still
+    currentRig:pose(1, animTime * 30, true)  -- Idle animation at 30 FPS
     currentRig:anchor(0.75, dt)  -- Anchor to prevent drifting
     currentRig:textures(nil)  -- Update textures (eyes blinking)
     

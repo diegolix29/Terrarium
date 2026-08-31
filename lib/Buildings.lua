@@ -39,7 +39,7 @@
 --
 -- One model is built per template and stamped at every placement: Red's
 -- and Blue's houses are the same seven-placement drawing, so they cost one
--- build between them. mods/TERRARIUM/tools/building_voxels.py is the
+-- build between them. mods/DRAMATIC_SHAPE/tools/building_voxels.py is the
 -- reference implementation of the same algorithm and prints the voxel and
 -- shell counts this one must agree with.
 --
@@ -134,6 +134,14 @@ local function profile()
 end
 
 local models = {}          -- "<tileset>:<index>" -> prebuilt local quads
+
+-- Gen-2 Kanto has several one-off exterior facades that are assembled from
+-- the same framed building vocabulary as the common house/Mart/Gym drawings
+-- but do not necessarily match one of the exact templates in
+-- data/voxel_heights.lua.  Exact matching stays authoritative; this counter
+-- only tracks conservative frame-derived fallbacks used after those templates
+-- have had first claim.
+local kantoAdaptive = { models = 0, placements = 0, rejected = 0 }
 
 -- ------------------------------------------------------------------ read --
 
@@ -1195,6 +1203,242 @@ local function matches(S, t, tx, ty)
   return true
 end
 
+-- KANTO ADAPTIVE BUILDING FALLBACK.
+--
+-- Crystal's Kanto outdoor blockset reuses a very regular frame around many
+-- buildings: the bottom course is 1D ... 3C, the pitched roof begins 05 ...
+-- 09, and the slate roof begins 4C ... 4D.  A number of unique city buildings
+-- vary the windows/signage inside that frame, so literal templates cannot
+-- enumerate every facade without becoming map-specific.  Before v0.3.26 those
+-- unmatched drawings fell through to the generic solid-region detector and
+-- became short wall boxes with roof artwork folded up their sides.
+--
+-- This fallback derives a temporary template from the map's OWN tiles, but
+-- only when all of the following are true:
+--   * TilesetKanto only.
+--   * A complete framed base row is present.
+--   * A known Kanto roof cap closes the same width above it.
+--   * The rectangle contains a real Gen-2 door cell (or the literal 0B/0C
+--     door drawing on hosts that do not expose isDoorTileCell).
+--   * No cell was already claimed by an exact building template.
+--
+-- That is deliberately stricter than a generic "roof coloured component"
+-- detector: fences, route walls, signs and scenery cannot accidentally become
+-- houses merely because they share one dark tile.  The normal sprite-to-voxel
+-- measurement pipeline then models the derived rectangle, so no replacement
+-- art or guessed landmark dimensions are introduced.
+local KANTO_BASE = { [0x1A] = true, [0x1B] = true, [0x1C] = true, [0x4A] = true }
+local KANTO_FACADE = {
+  [0x0A] = true, [0x0B] = true, [0x0C] = true, [0x0F] = true,
+  [0x1F] = true, [0x2F] = true, [0x3F] = true, [0x44] = true,
+  [0x45] = true, [0x4B] = true,
+}
+
+local function kantoLiteralDoorInRect(S, x0, y0, x1, y1)
+  -- Kanto's normal exterior door is the literal 0B/0C pair. For the private
+  -- Yellow adapter this is the only safe proof that a candidate rectangle is
+  -- actually a building: map:isDoorTileCell can also report script/warp cells
+  -- inside a large rectangle, which let unrelated hedge/roof scenery satisfy
+  -- the old adaptive-building test and become a giant pink prism.
+  for y = y0, y1 do
+    for x = x0, x1 - 1 do
+      if S.tileAt[keyOf(x, y)] == 0x0B and S.tileAt[keyOf(x + 1, y)] == 0x0C then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function kantoDoorInRect(map, S, x0, y0, x1, y1)
+  if map and map._stadiumForeignGen1Map then
+    return kantoLiteralDoorInRect(S, x0, y0, x1, y1)
+  end
+  local hasMethod = type(map.isDoorTileCell) == "function"
+  if hasMethod then
+    local cx0, cy0 = math.floor(x0 / 2), math.floor(y0 / 2)
+    local cx1, cy1 = math.floor(x1 / 2), math.floor(y1 / 2)
+    for cy = cy0, cy1 do
+      for cx = cx0, cx1 do
+        local ok, yes = pcall(map.isDoorTileCell, map, cx, cy)
+        if ok and yes then return true end
+      end
+    end
+  end
+  return kantoLiteralDoorInRect(S, x0, y0, x1, y1)
+end
+
+local function kantoFrameFree(S, x0, y0, x1, y1)
+  for y = y0, y1 do
+    for x = x0, x1 do
+      if S.skip[keyOf(x, y)] then return false end
+    end
+  end
+  return true
+end
+
+local function kantoBaseRow(S, left, right, y)
+  if S.tileAt[keyOf(left, y)] ~= 0x1D or S.tileAt[keyOf(right, y)] ~= 0x3C then
+    return false
+  end
+  for x = left + 1, right - 1 do
+    if not KANTO_BASE[S.tileAt[keyOf(x, y)]] then return false end
+  end
+  return true
+end
+
+local function kantoTopRow(S, left, right, y)
+  local a, b = S.tileAt[keyOf(left, y)], S.tileAt[keyOf(right, y)]
+  return (a == 0x05 and b == 0x09) or (a == 0x4C and b == 0x4D)
+end
+
+local function kantoRoofRows(S, left, top, right, bottom)
+  -- The first row carrying unmistakable facade/window/door vocabulary starts
+  -- the upright front.  Roof courses above it stay top-facing.  Deliberately
+  -- omit ambiguous 22/25/26/28/29/32 here: those occur in both eaves and walls.
+  for y = top + 1, bottom do
+    local evidence = false
+    for x = left, right do
+      if KANTO_FACADE[S.tileAt[keyOf(x, y)]] then evidence = true break end
+    end
+    if evidence then
+      local rows = y - top
+      if rows >= 2 then return rows end
+      return nil
+    end
+  end
+  return nil
+end
+
+local function kantoFacadeEvidence(S, left, top, right, bottom)
+  local total, rows = 0, 0
+  for y = top + 1, bottom do
+    local row = 0
+    for x = left, right do
+      if KANTO_FACADE[S.tileAt[keyOf(x, y)]] then
+        row = row + 1
+        total = total + 1
+      end
+    end
+    if row > 0 then rows = rows + 1 end
+  end
+  return total, rows
+end
+
+local function kantoForeignAdaptiveProof(map, S, left, top, right, bottom)
+  if not (map and map._stadiumForeignGen1Map) then return true end
+  local width = right - left + 1
+  local height = bottom - top + 1
+  -- Keep the private Yellow fallback house-sized. Larger landmarks should be
+  -- handled by explicit templates; letting a 30-40 tile rectangle self-infer
+  -- is what made hedge/roof bands turn into screen-sized magenta blocks.
+  if width > 24 or height > 20 then return false end
+  if not kantoLiteralDoorInRect(S, left, top, right, bottom) then return false end
+  local facade, rows = kantoFacadeEvidence(S, left, top, right, bottom)
+  local need = math.max(4, math.floor((width + 2) / 3))
+  if facade < need or rows < 2 then return false end
+  return true
+end
+
+local function kantoSignature(t)
+  -- Human-safe Adler-style signature: Buildings.stats() is a diagnostics API,
+  -- so do not leak binary tile bytes into its keys.
+  local a, b, count = 1, 0, 0
+  local function feed(v)
+    a = (a + (tonumber(v) or 0)) % 65521
+    b = (b + a) % 65521
+    count = count + 1
+  end
+  feed(t.roofRows)
+  for _, row in ipairs(t.tiles) do
+    for _, id in ipairs(row) do feed(id) end
+  end
+  return ("%08x:%d"):format(b * 65536 + a, count)
+end
+
+local function buildKantoAdaptive(S, map, data, perRow, atlasW, atlasH)
+  if map.tileset.id ~= "TilesetKanto" then return end
+  -- v0.3.92: Never infer whole buildings on the private Yellow/Kanto adapter.
+  -- The imported map has enough repeated roof/hedge vocabulary that even a
+  -- conservative heuristic can occasionally promote scenery into a huge
+  -- magenta rectangular prism. Exact Kanto building templates still stamp
+  -- normally; only the heuristic fallback is disabled.
+  if map and map._stadiumForeignGen1Map then return end
+  local tw, th = map.def.width * 4, map.def.height * 4
+  -- v0.3.27: Kanto's landmark vocabulary is not limited to house-sized
+  -- facades.  The old 24x16-tile search ceiling was enough for the common
+  -- catalogue but could never recover a larger one-off city building even
+  -- when it had the same unmistakable Kanto base frame, roof cap and door.
+  -- Widen the derived scan while keeping every existing acceptance guard
+  -- intact.  This changes only what *can be considered*; exact templates
+  -- still claim first, and a candidate still needs the full frame + roof +
+  -- real door before any tile is stamped.
+  local foreign = map._stadiumForeignGen1Map == true
+  local MAX_WIDTH, MAX_HEIGHT = foreign and 24 or 40, foreign and 20 or 32
+
+  for bottom = 3, th - 1 do
+    Budget.tick()
+    for left = 0, tw - 8 do
+      if S.tileAt[keyOf(left, bottom)] == 0x1D then
+        local right = nil
+        for candidate = left + 7, math.min(tw - 1, left + MAX_WIDTH - 1) do
+          if S.tileAt[keyOf(candidate, bottom)] == 0x3C
+              and kantoBaseRow(S, left, candidate, bottom) then
+            right = candidate
+            break
+          end
+        end
+        if right then
+          local width = right - left + 1
+          -- Building art is cell-aligned: odd tile widths are almost certainly
+          -- an incidental 1D...3C run rather than a facade.
+          if width >= 8 and width % 2 == 0 then
+            local top = nil
+            for y = bottom - 3, math.max(0, bottom - MAX_HEIGHT + 1), -1 do
+              if kantoTopRow(S, left, right, y) then
+                top = y
+                break
+              end
+            end
+            if top and kantoFrameFree(S, left, top, right, bottom)
+                and kantoDoorInRect(map, S, left, top, right, bottom)
+                and kantoForeignAdaptiveProof(map, S, left, top, right, bottom) then
+              local roofRows = kantoRoofRows(S, left, top, right, bottom)
+              if roofRows then
+                local tiles = {}
+                for y = top, bottom do
+                  local row = {}
+                  for x = left, right do row[#row + 1] = S.tileAt[keyOf(x, y)] end
+                  tiles[#tiles + 1] = row
+                end
+                local t = {
+                  id = "kanto_adaptive", tiles = tiles, roofRows = roofRows * 8,
+                  roofBack = 2, roofFront = 4,
+                  roofCycle = { 2, math.max(3, roofRows * 8 - 5) },
+                  slab = 4, frontEave = 4, ledge = nil,
+                }
+                local signature = "TilesetKanto:auto:" .. kantoSignature(t)
+                local quads = models[signature]
+                if not quads then
+                  local sp = read(t, data, perRow)
+                  local pr = measure(sp, t)
+                  quads = emit(model(sp, pr, t), sp, atlasW, atlasH)
+                  models[signature] = quads
+                  kantoAdaptive.models = kantoAdaptive.models + 1
+                end
+                Buildings.stamp(S, map, quads, left, top, width, bottom - top + 1, t)
+                kantoAdaptive.placements = kantoAdaptive.placements + 1
+              else
+                kantoAdaptive.rejected = kantoAdaptive.rejected + 1
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
 -- Find every placement of every template for this map's tileset, build one
 -- model per template, and stamp it. Returns nothing; the quads land in
 -- S.objectQuads and the tiles are claimed so the volume path never boxes a
@@ -1264,6 +1508,10 @@ function Buildings.build(S, map, data, perRow)
       end
     end
   end
+
+  -- Exact catalogue entries above always win. Only the still-unclaimed framed
+  -- Kanto facades reach this derived fallback.
+  buildKantoAdaptive(S, map, data, perRow, atlasW, atlasH)
 end
 
 -- One placement: claim its tiles (so the detector leaves them alone and
@@ -1281,8 +1529,6 @@ end
 function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
   local shape = { class = "building", h = (t and t.support) or 0,
                   art = "building", flat = false, authored = true }
-  -- `base` is set after the ground vote below; declared here because the
-  -- claim shape is written into every cell of the footprint.
   local keep = nil
   if t and t.keep then
     keep = {}
@@ -1290,31 +1536,15 @@ function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
   end
 
   -- the ground the building stands on: the commonest flat tile around its
-  -- feet, so a house on a path keeps its path -- and, by the same vote, the
-  -- HEIGHT of that ground.
-  --
-  -- A model is built in its own space starting at y = 0 and copied into
-  -- place, and until now only x and z moved: every building in the game
-  -- stood on the world datum whatever it was standing on.  On flat ground
-  -- that is invisible and it was invisible for a long time.  Put a house on
-  -- a TERRACE and it is a house sunk to its eaves in the deck -- which is
-  -- what Naljo's plateau buildings looked like the moment $3C started
-  -- standing at 16.
+  -- feet, so a house on a path keeps its path
   local votes, best, bestN = {}, nil, 0
-  local hvotes, base, baseN = {}, 0, 0
   local function vote(x, y)
     local k = keyOf(x, y)
     local ns = S.shapeAt[k]
-    -- a TERRACE is ground you stand on even though its art rides the
-    -- top face of a box, so it votes for the datum alongside flat
-    -- ground; only its TILE stays out of the paint vote below.
-    if ns and (ns.flat or ns.class == "terrace") and ns.class ~= "void" then
+    if ns and ns.flat and ns.class ~= "void" then
       local tile = S.tileAt[k]
       votes[tile] = (votes[tile] or 0) + 1
       if votes[tile] > bestN then best, bestN = tile, votes[tile] end
-      local h = ns.h or 0
-      hvotes[h] = (hvotes[h] or 0) + 1
-      if hvotes[h] > baseN then base, baseN = h, hvotes[h] end
     end
   end
   for c = 0, bw - 1 do
@@ -1326,9 +1556,6 @@ function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
     vote(tx + bw, ty + r)
   end
 
-  -- the vote is in: tell the mesher which datum this plot stands on, so the
-  -- floor it paints under the model rises with it
-  shape.base = base
   for r = 0, bh - 1 do
     for c = 0, bw - 1 do
       local k = keyOf(tx + c, ty + r)
@@ -1348,14 +1575,13 @@ function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
   end
 
   local mx, mz = tx * 8, ty * 8
-  local my = base
   local out = S.objectQuads
   for _, q in ipairs(quads) do
     out[#out + 1] = {
-      { q[1][1] + mx, q[1][2] + my, q[1][3] + mz },
-      { q[2][1] + mx, q[2][2] + my, q[2][3] + mz },
-      { q[3][1] + mx, q[3][2] + my, q[3][3] + mz },
-      { q[4][1] + mx, q[4][2] + my, q[4][3] + mz },
+      { q[1][1] + mx, q[1][2], q[1][3] + mz },
+      { q[2][1] + mx, q[2][2], q[2][3] + mz },
+      { q[3][1] + mx, q[3][2], q[3][3] + mz },
+      { q[4][1] + mx, q[4][2], q[4][3] + mz },
       uv = q.uv, shade = q.shade,
       -- placements only ever scan the BODY, so a building is always this
       -- map's own structure: the mesher's edge keep-rules must not eat
@@ -1377,6 +1603,8 @@ function Buildings.stats()
     out[key] = { voxels = quads.voxels, shell = quads.shell,
                  quads = #quads }
   end
+  out._kantoAdaptive = { models = kantoAdaptive.models,
+    placements = kantoAdaptive.placements, rejected = kantoAdaptive.rejected }
   return out
 end
 
@@ -1384,6 +1612,7 @@ end
 function Buildings.invalidate()
   spec = nil
   models = {}
+  kantoAdaptive = { models = 0, placements = 0, rejected = 0 }
 end
 
 return Buildings

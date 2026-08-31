@@ -56,6 +56,16 @@ local TileShape = V.require("TileShape")
 local Voxel3D = V.require("Voxel3D")
 local Budget = V.require("BuildBudget")
 
+-- Persistent geometry cache. Optional on purpose: a build without the module
+-- (or one whose option is off) simply meshes every time, exactly as before.
+local DiskCache = nil
+do
+  local okCache, cacheMod = pcall(V.require, "VoxelDiskCache")
+  if okCache and type(cacheMod) == "table" and type(cacheMod.load) == "function" then
+    DiskCache = cacheMod
+  end
+end
+
 local ffi = nil
 do
   local ok, mod = pcall(require, "ffi")
@@ -63,6 +73,29 @@ do
 end
 
 local ChunkMesher = {}
+
+-- Anything geometry depends on that neither the map body nor the editor's
+-- tile pins nor the companion config describes. Bumping it invalidates every
+-- entry at once; it is the escape hatch for a rules change this file makes.
+function ChunkMesher.setCacheRulesTag(tag)
+  if DiskCache and type(DiskCache.setRulesTag) == "function" then
+    DiskCache.setRulesTag(tag)
+  end
+end
+
+function ChunkMesher.cacheStatus()
+  if DiskCache and type(DiskCache.status) == "function" then
+    return DiskCache.status()
+  end
+  return { enabled = false, unavailable = true }
+end
+
+function ChunkMesher.clearCache()
+  if DiskCache and type(DiskCache.clear) == "function" then
+    return DiskCache.clear()
+  end
+  return false
+end
 
 -- Ring of border blocks meshed around the body, matching the width
 -- TileRenderer draws so the two modes end at the same place.
@@ -104,213 +137,6 @@ local SIDES = {
 
 local function keyOf(tx, ty)
   return (ty + 64) * 4096 + (tx + 64)
-end
-
--- ------------------------------------------------------------ vertex sinks
-
--- A sink accepts quads (4 corners, 4 uv pairs, flat or per-corner shade)
--- and finishes into a drawable mesh. The TABLE sink reproduces the
--- historical pure-Lua output -- geometry() returns its arrays for the
--- headless suite. The FFI sink packs the same six floats per vertex
--- straight into one growing native buffer, unindexed (v1 v2 v3 v1 v3 v4),
--- skipping ~a million short-lived Lua tables per route and LOVE's slow
--- table-by-table vertex upload.
-
--- ------------------------------------------------------- which way is up
---
--- -1 on a quad whose face points at the SKY, +1 on every other one, and the
--- sinks multiply the shade by it: the scene shader splits the magnitude back
--- out for brightness and reads the sign as the face normal (see vUp in
--- Voxel3D's SHADER). A sign costs nothing -- no fourth attribute, no extra
--- float on the twenty megabytes a route uploads -- and a shade is a product
--- of positive factors with a floor well above zero, so there is no value it
--- can collide with.
---
--- It has to be the QUAD's own geometry rather than a flag the callers pass,
--- because the callers are the problem. A shade is also how bright a face
--- draws, and both meshers have good reasons to hand a sideways face the same
--- number an up-facing one gets -- a building's south face IS the artwork, so
--- it is emitted at full energy, and a house's roof is emitted DARKER than
--- its walls so the plateau behind a standing drawing reads as depth. Anything
--- downstream that guessed "up" from that number got a snowed town of white
--- walls under grey roofs.
---
--- The test is whether the face is VERTICAL, and the world's own geometry is
--- what makes that the right question rather than a lazy one. This is a voxel
--- world: every quad in it is either an axis-aligned upright face -- a wall, a
--- facade, a flank, a standing slab -- or a surface with some rise on it. The
--- normal's Y is exactly zero on the first kind and never zero on the second,
--- so there is no threshold to tune and nothing sitting near a boundary.
---
--- A 45-degree cone was the first cut and it was wrong for the case that
--- matters most: `gableH` puts a house's roof at `rise` over half its extent,
--- and a small building with a steep roof clears 45 degrees easily -- so the
--- one surface snow most obviously belongs on would have been called a wall on
--- exactly the buildings whose roofs read most as roofs. A gable segment's n.y
--- is a constant 64 whatever its pitch, which is the answer this wants.
---
--- The SIGN of the normal is not consulted, and that is on purpose rather than
--- laziness: nothing sets a mesh cull mode, so winding is unenforced here and
--- the emitters do not agree on it -- topQuad walks its corners north to south
--- and the gable segment walks them south to north. A test that read the sign
--- would call one of those two a wall. What it costs is that a DOWN-facing
--- plane reads as up as well, which is a hull's underside and a prop's
--- footprint: surfaces a camera looking down between 50 and 75 degrees never
--- sees. The epsilon is against float noise alone -- every coordinate here is
--- a world pixel or a half of one, so a genuine zero is a genuine zero.
--- `sky` overrides it, and there is exactly one caller who may: Structures'
--- round hulls. A hull's front face is a flat plane in the mesh and a CURVED
--- surface in the drawing, so the geometry genuinely does not know -- it reads
--- the whole front of a tree as upright, and a snowfall that buried the ground
--- and the roofs left every canopy standing green. Nothing else gets to claim
--- it: a builder that wants a bright sideways face still has to be told apart
--- from a roof by its shape, which is the entire point of this function.
-local function faceSign(c, sky)
-  if sky ~= nil then return sky and -1 or 1 end
-  local a, b, d = c[1], c[2], c[3]
-  local dx, dz = b[1] - a[1], b[3] - a[3]
-  local ex, ez = d[1] - a[1], d[3] - a[3]
-  local ny = dz * ex - dx * ez
-  return (ny > 1e-6 or ny < -1e-6) and -1 or 1
-end
-
-local function newTableSink()
-  local verts, indices, quads = {}, {}, 0
-  return {
-    push = function(c, uv, shade, sky)
-      local flat = type(shade) ~= "table"
-      local s = faceSign(c, sky)
-      for i = 1, 4 do
-        local cc, t = c[i], uv[i]
-        verts[#verts + 1] = { cc[1], cc[2], cc[3], t[1], t[2],
-                              s * (flat and shade or shade[i]) }
-      end
-      Voxel3D.pushQuad(indices, quads)
-      quads = quads + 1
-    end,
-    results = function()
-      return verts, indices, quads
-    end,
-    finish = function()
-      return Voxel3D.newMesh(verts, indices)
-    end,
-  }
-end
-
--- Indexed, 0-based: quad corners 1,2,3,4 (Voxel3D.FACE_CORNERS order)
--- become two triangles (0,1,2) and (0,2,3) off the SAME four stored
--- vertices -- the table-sink/quadsMesh path (Voxel3D.pushQuad) has done
--- this for grass/flowers/figures since before this file's chunking existed;
--- this is that same fan, just 0-based for the raw index Data LOVE's
--- Mesh:setVertexMap(datatype, data, ...) overload expects (the Lua-table
--- overload does the 1-based-to-0-based subtraction itself; the raw-Data one
--- does not).
---
--- This only removes each quad's OWN duplicate corners (corners 1 and 3,
--- which TRI_ORDER above used to repeat into the unindexed stream) -- it
--- does not weld a quad to its neighbours, which still get their own
--- independent 4 corners. The water surface's watertightness (see Voxel3D's
--- SHADER note on vWater) depends on adjacent quads NOT sharing a vertex so
--- their displacement -- a pure function of world XZ -- agrees at the seam
--- either way; nothing here changes that.
-local QUAD_IDX = { 0, 1, 2, 0, 2, 3 }
-
-local function newFfiSink(cap0)
-  local capQuads = cap0 or 4096
-  local buf = ffi.new("float[?]", capQuads * 4 * 6)      -- 4 verts/quad
-  local ibuf = ffi.new("uint32_t[?]", capQuads * 6)      -- 6 indices/quad
-  local nQuads = 0
-  local sink
-  sink = {
-    push = function(c, uv, shade, sky)
-      if nQuads + 1 > capQuads then
-        local grownV = ffi.new("float[?]", capQuads * 2 * 4 * 6)
-        ffi.copy(grownV, buf, nQuads * 4 * 6 * 4)
-        local grownI = ffi.new("uint32_t[?]", capQuads * 2 * 6)
-        ffi.copy(grownI, ibuf, nQuads * 6 * 4)
-        buf, ibuf, capQuads = grownV, grownI, capQuads * 2
-      end
-      local flat = type(shade) ~= "table"
-      local s = faceSign(c, sky)
-      local base = nQuads * 4 * 6
-      for i = 1, 4 do
-        local cc, t = c[i], uv[i]
-        buf[base] = cc[1]
-        buf[base + 1] = cc[2]
-        buf[base + 2] = cc[3]
-        buf[base + 3] = t[1]
-        buf[base + 4] = t[2]
-        buf[base + 5] = s * (flat and shade or shade[i])
-        base = base + 6
-      end
-      local ibase, vbase = nQuads * 6, nQuads * 4
-      for k = 1, 6 do
-        ibuf[ibase + k - 1] = vbase + QUAD_IDX[k]
-      end
-      nQuads = nQuads + 1
-    end,
-    finish = function()
-      if nQuads == 0 then return nil end
-      local n = nQuads * 4          -- vertex count
-      -- upload in slices with budget ticks between: a route-sized mesh
-      -- is ~10-20MB and one atomic setVertices was the last remaining
-      -- frame spike. The mesh is not cached (so never drawn) until the
-      -- whole upload lands, and LuaJIT yields fine across pcall.
-      local ok, mesh = pcall(function()
-        local m = love.graphics.newMesh(Voxel3D.FORMAT, n,
-                                        "triangles", "static")
-        local CHUNK = 65536              -- vertices per slice (~1.5MB)
-        local i = 0
-        while i < n do
-          local count = math.min(CHUNK, n - i)
-          local bytes = count * 6 * 4
-          local data = love.data.newByteData(bytes)
-          ffi.copy(data:getFFIPointer(), buf + i * 6, bytes)
-          m:setVertices(data, i + 1)
-          data:release()
-          i = i + count
-          Budget.check()
-        end
-        -- the index buffer: LOVE auto-picks uint16 vs uint32 by vertex
-        -- count when setVertexMap gets a Lua table, but the raw-Data
-        -- overload (used here to avoid building a several-hundred-
-        -- thousand-entry Lua table) takes the width explicitly, so this
-        -- mirrors that same rule (vertex::getIndexDataTypeFromMax in
-        -- LOVE's own source) by hand.
-        local nIdx = nQuads * 6
-        Budget.check()
-        if n <= 65535 then
-          local u16 = ffi.new("uint16_t[?]", nIdx)
-          for k = 0, nIdx - 1 do
-            u16[k] = ibuf[k]
-            if k % 16384 == 0 then Budget.tick() end
-          end
-          local bytes = nIdx * 2
-          local data = love.data.newByteData(bytes)
-          ffi.copy(data:getFFIPointer(), u16, bytes)
-          m:setVertexMap(data, "uint16", nIdx)
-          data:release()
-        else
-          local bytes = nIdx * 4
-          local data = love.data.newByteData(bytes)
-          ffi.copy(data:getFFIPointer(), ibuf, bytes)
-          m:setVertexMap(data, "uint32", nIdx)
-          data:release()
-        end
-        return m
-      end)
-      return ok and mesh or nil
-    end,
-  }
-  return sink
-end
-
-local function newSink(cap0)
-  if ffi and love and love.data and love.data.newByteData
-     and love.graphics and love.graphics.newMesh then
-    return newFfiSink(cap0)
-  end
-  return newTableSink()
 end
 
 -- ------------------------------------------------------- spatial chunking
@@ -360,6 +186,161 @@ function Group:release()
     if ch.mesh and ch.mesh.release then pcall(ch.mesh.release, ch.mesh) end
   end
   self.chunks = {}
+end
+
+-- ------------------------------------------------------------ vertex sinks
+
+-- A sink accepts quads (4 corners, 4 uv pairs, flat or per-corner shade)
+-- and finishes into a drawable mesh. The TABLE sink reproduces the
+-- historical pure-Lua output -- geometry() returns its arrays for the
+-- headless suite. The FFI sink packs the same six floats per vertex
+-- straight into one growing native buffer, unindexed (v1 v2 v3 v1 v3 v4),
+-- skipping ~a million short-lived Lua tables per route and LOVE's slow
+-- table-by-table vertex upload.
+
+local function newTableSink()
+  local verts, indices, quads = {}, {}, 0
+  return {
+    push = function(c, uv, shade)
+      local flat = type(shade) ~= "table"
+      for i = 1, 4 do
+        local cc, t = c[i], uv[i]
+        verts[#verts + 1] = { cc[1], cc[2], cc[3], t[1], t[2],
+                              flat and shade or shade[i] }
+      end
+      Voxel3D.pushQuad(indices, quads)
+      quads = quads + 1
+    end,
+    results = function()
+      return verts, indices, quads
+    end,
+    -- Vertices as the GPU would see them: the table sink is INDEXED, so its
+    -- drawn vertex count is three per triangle, not #verts. Only the FFI
+    -- sink's unindexed stream can be persisted; this exists so a caller can
+    -- ask either sink the same question.
+    vertexCount = function()
+      return quads * 6
+    end,
+    finish = function()
+      return Voxel3D.newMesh(verts, indices)
+    end,
+  }
+end
+
+local TRI_ORDER = { 1, 2, 3, 1, 3, 4 }
+
+local function newFfiSink()
+  local cap = 4096 * 6
+  local buf = ffi.new("float[?]", cap * 6)
+  local n = 0
+  local sink
+  sink = {
+    push = function(c, uv, shade)
+      if n + 6 > cap then
+        local grown = ffi.new("float[?]", cap * 2 * 6)
+        ffi.copy(grown, buf, n * 6 * 4)
+        buf, cap = grown, cap * 2
+      end
+      local flat = type(shade) ~= "table"
+      local base = n * 6
+      for k = 1, 6 do
+        local i = TRI_ORDER[k]
+        local cc, t = c[i], uv[i]
+        buf[base] = cc[1]
+        buf[base + 1] = cc[2]
+        buf[base + 2] = cc[3]
+        buf[base + 3] = t[1]
+        buf[base + 4] = t[2]
+        buf[base + 5] = flat and shade or shade[i]
+        base = base + 6
+      end
+      n = n + 6
+    end,
+    vertexCount = function()
+      return n
+    end,
+    -- Spill the raw six-float stream straight to disk, in the same slices
+    -- the GPU upload uses and with a budget tick between them, so baking a
+    -- whole region never stalls a frame. Writing from here rather than from
+    -- the cache module keeps every cdata pointer inside this file.
+    -- Called by the cache as `sink:writeRaw(path)`, so the sink itself
+    -- arrives first; a plain `sink.writeRaw(path)` works too. Getting this
+    -- wrong is silent -- the path becomes a table and the write lands
+    -- nowhere -- so it is checked rather than assumed.
+    writeRaw = function(a, b)
+      local path = b
+      if path == nil and type(a) == "string" then path = a end
+      if type(path) ~= "string" then return false, "writeRaw needs a path" end
+      if not (love and love.filesystem and love.filesystem.newFile
+              and love.data and love.data.newByteData) then
+        return false, "no filesystem"
+      end
+      local okFile, file = pcall(love.filesystem.newFile, path)
+      if not okFile or not file then
+        return false, "could not create " .. tostring(path)
+      end
+      local okOpen, opened = pcall(file.open, file, "w")
+      if not okOpen or opened == false then
+        pcall(file.close, file)
+        return false, "could not open " .. tostring(path)
+      end
+      local okWrite, err = pcall(function()
+        local CHUNK = 65536
+        local i = 0
+        while i < n do
+          local count = math.min(CHUNK, n - i)
+          local bytes = count * 6 * 4
+          local data = love.data.newByteData(bytes)
+          ffi.copy(data:getFFIPointer(), buf + i * 6, bytes)
+          local wrote = file:write(data:getString())
+          if data.release then pcall(data.release, data) end
+          if wrote == false then error("short write") end
+          i = i + count
+          Budget.check()
+        end
+      end)
+      pcall(file.close, file)
+      if not okWrite then
+        pcall(love.filesystem.remove, path)
+        return false, tostring(err)
+      end
+      return true
+    end,
+    finish = function()
+      if n == 0 then return nil end
+      -- upload in slices with budget ticks between: a route-sized mesh
+      -- is ~10-20MB and one atomic setVertices was the last remaining
+      -- frame spike. The mesh is not cached (so never drawn) until the
+      -- whole upload lands, and LuaJIT yields fine across pcall.
+      local ok, mesh = pcall(function()
+        local m = love.graphics.newMesh(Voxel3D.FORMAT, n,
+                                        "triangles", "static")
+        local CHUNK = 65536              -- vertices per slice (~1.5MB)
+        local i = 0
+        while i < n do
+          local count = math.min(CHUNK, n - i)
+          local bytes = count * 6 * 4
+          local data = love.data.newByteData(bytes)
+          ffi.copy(data:getFFIPointer(), buf + i * 6, bytes)
+          m:setVertices(data, i + 1)
+          data:release()
+          i = i + count
+          Budget.check()
+        end
+        return m
+      end)
+      return ok and mesh or nil
+    end,
+  }
+  return sink
+end
+
+local function newSink()
+  if ffi and love and love.data and love.data.newByteData
+     and love.graphics and love.graphics.newMesh then
+    return newFfiSink()
+  end
+  return newTableSink()
 end
 
 local function newChunkedSink()
@@ -443,13 +424,68 @@ end
 -- Kept free of any GPU call so it can be exercised headless -- the
 -- geometry is the part with the interesting invariants, and a suite that
 -- needed a real GL context to check them would never run in CI.
-local function runGeometry(map, bodyOnly, masks, sink)
+-- `waterSink`, when given, takes the WATER SURFACE quads instead of the
+-- main sink -- the one class in this world that is drawn as its own pass
+-- (see Water: a mirror cannot be drawn until what it reflects exists).
+-- Nothing else moves: the quads are the same quads, emitted by the same
+-- corner and uv arithmetic at the same recessed height, and the shoreline
+-- faces around them still belong to the GROUND that exposes them.
+--
+-- Omitted, water stays in the terrain mesh exactly as it always did, which
+-- is what the headless geometry() below and the sun's own pass both want.
+local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   local push = sink.push
+  local waterPush = waterSink and waterSink.push or nil
   local tileset = map.tileset
   local S = Structures.forMap(map)
   local perRow = tileset.tilesPerRow or 16
   local atlasW = tileset.imageWidth or (perRow * 8)
   local atlasH = tileset.imageHeight or 48
+
+  -- ------------------------------------------------------------- ledge lips
+  --
+  -- A hop-down ledge is a LIP, not a kerb.  TileShape resolves the class per
+  -- CELL (its HOP_LIP rule), but the drop is only DRAWN across the 8px tile
+  -- row the rim occupies -- the rest of the cell is the turf above it.  Read
+  -- at cell granularity the whole square rose, so a ledge line came out as a
+  -- kerb of grass with a rim printed on its side.
+  --
+  -- Which half rises is the ROM's own answer: DoPlayerMovement.TryJump keys
+  -- the hop off classes $A0-$AF, and the class sits on the cell you jump
+  -- FROM, so the neighbour holding it names the side the lip faces.
+  local LEDGE_HOP = {
+    { -1, 0, { [0xA0] = true, [0xA4] = true }, "right" },
+    { 1, 0, { [0xA1] = true, [0xA5] = true }, "left" },
+    { 0, -1, { [0xA3] = true, [0xA4] = true, [0xA5] = true }, "down" },
+  }
+
+  local ledgeDropCache = {}
+  local function ledgeDrop(cx, cy)
+    local k = keyOf(cx, cy)
+    local hit = ledgeDropCache[k]
+    if hit then return hit end
+    local d = "down"
+    if map.cellTile then
+      for _, r in ipairs(LEDGE_HOP) do
+        local ok, class = pcall(map.cellTile, map, cx + r[1], cy + r[2])
+        if ok and class and r[3][class] then d = r[4]; break end
+      end
+    end
+    ledgeDropCache[k] = d
+    return d
+  end
+
+  -- s.h for the tile the rim is drawn on, 0 for the rest of its cell
+  local function shapeHeight(tx, ty, s)
+    if s.class ~= "ledge" then return s.h end
+    local d = ledgeDrop(math.floor(tx / 2), math.floor(ty / 2))
+    local onDrop
+    if d == "up" then onDrop = ty % 2 == 0
+    elseif d == "right" then onDrop = tx % 2 == 1
+    elseif d == "left" then onDrop = tx % 2 == 0
+    else onDrop = ty % 2 == 1 end
+    return onDrop and s.h or 0
+  end
 
   local function heightAt(tx, ty)
     local k = keyOf(tx, ty)
@@ -457,7 +493,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
     local run = S.runs[k]
     if run then return run.h end
     local s = S.shapeAt[k]
-    return s and s.h or 0
+    return s and shapeHeight(tx, ty, s) or 0
   end
 
   -- one atlas-rect UV, optionally cropped to art rows [vTop, vBot] of 8
@@ -580,12 +616,14 @@ local function runGeometry(map, bodyOnly, masks, sink)
     return aoSide
   end
 
-  local function topQuad(x0, z0, h, tile, shade)
+  -- `to` routes the quad somewhere other than the main sink -- the water
+  -- surface is the only caller that ever does (see runGeometry's header).
+  local function topQuad(x0, z0, h, tile, shade, to)
     local u0, u1, v0, v1 = uvRect(tile, 0, 8)
-    push({ { x0, h, z0 }, { x0 + 8, h, z0 },
-           { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
-         { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
-         aoShades(x0 / 8, z0 / 8, h, shade))
+    ;(to or push)({ { x0, h, z0 }, { x0 + 8, h, z0 },
+                    { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
+                  { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
+                  aoShades(x0 / 8, z0 / 8, h, shade))
   end
 
   -- vertical quad for face direction `d` of the tile column at (x0, z0),
@@ -666,7 +704,12 @@ local function runGeometry(map, bodyOnly, masks, sink)
         -- prebuilt prism quads (appended below) carry the art
         local g = S.ground[k]
         if g then
-          topQuad(tx * 8, ty * 8, 0, g, 1)
+          -- ...at the DATUM the object stands on, not at zero.  A building
+          -- claim carries the height its ground vote found (Buildings.stamp),
+          -- so a house on a terrace paints its floor on the terrace instead
+          -- of on the world datum sixteen pixels below it.
+          local gy = s.base or 0
+          topQuad(tx * 8, ty * 8, gy, g, 1)
           -- the claimed tile is still ground at height 0, and water next
           -- door still recesses below it: without the same below-ground
           -- side bands ordinary ground emits, the two-pixel shoreline
@@ -676,14 +719,14 @@ local function runGeometry(map, bodyOnly, masks, sink)
           -- ground's own art
           for _, side in ipairs(SIDES) do
             local nh = heightAt(tx + side[1], ty + side[2])
-            if nh < 0 then
+            if nh < gy then
               local d = side[3]
               local lat = LATERAL[d]
               local hl = lat and heightAt(tx + lat[1], ty + lat[2]) or 0
               local hr = lat and heightAt(tx + lat[3], ty + lat[4]) or 0
-              for band = math.floor(nh / 8), -1 do
+              for band = math.floor(nh / 8), math.ceil(gy / 8) - 1 do
                 local y0 = math.max(nh, band * 8)
-                local y1 = math.min(0, band * 8 + 8)
+                local y1 = math.min(gy, band * 8 + 8)
                 if y1 > y0 then
                   sideQuad(d, tx * 8, ty * 8, y0, y1, g,
                            (band * 8 + 8) - y1, (band * 8 + 8) - y0,
@@ -694,9 +737,98 @@ local function runGeometry(map, bodyOnly, masks, sink)
             end
           end
         end
+      elseif s and s.sub and s.sub.res and s.sub.h then
+        -- ------------------------------------------------ SUB-TILE HEIGHTS
+        --
+        -- A tile's height is normally ONE number: `topQuad` plants all four
+        -- corners of the 8px square at it and the side faces span from the
+        -- neighbour up to it. That is the whole contract everything below
+        -- assumes, which is why finer heights could not simply be a smaller
+        -- number -- they need their own emitter.
+        --
+        -- This is it: the tile is divided into `res` x `res` sub-columns
+        -- (res 2 = 4px squares, 4 = 2px, 8 = 1px) and each is emitted as its
+        -- own little box. Sides are drawn only where the neighbouring
+        -- sub-column is LOWER, exactly as the tile-sized path does, so the
+        -- inside of a flat patch costs nothing and only the steps between
+        -- levels produce faces.
+        --
+        -- GATED ON A FIELD THAT IS NIL EVERYWHERE. A tile with no `sub` takes
+        -- the original branch below, unchanged, so nothing that renders today
+        -- can render differently because this exists.
+        --
+        -- THE COST IS REAL AND IT IS THE READER'S TO SPEND. At res 8 one tile
+        -- is up to 64 boxes; a whole map of them would be a hundred times the
+        -- geometry. It is a sparse override on the few tiles that need
+        -- sculpting, and the editor writes it nowhere else.
+        local res = math.max(1, math.min(8, math.floor(s.sub.res)))
+        local step = 8 / res
+        local hs = s.sub.h
+        local base = run and run.h or shapeHeight(tx, ty, s)
+        local x0, z0 = tx * 8, ty * 8
+        local tile = S.tileAt[k]
+
+        local function subH(i, j)
+          if i < 0 or j < 0 or i >= res or j >= res then return nil end
+          local v = hs[j * res + i + 1]
+          return tonumber(v) or base
+        end
+
+        -- The art under one sub-square, so a sculpted tile keeps its drawing
+        -- instead of repeating the whole tile per box.
+        local function subUV(i, j)
+          local ax = (tile % perRow) * 8
+          local ay = math.floor(tile / perRow) * 8
+          local u0 = (ax + i * step) / atlasW
+          local u1 = (ax + (i + 1) * step) / atlasW
+          local v0 = (ay + j * step) / atlasH
+          local v1 = (ay + (j + 1) * step) / atlasH
+          return u0, u1, v0, v1
+        end
+
+        for j = 0, res - 1 do
+          for i = 0, res - 1 do
+            local hh = subH(i, j) or base
+            local sx, sz = x0 + i * step, z0 + j * step
+            local u0, u1, v0, v1 = subUV(i, j)
+            -- top
+            push({ { sx, hh, sz }, { sx + step, hh, sz },
+                   { sx + step, hh, sz + step }, { sx, hh, sz + step } },
+                 { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
+                 aoShades(tx, ty, hh, 1))
+            -- sides, only where the neighbour is lower. Off the tile's own
+            -- edge the neighbour is the NEXT TILE's height, so a sculpted
+            -- tile still closes against the flat ground beside it rather
+            -- than leaving a slot you can see through.
+            for _, side in ipairs(SIDES) do
+              local ni, nj = i + side[1], j + side[2]
+              local nh = subH(ni, nj)
+              if nh == nil then
+                nh = heightAt(tx + side[1], ty + side[2])
+              end
+              if nh < hh then
+                local d = side[3]
+                local x1, z1 = sx + step, sz + step
+                local c
+                if d == 5 then
+                  c = { { sx, nh, z1 }, { x1, nh, z1 }, { x1, hh, z1 }, { sx, hh, z1 } }
+                elseif d == 6 then
+                  c = { { x1, nh, sz }, { sx, nh, sz }, { sx, hh, sz }, { x1, hh, sz } }
+                elseif d == 1 then
+                  c = { { x1, nh, z1 }, { x1, nh, sz }, { x1, hh, sz }, { x1, hh, z1 } }
+                else
+                  c = { { sx, nh, sz }, { sx, nh, z1 }, { sx, hh, z1 }, { sx, hh, sz } }
+                end
+                push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
+                     Voxel3D.FACE_SHADE[d] or 1)
+              end
+            end
+          end
+        end
+
       elseif s then
         local run = S.runs[k]
-        local h = run and run.h or s.h
+        local h = run and run.h or shapeHeight(tx, ty, s)
         local x0, z0 = tx * 8, ty * 8
 
         -- top face. A roofed volume gets a GABLE segment: the roof rises
@@ -780,8 +912,14 @@ local function runGeometry(map, bodyOnly, masks, sink)
             end
             topTile = S.tileAt[keyOf(tx, row)]
           end
+          -- water's surface, and only water's: the recessed sheet itself,
+          -- never the ground's shoreline bands around it. A cell an object
+          -- stands on took the branch above and paints synthesized GROUND,
+          -- which is right -- a sign at the waterline stands on a plot, not
+          -- on the pond.
           topQuad(x0, z0, h, topTile,
-                  s.art == "upright" and VOLUME_TOP_SHADE or 1)
+                  s.art == "upright" and VOLUME_TOP_SHADE or 1,
+                  (s.class == "water") and waterPush or nil)
         end
 
         -- sides: 8px bands wherever the neighbour is lower. Band k spans
@@ -809,12 +947,19 @@ local function runGeometry(map, bodyOnly, masks, sink)
                   -- drawing itself (full brightness); the other sides wear
                   -- the same rows darkened, so a building's flank matches
                   -- its face instead of smearing one tile
+                  -- band is an ABSOLUTE 8px course, so a run standing on a
+                  -- terrace starts at band 2 rather than band 0 -- and
+                  -- sampling row north+2 for its first visible course would
+                  -- slide the whole drawing two rows up the face.  Count
+                  -- courses from the run's own datum instead.
+                  local bb = band - math.floor((run.base or 0) / 8)
+                  if bb < 0 then bb = 0 end
                   if d == 6 then
                     src = map:tileAt(tx, math.min(run.front,
-                                                  run.north + band))
+                                                  run.north + bb))
                   else
                     src = map:tileAt(tx, math.max(run.north,
-                                                  run.front - band))
+                                                  run.front - bb))
                   end
                   if d == 5 then shade = 1 end
                 elseif s.art == "upright" then
@@ -907,15 +1052,6 @@ local function runGeometry(map, bodyOnly, masks, sink)
     return scUV
   end
 
-  -- q.lod tags small-silhouette props (buildObject's per-source-pixel
-  -- prisms -- plants, signs, lone trees). bodyOnly used to DROP them, and
-  -- to skip round-tree stamps below, as a memory cut for neighbours.
-  -- That was the wrong lever: a neighbour is what you walk INTO, and
-  -- stripping its silhouette made the forest "load" when the seam
-  -- promoted the map -- trees popping in one frame is worse than the
-  -- bytes they cost. bodyOnly means "no border RING", not "less world".
-  -- The tag stays on the quads for a future true distance LOD; it is
-  -- not consulted here.
   for _, q in ipairs(S.objectQuads) do
     Budget.tick()
     local x0 = math.min(q[1][1], q[2][1], q[3][1], q[4][1])
@@ -952,11 +1088,6 @@ local function runGeometry(map, bodyOnly, masks, sink)
   -- stamps keep every quad, ring stamps buried under a neighbour body
   -- (or, body-only, ring stamps full stop) skip without touching their
   -- quads. Only stamps crossing a boundary walk quad by quad.
-  --
-  -- bodyOnly used to skip this whole pass (see objectQuads note above).
-  -- It no longer does: the keep/skip rules below already drop stamps on
-  -- the ring and keep the interior, which is exactly the silhouette a
-  -- neighbour must show so a seam crossing does not plant a forest.
   local sc = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }
   for _, st in ipairs(S.roundStamps or {}) do
     local mx, mz = st.mx, st.mz
@@ -990,11 +1121,7 @@ local function runGeometry(map, bodyOnly, masks, sink)
           ok = keepQuad(x0, z0, x1, z1)
         end
         if ok then
-          -- q.sky: the hull's own word on whether this row of its shell is
-          -- the crown the snow lands on. The corners cannot say -- a canopy's
-          -- front is a flat plane standing for a curved one -- so this is the
-          -- one quad in the mesher that overrides faceSign.
-          push(sc, quadUV(q), groundShades(sc, q.shade), q.sky)
+          push(sc, quadUV(q), groundShades(sc, q.shade))
         end
       end
     end
@@ -1004,18 +1131,66 @@ end
 -- The raw geometry for `map`: (vertex list, triangle index list, quad
 -- count). Synchronous and GPU-free -- the headless suite and the probes
 -- exercise the invariants through this.
-function ChunkMesher.geometry(map, bodyOnly, masks)
+--
+-- `split` lifts the water surface out, as it is lifted out for the
+-- reflective pass, and appends that sink's own three values -- so the suite
+-- can check the same separation the GPU path relies on without a GPU.
+-- Without it the water is in the first list, which is what every existing
+-- caller reads.
+function ChunkMesher.geometry(map, bodyOnly, masks, split)
   local sink = newTableSink()
-  runGeometry(map, bodyOnly, masks, sink)
-  return sink.results()
+  local waterSink = split and newTableSink() or nil
+  runGeometry(map, bodyOnly, masks, sink, waterSink)
+  if not waterSink then return sink.results() end
+  local v, i, n = sink.results()
+  local wv, wi, wn = waterSink.results()
+  return v, i, n, wv, wi, wn
 end
 
 -- Build the mesh for `map` synchronously. Returns nil when there is
 -- nothing to draw or meshes are unavailable (headless).
+--
+-- Uses a chunked sink for spatial culling: the terrain is divided into
+-- chunks that can be culled by the camera's view box, which is what made
+-- routes renderable in the first place.
 function ChunkMesher.build(map, bodyOnly, masks)
   local sink = newChunkedSink()
   runGeometry(map, bodyOnly, masks, sink)
   return sink.finish()
+end
+
+-- ---------------------------------------------------------------- prebake
+
+-- Mesh `map` STRAIGHT TO DISK and throw the geometry away.
+--
+-- The difference from build() is that nothing is uploaded: no GPU mesh is
+-- created, nothing enters the in-memory cache, and no slot is swapped. That
+-- is what makes it safe to run over the whole map list -- baking two hundred
+-- maps into VRAM would be a very expensive way to run out of it.
+--
+-- Returns true when an entry was written, false plus a reason otherwise.
+-- "cached" is not a failure: it is the answer for a map already baked under
+-- the current rules, which is what makes a second prebake pass cheap.
+function ChunkMesher.bake(map, slot, masks)
+  slot = slot or "body"
+  if not DiskCache then return false, "no disk cache" end
+  if type(DiskCache.enabled) == "function" and not DiskCache.enabled() then
+    return false, "disabled"
+  end
+  if type(DiskCache.has) == "function" then
+    local okHas, hit = pcall(DiskCache.has, map, slot, masks)
+    if okHas and hit then return false, "cached" end
+  end
+  local sink = newSink()
+  if type(sink.writeRaw) ~= "function" then
+    return false, "no ffi sink"          -- the table sink cannot be persisted
+  end
+  local waterSink = newSink()
+  local okGeom, err = pcall(runGeometry, map, slot == "body", masks, sink, waterSink)
+  if not okGeom then return false, tostring(err) end
+  local okStore, stored = pcall(DiskCache.store, map, slot, masks, sink, waterSink)
+  if not okStore then return false, tostring(stored) end
+  return stored and true or false, stored and nil or "store declined"
 end
 
 local function quadsMesh(quads)
@@ -1205,6 +1380,7 @@ end
 local function runJob(job)
   local map = job.map
   local c = entry(job.id)
+
   if c.grass == nil or c.flowers == nil or c.figures == nil or c.custom == nil or c.road == nil or c.ground == nil or c.decor == nil
      or (c.stale and c.stale.aux) then
     local okG, grass = pcall(buildGrassMesh, map)
@@ -1237,14 +1413,16 @@ local function runJob(job)
     c.figures = (okX and figures) or false
     if c.stale then c.stale.aux = nil end
   end
-  local sink = newChunkedSink()
-  runGeometry(map, job.slot == "body", job.masks, sink)
-  local mesh = sink.finish()
-  if (gen[job.id] or 0) ~= job.gen then
-    if mesh and mesh.release then pcall(mesh.release, mesh) end
-    return
+  if cachedTerrain == nil then
+    local sink = newChunkedSink()
+    runGeometry(map, job.slot == "body", job.masks, sink)
+    local mesh = sink.finish()
+    if (gen[job.id] or 0) ~= job.gen then
+      if mesh and mesh.release then pcall(mesh.release, mesh) end
+      return
+    end
+    swapSlot(c, job.slot, mesh or false)
   end
-  swapSlot(c, job.slot, mesh or false)
   if c.stale then
     c.stale[job.slot] = nil
     if not (c.stale.full or c.stale.body or c.stale.aux) then
@@ -1253,44 +1431,13 @@ local function runJob(job)
   end
 end
 
--- How badly a queued build is wanted, highest first.
---
---   CURRENT  the map being stood on. Without it there is no 3D frame at
---            all: VoxelScene.render returns nil and the engine draws the
---            flat 2D path instead.
---   HOLE     a neighbour holding NEITHER variant. Nothing is drawn at its
---            offset and the scene's full-screen sky clear shows through,
---            so this is a gap in the world rather than a pending
---            improvement to one.
---   IDLE     everything else -- which by definition is already drawing
---            something. A neighbour holding the other variant still
---            covers its own ground while the one it wants is built, so it
---            has no business competing with a map showing sky.
-ChunkMesher.CURRENT = 2
-ChunkMesher.HOLE    = 1
-ChunkMesher.IDLE    = 0
-
--- `urgent` stays a boolean for every caller that only ever had two answers
--- (true = the current map); the tier between them is passed as the number.
-local function prioOf(urgent)
-  if urgent == true then return ChunkMesher.CURRENT end
-  if type(urgent) == "number" then return urgent end
-  return ChunkMesher.IDLE
-end
-
 -- Queue a build unless the slot is already cached or queued. Returns the
 -- cached mesh when there is one (false-cached misses return nil).
--- `urgent` says which tier above it belongs to: pump() runs the highest
--- one first and gives it the bigger slice. A slot refresh() marked
+-- `urgent` marks the current map's meshes: pump() gives those a bigger
+-- slice and runs them before neighbour jobs. A slot refresh() marked
 -- stale queues its rebuild AND keeps handing back the old mesh, so a
 -- one-block edit never drops the scene to the flat 2D path while the
 -- replacement cooks.
---
--- A job already queued may only be PROMOTED, never demoted. The frame
--- that wanted it most is the one that decides -- otherwise a neighbour
--- that filled in for a single frame, or drifted out of the list and back,
--- would surrender the priority the frame before it earned and start over
--- at the back.
 function ChunkMesher.request(map, bodyOnly, masks, urgent)
   local slot = bodyOnly and "body" or "full"
   local c = cache[map.id]
@@ -1298,14 +1445,13 @@ function ChunkMesher.request(map, bodyOnly, masks, urgent)
   if c and c[slot] ~= nil and not stale then return c[slot] or nil end
   local key = jobKey(map.id, slot)
   local job = jobIndex[key]
-  local prio = prioOf(urgent)
   if not job then
     job = { id = map.id, map = map, slot = slot, masks = masks,
-            prio = prio, gen = gen[map.id] or 0 }
+            urgent = urgent or false, gen = gen[map.id] or 0 }
     jobIndex[key] = job
     jobs[#jobs + 1] = job
-  elseif prio > job.prio then
-    job.prio = prio
+  elseif urgent then
+    job.urgent = true
   end
   return (c and c[slot]) or nil
 end
@@ -1320,47 +1466,62 @@ end
 -- popping in one frame later. `covered` says the world pass is hidden
 -- this frame (a warp's fade, a menu): nothing visible can hitch, so the
 -- slice opens up and a door fade swallows most of a destination build.
--- These were picked against a desktop frame, where 12ms of Lua is most of
--- a 60Hz budget but the rest of the frame costs almost nothing. On a phone
--- the rest of the frame is already the whole budget, so a 12ms slice does
--- not fit INSIDE a frame -- it IS the frame, and every one of them is a
--- dropped one. Halved and more: the terrain streams in over more frames
--- and none of those frames is a visible hitch, which is the trade the
--- asynchronous mesher exists to make in the first place.
---
--- COVERED is the exception and stays large. Those are the frames a warp's
--- fade is drawn over, where nothing of the world is on screen to hitch --
--- spending them is how stepping out of a door lands on real terrain
--- instead of on a flat flash. Trimmed a little all the same, because the
--- fade itself is still an animation somebody is watching.
-local URGENT_SLICE = 0.005
--- A gap in the world is the world missing, which is the same class of
--- problem as having no world at all -- so it is worth the same slice. What
--- keeps it from stealing anything is the ORDER: the current map is a whole
--- tier above and always runs first. Named separately from URGENT so that
--- if a phone ever wants these to differ, there is somewhere to say so.
-local HOLE_SLICE = 0.005
-local IDLE_SLICE = 0.002
-local COVERED_SLICE = 0.020
+local URGENT_SLICE = 0.012
+local IDLE_SLICE = 0.005
+local COVERED_SLICE = 0.030
 
--- The most-wanted job, first-queued winning a tie -- which is the order
--- the old two-level pick already had.
-local function nextJob()
-  local pick, best = nil, -1
-  for _, j in ipairs(jobs) do
-    if j.prio > best then pick, best = j, j.prio end
+-- The fixed slices above are a CEILING, not a target. On a machine with room
+-- to spare they are never reached; on a machine already missing its frame,
+-- spending a flat 12 ms on top of an already-full frame is what turns a busy
+-- frame into a dropped one. So measure what the rest of the frame costs and
+-- hand meshing a share of what is actually left, with a floor so builds still
+-- finish on a machine with no headroom at all.
+local FRAME_TARGET = 1 / 60
+local SHARE = 0.75
+local MIN_SLICE = 0.0015
+
+ChunkMesher.frameTarget = FRAME_TARGET
+
+-- Hosts that run at something other than 60 (a 30 Hz handheld mode, a 120 Hz
+-- panel) can move the target the headroom is measured against.
+function ChunkMesher.setFrameTarget(seconds)
+  seconds = tonumber(seconds)
+  if seconds and seconds > 0 then
+    ChunkMesher.frameTarget = seconds
   end
-  return pick
 end
 
+local lastSpend = 0    -- seconds this module burned last pump
+local avgOther = nil   -- smoothed seconds the REST of the frame costs
+
+local function sliceFor(urgent, covered)
+  -- A covered frame draws no world, so there is nothing to hitch and the
+  -- adaptive measurement does not apply: take the whole fade.
+  if covered then return COVERED_SLICE end
+  local cap = urgent and URGENT_SLICE or IDLE_SLICE
+  local dt = (love and love.timer and love.timer.getDelta
+              and love.timer.getDelta()) or ChunkMesher.frameTarget
+  local other = math.max(0, dt - lastSpend)
+  avgOther = avgOther and (avgOther * 0.8 + other * 0.2) or other
+  local headroom = ChunkMesher.frameTarget - avgOther
+  return math.max(MIN_SLICE, math.min(cap, headroom * SHARE))
+end
+
+-- Seconds the last pump actually spent; for probes and overlays.
+function ChunkMesher.lastSlice() return lastSpend end
+
 function ChunkMesher.pump(covered)
-  if #jobs == 0 then return end
-  local pick = nextJob()
-  local slice = covered and COVERED_SLICE
-                or (pick.prio == ChunkMesher.CURRENT and URGENT_SLICE)
-                or (pick.prio == ChunkMesher.HOLE and HOLE_SLICE)
-                or IDLE_SLICE
-  local deadline = clock() + slice
+  if #jobs == 0 then lastSpend = 0 return end
+  local pick = jobs[1]
+  for _, j in ipairs(jobs) do
+    if j.urgent then
+      pick = j
+      break
+    end
+  end
+  local started = clock()
+  local slice = sliceFor(pick.urgent, covered)
+  local deadline = started + slice
   while pick do
     if not pick.co then
       pick.co = coroutine.create(runJob)
@@ -1373,11 +1534,22 @@ function ChunkMesher.pump(covered)
     elseif coroutine.status(pick.co) == "dead" then
       finishJob(pick, true)
     else
+      lastSpend = clock() - started
       return   -- slice spent mid-build; resume next frame
     end
-    if clock() >= deadline or #jobs == 0 then return end
-    pick = nextJob()
+    if clock() >= deadline or #jobs == 0 then
+      lastSpend = clock() - started
+      return
+    end
+    pick = jobs[1]
+    for _, j in ipairs(jobs) do
+      if j.urgent then
+        pick = j
+        break
+      end
+    end
   end
+  lastSpend = clock() - started
 end
 
 -- Meshes for `map`, built SYNCHRONOUSLY on first use -- the historical
@@ -1446,6 +1618,11 @@ function ChunkMesher.custom(map)
   return c and c.custom or nil
 end
 
+function ChunkMesher.decor(map)
+  local c = cache[map.id]
+  return c and c.decor or nil
+end
+
 function ChunkMesher.road(map)
   local c = cache[map.id]
   return c and c.road or nil
@@ -1454,11 +1631,6 @@ end
 function ChunkMesher.ground(map)
   local c = cache[map.id]
   return c and c.ground or nil
-end
-
-function ChunkMesher.decor(map)
-  local c = cache[map.id]
-  return c and c.decor or nil
 end
 
 -- Authored figures as `{ mesh, wx, wz, y }` records -- each placed by its

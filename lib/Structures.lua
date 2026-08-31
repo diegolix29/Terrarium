@@ -3158,6 +3158,19 @@ local DECOR_GRASS_TILES = {
     [13] = true, [29] = true,
     [44] = true, [60] = true,
   },
+  -- Gen2 tilesets - decor grass coordinates converted to tile IDs
+  -- Johto/Modern Johto: 40,0 to 47,7 -> tile 5 (40/8=5, 0/8=0, 5*16+0=80, but wait: tileId = ty * pixelsPerRow + tx = 0*16+5=5)
+  -- Actually: tileId = floor(py/8)*16 + floor(px/8) = 0*16 + 5 = 5
+  TilesetJohto = {
+    [5] = true,  -- 40,0 to 47,7
+  },
+  TilesetModernJohto = {
+    [5] = true,  -- 40,0 to 47,7
+  },
+  -- Kanto: 96,16 to 103,23 -> tileId = floor(16/8)*16 + floor(96/8) = 2*16 + 12 = 44
+  TilesetKanto = {
+    [44] = true,  -- 96,16 to 103,23
+  },
 }
 
 -- Add additional grass tiles based on pixel coordinates
@@ -3182,14 +3195,25 @@ end
 
 local CUSTOM_ROAD_TILES = {
   OVERWORLD = {},
+  -- Gen2 tilesets
+  TilesetJohto = {},
+  TilesetModernJohto = {},
+  TilesetKanto = {},
+  TilesetBattleTowerOutside = {},
+  TilesetBattleTowerInside = {},
+  TilesetLighthouse = {},
 }
 
 local CUSTOM_GROUND_TILES = {
   CAVERN = {},
-}
-
-local CUSTOM_GROUND_TILES = {
   OVERWORLD = {},
+  -- Gen2 tilesets
+  TilesetJohto = {},
+  TilesetModernJohto = {},
+  TilesetKanto = {},
+  TilesetBattleTowerOutside = {},
+  TilesetBattleTowerInside = {},
+  TilesetLighthouse = {},
 }
 
 -- Helper function to convert pixel coordinates to tile IDs
@@ -3263,6 +3287,33 @@ Structures.addRoadByPixelCoords("OVERWORLD", 72, 24, 8, 8)   -- square road 2: 7
 
 -- Ground tiles (using Grass3D with ground texture)
 Structures.addGroundByPixelCoords("CAVERN", 0, 16, 8, 8)   -- square ground: 0,16 to 7,23
+Structures.addGroundByPixelCoords("CAVE", 8, 0, 8, 8, 16, 8)   -- Gen2 cave ground: 8,0 to 15,7
+
+-- Gen2 tilesets - ADD YOUR PIXEL COORDINATES HERE:
+-- Example format: Structures.addRoadByPixelCoords("TilesetJohto", px, py, width, height, pixelsPerRow, tileSize)
+-- Example format: Structures.addGroundByPixelCoords("TilesetJohto", px, py, width, height, pixelsPerRow, tileSize)
+
+-- Johto tileset
+Structures.addRoadByPixelCoords("TilesetJohto", 48, 0, 8, 8, 16, 8)   -- road: 48,0 to 55,7
+
+-- Modern Johto tileset
+Structures.addRoadByPixelCoords("TilesetModernJohto", 48, 0, 8, 8, 16, 8)   -- road: 48,0 to 55,7
+
+-- Kanto tileset
+Structures.addRoadByPixelCoords("TilesetKanto", 74, 24, 6, 8, 16, 8)   -- road: 74,24 to 79,31
+Structures.addRoadByPixelCoords("TilesetKanto", 24, 16, 8, 8, 16, 8)   -- road: 24,16 to 31,23
+
+-- Battle Tower Outside
+-- Structures.addRoadByPixelCoords("TilesetBattleTowerOutside", px, py, width, height, pixelsPerRow, tileSize)
+-- Structures.addGroundByPixelCoords("TilesetBattleTowerOutside", px, py, width, height, pixelsPerRow, tileSize)
+
+-- Battle Tower Inside
+-- Structures.addRoadByPixelCoords("TilesetBattleTowerInside", px, py, width, height, pixelsPerRow, tileSize)
+-- Structures.addGroundByPixelCoords("TilesetBattleTowerInside", px, py, width, height, pixelsPerRow, tileSize)
+
+-- Lighthouse
+-- Structures.addRoadByPixelCoords("TilesetLighthouse", px, py, width, height, pixelsPerRow, tileSize)
+-- Structures.addGroundByPixelCoords("TilesetLighthouse", px, py, width, height, pixelsPerRow, tileSize)
 
 function Structures.buildGrass(S, map, x0, x1, y0, y1, data)
   local templates = {}

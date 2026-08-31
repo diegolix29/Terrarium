@@ -9,7 +9,7 @@
 -- mod setting, and this is the boilerplate two of them would otherwise
 -- each carry a copy of:
 --
---   options:define   a home in options.modOptions.<mod.id>, plus a row
+--   options:define   a home in options.modOptions.DRAMALESS_SHAPE, plus a row
 --                    on this mod's page in the mod manager.
 --   ui.options.rows  the same setting on the OPTIONS menu, where the
 --                    player already goes for VOXEL and T-SHIFT.
@@ -27,7 +27,7 @@ ModSetting.__index = ModSetting
 
 local function modId()
   local mod = V.mod
-  return (mod and mod.id) or "TERRARIUM"
+  return (mod and mod.id) or "DRAMALESS_SHAPE"
 end
 
 -- `values` are the stored values in ladder order and `labels` what the row
@@ -168,23 +168,19 @@ function ModSetting:sync(value)
   self.index = indexOf(self, value)
 end
 
--- The label of the rung actually in force, which is not the stored one when
--- that rung has been gated away (see get). Its own entry point because a
--- caller can want the label without wanting a row: SettingsMenu puts one
--- setting's rung on the second line of the CATEGORY that contains it.
-function ModSetting:valueLabel()
-  local i = self:read()
-  return self.labels[self:allows(i) and i or 1]
-end
-
 -- The descriptor src/ui/OptionRows.lua renders, in the shape the
 -- ui.options.rows hook appends.
 function ModSetting:row()
   local self_ = self
   return {
-    id = modId() .. ":" .. self.key,
+    id = "DRAMALESS_SHAPE:" .. self.key,
     label = self.label,
-    value = function() return self_:valueLabel() end,
+    -- the label of the rung actually in force, which is not the stored one
+    -- when that rung has been gated away (see get)
+    value = function()
+      local i = self_:read()
+      return self_.labels[self_:allows(i) and i or 1]
+    end,
     step = function(game, dir)
       self_:cycle(game, dir)
       return true

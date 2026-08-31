@@ -1,7 +1,7 @@
 -- Pokemon Stadium ROM menu bridge
 --
 -- v0.1.14: primary UI is this mod's own Mod Manager -> Options screen.
--- Gen1Recomp's standard option schema has toggles/choices/numbers/text but no
+-- The recomp engine's standard option schema has toggles/choices/numbers/text but no
 -- native "action" row, so we register a supported placeholder choice and then
 -- replace only that generated row with a file-picker activate callback.
 -- The older general OPTIONS hook is retained solely as a compatibility fallback.
@@ -14,11 +14,33 @@
 -- for: baseroms/baserom.z64.
 local V = ...
 local M = {}
+local Compat = V.require("EngineCompat")
 
 local PICKED_ROM = "picked_rom.gb"
+local PICKED_STADIUM = "picked_stadium.z64"
 local PENDING_FLAG = "stadium_overworld_picker_pending.flag"
-local STAGE_DIR = "baseroms"
-local STAGE_PATH = "baseroms/baserom.z64"
+local BATTLE_BACKGROUND_PENDING_FLAG = "stadium2_battle_background_picker_pending.flag"
+local CUSTOM_PLAYER_PENDING_FLAG = "stadium2_custom_player_sprite_picker_pending.flag"
+
+local function isGen2()
+  local ok, install = pcall(V.require, "StadiumInstall")
+  return ok and type(install) == "table"
+     and type(install.gameGeneration) == "function"
+     and install.gameGeneration() == 2
+end
+
+local function romLabel()
+  -- Gen-2 builds use one Android document-picker row for both private sources:
+  -- Stadium 2 feeds the 001-251 model/world importer; Stadium 1 USA v1.0 feeds
+  -- StadiumBattleFX plus the locally decoded announcer voice cache.
+  return isGen2() and "STADIUM 1 / 2 ROM FILE" or "STADIUM ROM FILE"
+end
+
+-- Android compatibility note:
+-- The recomp engine's currently deployed native picker copies the generic "rom"
+-- selection to picked_rom.gb.  Some voxel-host/mobile builds already reserve
+-- a dedicated picked_stadium.z64 target.  Watch both names so the companion
+-- works with either bridge without another release.
 
 local function text(s, ...)
   local ok, Strings = pcall(require, "src.core.Strings")
@@ -48,19 +70,34 @@ local function rawRow()
   return nil
 end
 
+-- Poll the embedded Dramatic/Dramaless Stadium picker without ever allowing
+-- its optional desktop bridge to crash the Mod Manager.  v0.1.64 called this
+-- helper from M.poll() but accidentally never defined it, so opening this
+-- mod's Options page on desktop immediately raised a nil-global error.
+local function notifyDramaticShape(game)
+  local p = picker()
+  if not p or type(p.poll) ~= "function" then return false end
+  local ok, result = pcall(p.poll, game)
+  if not ok then ok, result = pcall(p.poll, p, game) end
+  return ok and result ~= false
+end
+
 local function safeRemove(path)
-  if love and love.filesystem and love.filesystem.remove then
-    pcall(love.filesystem.remove, path)
-  end
+  local f = Compat.fs()
+  if f and type(f.remove) == "function" then pcall(f.remove, path) end
 end
 
 local function setStatus(value)
   M._status = value
 end
 
-local function stagedPath()
-  if not (love and love.filesystem and love.filesystem.getInfo) then return nil end
-  if love.filesystem.getInfo(STAGE_PATH, "file") then return STAGE_PATH end
+local function pickedPath()
+  local f = Compat.fs()
+  if not (f and type(f.getInfo) == "function") then return nil end
+  local okStadium, stadium = pcall(f.getInfo, PICKED_STADIUM, "file")
+  if okStadium and stadium then return PICKED_STADIUM end
+  local okRom, rom = pcall(f.getInfo, PICKED_ROM, "file")
+  if okRom and rom then return PICKED_ROM end
   return nil
 end
 
@@ -76,13 +113,12 @@ end
 
 local function cleanupStagingIfReady()
   if not stadiumReady() then return false end
-  -- Once StadiumInstall's completion marker says the 151-pack cache is
-  -- current, Dramatic Shape reads models from dramatic_shape/stadium. The
-  -- temporary 32 MB ROM copy is no longer needed and should not keep
-  -- re-triggering startup/import probes.
+  -- The ROM is only an import source.  Once all Stadium packs are current,
+  -- remove any Android picker leftovers so a later boot cannot mistake them
+  -- for a fresh import.
   safeRemove(PENDING_FLAG)
   safeRemove(PICKED_ROM)
-  safeRemove(STAGE_PATH)
+  safeRemove(PICKED_STADIUM)
   setStatus("READY")
   return true
 end
@@ -90,132 +126,196 @@ end
 local function n64Format(data)
   if type(data) ~= "string" or #data < 4 then return nil end
   local a, b, c, d = data:byte(1, 4)
-  -- Standard N64 ROM byte orders:
-  --   z64 / big endian : 80 37 12 40
-  --   v64 / byteswapped: 37 80 40 12
-  --   n64 / little endian: 40 12 37 80
   if a == 0x80 and b == 0x37 and c == 0x12 and d == 0x40 then return "z64" end
   if a == 0x37 and b == 0x80 and c == 0x40 and d == 0x12 then return "v64" end
   if a == 0x40 and b == 0x12 and c == 0x37 and d == 0x80 then return "n64" end
   return nil
 end
 
-local function normalizeToZ64(data, fmt)
-  if fmt == "z64" then return data end
-  local out = {}
-  local chunk = 8192
-  if fmt == "v64" then
-    -- Byte-swapped N64 images: swap each 16-bit pair.
-    for base = 1, #data, chunk do
-      local last = math.min(#data, base + chunk - 1)
-      if ((last - base + 1) % 2) ~= 0 then last = last - 1 end
-      local part = {}
-      for i = base, last, 2 do
-        part[#part + 1] = string.char(data:byte(i + 1), data:byte(i))
-      end
-      out[#out + 1] = table.concat(part)
-    end
-    return table.concat(out)
-  elseif fmt == "n64" then
-    -- Little-endian N64 images: reverse each 32-bit word.
-    for base = 1, #data, chunk do
-      local last = math.min(#data, base + chunk - 1)
-      last = last - ((last - base + 1) % 4)
-      local part = {}
-      for i = base, last, 4 do
-        part[#part + 1] = string.char(
-          data:byte(i + 3), data:byte(i + 2), data:byte(i + 1), data:byte(i))
-      end
-      out[#out + 1] = table.concat(part)
-    end
-    return table.concat(out)
+local function canonicalU8(data, offset, format)
+  local source = offset
+  if format == "v64" then
+    local word = offset - offset % 2
+    source = word + (1 - offset % 2)
+  elseif format == "n64" then
+    local word = offset - offset % 4
+    source = word + (3 - offset % 4)
   end
+  return data:byte(source + 1)
+end
+
+local function canonicalU32(data, offset, format)
+  local a = canonicalU8(data, offset, format)
+  local b = canonicalU8(data, offset + 1, format)
+  local c = canonicalU8(data, offset + 2, format)
+  local d = canonicalU8(data, offset + 3, format)
+  if not d then return nil end
+  return ((a * 256 + b) * 256 + c) * 256 + d
+end
+
+local function looksLikeStadium1US(data, format)
+  return canonicalU32(data, 0x10, format) == 0x90F5D9B3
+     and canonicalU32(data, 0x14, format) == 0x9D0EDCF0
+end
+
+local function stadium1VoiceStatus()
+  if type(V.stadium1ImportStatus) ~= "function" then return nil end
+  local ok, value = pcall(V.stadium1ImportStatus)
+  if ok and type(value) == "table" then return value end
   return nil
 end
 
-local function notifyDramaticShape(game)
-  local p = picker()
-  if p and type(p.poll) == "function" then
-    local ok = pcall(p.poll, game)
-    if not ok then pcall(p.poll, p, game) end
+local function resolveGame(game)
+  if game and game.stack then return game end
+  -- Gold's live owner is Game2.  Keep the Gen-1 fallback only for older shared
+  -- builds; requiring src.core.Game first on a Gen-2 sandbox is a dead-module
+  -- warning and can be rejected by stricter compatibility gates.
+  local ok2, Game2 = pcall(require, "src.core.Game2")
+  if ok2 and Game2 and Game2.stack then return Game2 end
+  local ok1, Game = pcall(require, "src.core.Game")
+  if ok1 and Game and Game.stack then return Game end
+  return game
+end
+
+local function pushBuildScreen(game)
+  game = resolveGame(game)
+  if not (game and game.stack) then return false end
+  local okScreen, StadiumScreen = pcall(V.require, "StadiumScreen")
+  if not (okScreen and type(StadiumScreen) == "table"
+      and type(StadiumScreen.new) == "function") then return false end
+  local ok = pcall(function()
+    game.stack:push(StadiumScreen.new(game, true))
+  end)
+  return ok
+end
+
+local function failStadium1Android(why)
+  safeRemove(PENDING_FLAG)
+  safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
+  setStatus("S1 IMPORT ERROR")
+  return true, why
+end
+
+local function failAndroid(game, why)
+  local okInstall, install = pcall(V.require, "StadiumInstall")
+  if okInstall and type(install) == "table" and type(install.status) == "table" then
+    install.status.state = "failed"
+    install.status.error = tostring(why or "could not import Stadium ROM")
   end
+  safeRemove(PENDING_FLAG)
+  safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
+  setStatus("IMPORT ERROR")
+  pushBuildScreen(game)
+  return true, why
 end
 
 local function consumeAndroidPick(game)
-  if not (love and love.filesystem and love.filesystem.getInfo
-      and love.filesystem.read and love.filesystem.write) then
+  local f = Compat.fs()
+  if not (f and type(f.getInfo) == "function" and type(f.read) == "function") then
     return false
   end
-  if not love.filesystem.getInfo(PENDING_FLAG, "file") then return false end
-  if not love.filesystem.getInfo(PICKED_ROM, "file") then return false end
+  local okPending, pending = pcall(f.getInfo, PENDING_FLAG, "file")
+  if not (okPending and pending) then return false end
 
-  local data, err = love.filesystem.read(PICKED_ROM)
+  local source = pickedPath()
+  if not source then return false end
+
+  -- Do not consume the only copy until the game stack exists. Android may
+  -- recreate the process while the system document picker is open; leaving
+  -- the file in place lets game.ready finish the import safely afterwards.
+  game = resolveGame(game)
+  if not (game and game.stack) then return false end
+
+  local okRead, data, err = pcall(f.read, source)
+  if not okRead then
+    return failAndroid(game, data or "could not read selected file")
+  end
   if type(data) ~= "string" then
+    return failAndroid(game, err or "could not read selected file")
+  end
+
+  -- Reject obvious wrong picks here. Both private importers perform full
+  -- normalization/validation again, including .v64 and .n64 byte order.
+  local format = n64Format(data)
+  if not format then
+    return failAndroid(game, "selected file is not an N64 ROM image")
+  end
+
+  -- Pokemon Stadium (USA) v1.0 has a unique header CRC pair. Detect it before
+  -- handing the file to StadiumInstall, because this Gen-2 build's ordinary
+  -- importer expects Stadium 2. StadiumBattleFX performs canonical MD5
+  -- validation before any speech/effect offsets are trusted.
+  if looksLikeStadium1US(data, format) and type(V.importStadium1) == "function" then
+    local okS1, startedS1, s1Err = pcall(V.importStadium1, data, source)
+    if not okS1 then return failStadium1Android(startedS1) end
+    if not startedS1 then return failStadium1Android(s1Err or "Stadium 1 ROM was rejected") end
+
+    safeRemove(source)
     safeRemove(PENDING_FLAG)
     safeRemove(PICKED_ROM)
-    setStatus("READ ERROR")
-    return true, err
+    safeRemove(PICKED_STADIUM)
+    setStatus("S1 VOICE IMPORTING")
+    -- StadiumBattleFX advances its ROM/voice jobs from input.step, so unlike
+    -- StadiumInstall it needs no model-build screen to stay alive.
+    return true
   end
 
-  local ext = n64Format(data)
-  if not ext then
-    safeRemove(PENDING_FLAG)
-    safeRemove(PICKED_ROM)
-    setStatus("NOT N64")
-    return true, "selected file is not an N64 ROM image"
+  local okInstall, install = pcall(V.require, "StadiumInstall")
+  if not (okInstall and type(install) == "table"
+      and type(install.beginFrom) == "function") then
+    return failAndroid(game, "voxel host has no Stadium importer")
   end
 
-  if love.filesystem.createDirectory then
-    local ok = love.filesystem.createDirectory(STAGE_DIR)
-    if ok == false then
-      safeRemove(PENDING_FLAG)
-      setStatus("WRITE ERROR")
-      return true, "could not create " .. STAGE_DIR
-    end
+  -- Stadium 2 path: unchanged from v0.3.22. Feed the picked bytes straight to
+  -- the voxel host and avoid persisting a second 32 MiB ROM copy.
+  local okBegin, started, beginErr = pcall(install.beginFrom, data, source)
+  if not okBegin then
+    return failAndroid(game, started)
+  end
+  if not started then
+    return failAndroid(game, beginErr or "Stadium ROM was rejected")
   end
 
-  -- Dramatic Shape's Android helper specifically scans baseroms/baserom.z64.
-  -- Normalize .v64/.n64 byte orders so every Android picker selection lands at
-  -- that exact canonical path without asking the player to rename/copy it.
-  local normalized = normalizeToZ64(data, ext)
-  if type(normalized) ~= "string" then
-    safeRemove(PENDING_FLAG)
-    safeRemove(PICKED_ROM)
-    setStatus("CONVERT ERROR")
-    return true, "could not normalize selected N64 ROM"
-  end
-
-  safeRemove(STAGE_PATH)
-  local okWrite, writeErr = love.filesystem.write(STAGE_PATH, normalized)
-  if okWrite == false or okWrite == nil then
-    safeRemove(PENDING_FLAG)
-    setStatus("WRITE ERROR")
-    return true, writeErr
-  end
-
-  -- The SAF copy is temporary. The original ROM stays wherever the user picked
-  -- it (Downloads, SD card, Drive, etc.). Only the importer-facing staging copy
-  -- is kept in the game's private save area.
-  safeRemove(PICKED_ROM)
+  safeRemove(source)
   safeRemove(PENDING_FLAG)
-  pcall(love.filesystem.write, "stadium_overworld_rom_path.txt", STAGE_PATH)
-  -- Dramatic Shape's own StadiumInstall starts when the overworld boots.
-  -- Do not poke its legacy picker state here; on Android the clean path is:
-  -- choose -> restart/boot -> StadiumInstall imports -> READY marker.
-  setStatus("RESTART")
-  return true, STAGE_PATH
+  safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
+  setStatus("S2 IMPORTING")
+
+  if not pushBuildScreen(game) then
+    -- Keep a marker so game.ready / the manager update can attach the screen
+    -- that drives StadiumInstall.step(). The build itself remains alive.
+    if type(f.write) == "function" then pcall(f.write, PENDING_FLAG, "build-screen\n") end
+  end
+  return true
 end
 
 function M.poll(game)
+  -- The custom battle-background picker reuses the engine's generic mobile
+  -- document bridge, which also stages its result as picked_rom.gb. Yield
+  -- while that feature-specific marker exists so a valid PNG/JPEG/BMP can
+  -- never be deleted or fed to StadiumInstall as an N64 ROM.
+  local f = Compat.fs()
+  if f and type(f.getInfo) == "function" then
+    local okBg, pendingBg = pcall(f.getInfo, BATTLE_BACKGROUND_PENDING_FLAG, "file")
+    if okBg and pendingBg then return false end
+    local okPlayer, pendingPlayer = pcall(f.getInfo, CUSTOM_PLAYER_PENDING_FLAG, "file")
+    if okPlayer and pendingPlayer then return false end
+  end
+
+  -- Consume a fresh Android SAF result BEFORE cleanupStagingIfReady(). An
+  -- already-ready Stadium 2 cache must never delete a newly selected Stadium 1
+  -- file as stale picker debris.
+  local consumed = consumeAndroidPick(game)
+  if consumed then return true end
   if cleanupStagingIfReady() then return true end
 
-  -- Consume OUR Android SAF result before any Dramatic Shape legacy picker.
-  -- On Android we deliberately do not call StadiumRomPick.poll(): the ROM
-  -- staging file is enough for StadiumInstall on the next overworld boot and
-  -- avoids legacy picker/import state interfering with the voxel pipeline.
-  local consumed = consumeAndroidPick(game)
-  local osName = love and love.system and love.system.getOS and love.system.getOS() or nil
-  if osName ~= "Android" and not consumed then notifyDramaticShape(game) end
+  local osName = Compat.osName()
+  if osName ~= "Android" and osName ~= "iOS" and not consumed then
+    notifyDramaticShape(game)
+  end
   return consumed and true or false
 end
 
@@ -235,28 +335,35 @@ local function invokeRow(row, game)
 end
 
 local function startAndroidPicker()
-  if not (love and love.system and type(love.system.pickFile) == "function"
-      and love.filesystem and type(love.filesystem.write) == "function") then
+  local f = Compat.fs()
+  if not (f and type(f.write) == "function") then
     setStatus("NO PICKER")
     return false
   end
+  if type(f.getInfo) == "function" then
+    local okBg, pendingBg = pcall(f.getInfo, BATTLE_BACKGROUND_PENDING_FLAG, "file")
+    local okPlayer, pendingPlayer = pcall(f.getInfo, CUSTOM_PLAYER_PENDING_FLAG, "file")
+    if (okBg and pendingBg) or (okPlayer and pendingPlayer) then
+      setStatus("PICKER BUSY")
+      return false
+    end
+  end
 
-  -- Mark ownership before opening Android's external Files/Documents activity.
-  -- If Android kills and recreates the app while that activity is open, the
-  -- flag survives and the next mod load can still consume picked_rom.gb.
-  pcall(love.filesystem.write, PENDING_FLAG, "stadium\n")
+  -- Own the generic mobile ROM pick before opening the engine bridge. Current
+  -- Gen1Recomp sandboxes hide love.system / love.filesystem from mod code, so
+  -- EngineCompat asks the engine-owned RomImporter to open its native picker.
+  -- The bridge returns the selection as picked_rom.gb; our poller validates it
+  -- as N64 data and feeds the bytes directly to StadiumInstall.
+  pcall(f.write, PENDING_FLAG, "stadium\n")
   safeRemove(PICKED_ROM)
+  safeRemove(PICKED_STADIUM)
   setStatus("PICK...")
 
-  -- Gen1Recomp currently recognizes rom/mod/sav kinds.  "rom" opens the
-  -- general Android document picker and copies the chosen file to
-  -- picked_rom.gb.  The original file may be .z64/.v64/.n64; our validator
-  -- above identifies its actual byte order after the picker returns.
-  local ok, launched = pcall(love.system.pickFile, "rom")
+  local ok, launched, why = pcall(Compat.openMobileRomPicker)
   if not ok or not launched then
     safeRemove(PENDING_FLAG)
     setStatus("NO PICKER")
-    return false
+    return false, ok and why or launched
   end
   return true
 end
@@ -264,12 +371,12 @@ end
 function M.choose(game)
   -- IMPORTANT: on Android, bypass Dramatic Shape's legacy row completely.
   -- Its action opens the in-game "PUT STADIUM US 1.0 HERE" instruction screen
-  -- seen in older builds. Gen1Recomp's love.system.pickFile instead launches
+  -- seen in older builds. the recomp engine's love.system.pickFile instead launches
   -- Android's real Storage Access Framework / Files app.
-  local osName = love and love.system and love.system.getOS and love.system.getOS() or nil
-  if osName == "Android" then
+  local osName = Compat.osName()
+  if osName == "Android" or osName == "iOS" then
     if startAndroidPicker() then return true end
-    setStatus("NO ANDROID PICKER")
+    setStatus("NO MOBILE PICKER")
     return false
   end
 
@@ -342,14 +449,14 @@ local function makeRow(source)
   end
 
   out.id = (type(source) == "table" and source.id) or "stadium_overworld:rom_file"
-  out.label = text("STADIUM ROM FILE")
+  out.label = text(romLabel())
   out.step = nil
 
   out.value = function(game)
-    M.poll(game)
+    -- A status probe must never be able to crash an options/menu render.
+    pcall(M.poll, game)
     if M._status then return text(M._status) end
-    if stagedPath() then return text("RESTART") end
-    local upstream = valueFromSource(source, game)
+      local upstream = valueFromSource(source, game)
     if upstream ~= nil then return upstream end
     return text("CHOOSE")
   end
@@ -365,7 +472,7 @@ end
 
 function M.ensureRow(rows, game)
   if type(rows) ~= "table" then return rows end
-  M.poll(game)
+  pcall(M.poll, game)
   local source = rawRow()
   local row = makeRow(source)
   local at = stadiumRowIndex(rows, source and source.id or nil)
@@ -392,7 +499,7 @@ function M.installOptionsHook(mod)
     installedAny = ok or installedAny
   end
 
-  -- Compatibility fallback: some released Gen1Recomp builds predate (or do
+  -- Compatibility fallback: some released recomp builds predate (or do
   -- not dispatch) ui.options.rows.  Patch OptionsMenu.new itself as well.  On
   -- current builds this only sees that the hook already inserted our row and
   -- replaces it in-place, so there is never a duplicate.
@@ -417,16 +524,26 @@ end
 
 -- Value shown beside STADIUM ROM FILE in the per-mod options screen.
 function M.value(game)
-  M.poll(game)
+  -- This function is evaluated while the Mod Manager draws the row. Keep
+  -- every optional picker/importer failure contained to the mod.
+  pcall(M.poll, game)
+  local voice = stadium1VoiceStatus()
+  if voice and voice.state == "building" then
+    local done, total = tonumber(voice.done) or 0, tonumber(voice.total) or 823
+    return text(("S1 VOICE %03d/%03d"):format(done, total))
+  end
+  if voice and voice.state == "failed" then return text("S1 VOICE ERROR") end
+  if voice and voice.ready and voice.source == "rom" then
+    return text(stadiumReady() and "S1 + S2 READY" or "S1 VOICE READY")
+  end
   if M._status then return text(M._status) end
-  if stagedPath() then return text("RESTART") end
   local source = rawRow()
   local upstream = valueFromSource(source, game)
   if upstream ~= nil then return upstream end
   return text("CHOOSE")
 end
 
--- Gen1Recomp exposes per-mod options from an options_schema, but its published
+-- The recomp engine exposes per-mod options from an options_schema, but its published
 -- row types do not include a generic button/action.  Patch only the generated
 -- row belonging to this mod so A/Confirm opens the ROM picker instead of merely
 -- cycling a dummy choice.  No other mod's options are changed.
@@ -439,7 +556,7 @@ function M.installModManagerOptions(mod)
     return false
   end
 
-  local modId = (mod and mod.id) or "STADIUM_OVERWORLD_MODELS"
+  local modId = (mod and mod.id) or "STADIUM2_OVERWORLD_MODELS"
   local originalBuild = ManagerState.buildOptionRows
 
   -- Avoid stacking wrappers if a loader hot-reloads this mod.
@@ -452,9 +569,11 @@ function M.installModManagerOptions(mod)
 
       for _, row in ipairs(rows) do
         if type(row) == "table" and row.id == "stadiumRomFile" then
-          row.label = text("STADIUM ROM FILE")
+          row.label = text(romLabel())
           row.value = function()
-            return M.value(self.game)
+            local ok, value = pcall(M.value, self.game)
+            if ok and value ~= nil then return value end
+            return text("CHOOSE")
           end
           row.activate = function()
             local ok = M.choose(self.game)
@@ -472,6 +591,20 @@ function M.installModManagerOptions(mod)
       return rows
     end
     ManagerState._stadiumOverworldRomOptionsPatched = true
+  end
+
+  -- Keep polling while the Mod Manager is active. On Android the native
+  -- document picker returns asynchronously; this consumes the result on the
+  -- first resumed frame instead of relying on the option row being redrawn or
+  -- requiring another button press.
+  if type(ManagerState.update) == "function"
+      and not ManagerState._stadiumOverworldRomPollPatched then
+    local originalUpdate = ManagerState.update
+    ManagerState.update = function(self, dt, ...)
+      pcall(M.poll, self and self.game)
+      return originalUpdate(self, dt, ...)
+    end
+    ManagerState._stadiumOverworldRomPollPatched = true
   end
 
   M._managerInstalled = true

@@ -72,6 +72,11 @@ if not (okFP and type(FirstPerson) == "table") then
 end
 local okDN, DayNight = pcall(V.require, "DayNight")
 
+-- Try to load the Tilt module to access sky image with full options support
+local okTilt, Tilt = pcall(function()
+  return require("src.render.Tilt")
+end)
+
 local Sky = {}
 
 -- ------- clouds
@@ -1024,9 +1029,8 @@ end
 -- If the companion mod has been deleted, its config bridge is gone and
 -- this module is an orphan: draw nothing. The ceiling module does the
 -- actual clean-up; this just keeps quiet in the meantime.
--- Modified: Allow sky rendering even without config bridge for basic functionality
 local function abandoned()
-  return false
+  return rawget(_G, "__ds_ceiling_config") == nil
 end
 
 function Sky.draw(state)

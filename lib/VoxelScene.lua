@@ -378,16 +378,29 @@ end
 -- continuously rather than as one of four directions, and measuring
 -- against the compass point instead flicks the card to a profile for a
 -- frame or two when the camera is spun fast (see playerFacing).
+--
+-- The facing a pose SHOWS this camera. The flat frames are "how this pose
+-- looks from the south", which is where the orbit always stands; a
+-- first-person eye stands anywhere, so deep enough into the blend the
+-- facing is remapped to how the pose looks from THERE -- walk behind an
+-- NPC and their card wears the back sprite. Used by the camera draw and
+-- the sun pass BOTH: the card the sun stored and the transform a lit card
+-- reads its own shadowing with must describe the same frame, or the
+-- mirror-flip half of the pair asks the map about texels the sun filed
+-- under the other cheek.
+-- The player's own card asks a different function for the same answer:
+-- their body's bearing is what the camera is derived FROM, so it is known
+-- continuously rather than as one of four directions, and measuring
+-- against the compass point instead flicks the card to a profile for a
+-- frame or two when the camera is spun fast (see playerFacing).
 local function viewFacing(p)
-  local facing = p.facing or "down"
   if FirstPerson.cardBlend() > 0.5 then
     if p.isPlayer then
-      facing = FirstPerson.playerFacing(facing, p.px + 8, p.py + 8) or facing
-    else
-      facing = FirstPerson.apparentFacing(facing, p.px + 8, p.py + 8) or facing
+      return FirstPerson.playerFacing(p.facing, p.px + 8, p.py + 8)
     end
+    return FirstPerson.apparentFacing(p.facing, p.px + 8, p.py + 8)
   end
-  return facing
+  return p.facing
 end
 
 -- FALLBACK ONLY (see castShadows below). Draw one entity's drop shadow as
@@ -449,25 +462,14 @@ local function billboardMatrix(px, py, y, mirror, yaw, spriteWidth, spriteHeight
   local halfH = h / 2
   local b = FirstPerson.cardBlend()
   local m = Mat4.translate(px + halfW, y, py + halfH)
-
-  -- In first/third person mode, rotate the sprite with the camera's yaw
-  -- instead of always facing the camera (billboard behavior)
+  
   if b > 0 then
-    -- Use the camera's yaw to rotate the sprite
-    local okFP, FirstPerson = pcall(V.require, "FirstPerson")
-    if okFP and FirstPerson then
-      m = Mat4.mul(m, Mat4.rotateY(FirstPerson.yaw * b))
-    end
-  else
-    -- Swing the card around the world +Y axis to face the camera's yaw
-    -- (ported from ADVANCED_SHAPE), THEN tip it back by the lean -- composed
-    -- in this order so the lean happens in the card's own local frame first.
-    if yaw and yaw ~= 0 then
-      m = Mat4.mul(m, Mat4.rotateY(yaw))
-    end
+    m = Mat4.mul(m, Mat4.rotateY(FirstPerson.cardYaw(px + halfW, py + halfH) * b))
+  elseif yaw and yaw ~= 0 then
+    m = Mat4.mul(m, Mat4.rotateY(yaw))
   end
   m = Mat4.mul(m, Mat4.rotateX((leanAngle() - math.pi / 2) * (1 - b)))
-
+  
   if mirror then m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) end
   return Mat4.mul(m, Mat4.translate(-halfW, 0, 0))
 end
@@ -515,7 +517,8 @@ end
 
 -- Every figure on `map`, drawn with `draw(mesh, model, caster)`.
 local function eachFigure(map, offX, offZ, draw)
-  for _, f in ipairs(ChunkMesher.figures(map) or {}) do
+  local figs = ChunkMesher.figures(map) or {}
+  for _, f in ipairs(figs) do
     draw(f.mesh, figureMatrix(f, offX, offZ), figureCaster(f, offX, offZ))
   end
 end
@@ -536,15 +539,7 @@ local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
     tex = TerrainAtlas.forSprite(def.image, colors) or tex
   end
   local y = gh + (lift or 0)
-    -- In first/third person, use the camera-relative facing
-  local okFP, FirstPerson = pcall(V.require, "FirstPerson")
-  if okFP and FirstPerson and FirstPerson.cardBlend() > 0.5 then
-    if isPlayer then
-      facing = FirstPerson.playerFacing(facing, px + 8, py + 8) or facing
-    else
-      facing = FirstPerson.apparentFacing(facing, px + 8, py + 8) or facing
-    end
-  end
+
   -- pick the very frame the 2D path would draw (same tables). The card
   -- always faces SOUTH -- the direction the 2D game implies -- and only
   -- LEANS BACK, pivoting at its feet, by exactly the camera's pitch, so
@@ -1099,12 +1094,14 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   -- Every thin card from here down is SNUGGED toward the sun along its own
   -- ray (ShadowMap.snug) so its shadow keeps contact with its feet instead
   -- of starting a bias-width away.
-  ShadowMap.draw(ChunkMesher.flowers(state.map), atlasFor(state.map),
-                 ShadowMap.snug(nil))
-  for i, nb in ipairs(casters) do
-    if neighborLimit == nil or i <= neighborLimit then
-      ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                     ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+  if ChunkMesher.flowers then
+    ShadowMap.draw(ChunkMesher.flowers(state.map), atlasFor(state.map),
+                   ShadowMap.snug(nil))
+    for i, nb in ipairs(casters) do
+      if neighborLimit == nil or i <= neighborLimit then
+        ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
+                       ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
+      end
     end
   end
 
@@ -1659,23 +1656,25 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       Voxel3D.crush = crush
     end
 
-    Voxel3D.draw(ChunkMesher.grass(state.map), grassTex, nil, pull, nil, sway)
-    for i, nb in ipairs(state.neighbors or {}) do
-      if neighborLimit == nil or i <= neighborLimit then
-        local ntex = grassTex
-        if not Grass3D then ntex = atlasFor(nb.map) end
-        Voxel3D.draw(ChunkMesher.grass(nb.map), ntex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, sway)
+    if ChunkMesher.grass then
+      Voxel3D.draw(ChunkMesher.grass(state.map), grassTex, nil, pull, nil, sway)
+      for i, nb in ipairs(state.neighbors or {}) do
+        if neighborLimit == nil or i <= neighborLimit then
+          local ntex = grassTex
+          if not Grass3D then ntex = atlasFor(nb.map) end
+          Voxel3D.draw(ChunkMesher.grass(nb.map), ntex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, sway)
+        end
       end
     end
 
     -- decorative grass mesh (no effects)
-    local decorMesh = ChunkMesher.decor(state.map)
+    local decorMesh = ChunkMesher.decor and ChunkMesher.decor(state.map)
     if decorMesh then
       Voxel3D.draw(decorMesh, grassTex, nil, pull, nil, 0)  -- No sway for decorative grass
     end
     for i, nb in ipairs(state.neighbors or {}) do
       if neighborLimit == nil or i <= neighborLimit then
-        local nbDecor = ChunkMesher.decor(nb.map)
+        local nbDecor = ChunkMesher.decor and ChunkMesher.decor(nb.map)
         if nbDecor then
           Voxel3D.draw(nbDecor, grassTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
         end
@@ -1683,14 +1682,14 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     end
 
     -- road mesh using Grass3D with road texture at 0.05 height
-    local roadMesh = ChunkMesher.road(state.map)
+    local roadMesh = ChunkMesher.road and ChunkMesher.road(state.map)
     if roadMesh then
       local roadTex = Grass3D and Grass3D.roadTexture() or nil
       Voxel3D.draw(roadMesh, roadTex, nil, pull, nil, 0)  -- No sway for road
     end
     for i, nb in ipairs(state.neighbors or {}) do
       if neighborLimit == nil or i <= neighborLimit then
-        local nbRoad = ChunkMesher.road(nb.map)
+        local nbRoad = ChunkMesher.road and ChunkMesher.road(nb.map)
         if nbRoad then
           local roadTex = Grass3D and Grass3D.roadTexture() or nil
           Voxel3D.draw(nbRoad, roadTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
@@ -1699,14 +1698,14 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     end
 
     -- ground mesh using Grass3D with ground texture at 0.1 height
-    local groundMesh = ChunkMesher.ground(state.map)
+    local groundMesh = ChunkMesher.ground and ChunkMesher.ground(state.map)
     if groundMesh then
       local groundTex = Grass3D and Grass3D.groundTexture() or nil
       Voxel3D.draw(groundMesh, groundTex, nil, pull, nil, 0)  -- No sway for ground
     end
     for i, nb in ipairs(state.neighbors or {}) do
       if neighborLimit == nil or i <= neighborLimit then
-        local nbGround = ChunkMesher.ground(nb.map)
+        local nbGround = ChunkMesher.ground and ChunkMesher.ground(nb.map)
         if nbGround then
           local groundTex = Grass3D and Grass3D.groundTexture() or nil
           Voxel3D.draw(nbGround, groundTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
@@ -1742,11 +1741,13 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     -- in a meadow the eye settles on
     local fsway = sway * Wind.FLOWER_SHARE
     
-    Voxel3D.draw(ChunkMesher.flowers(state.map), atlasFor(state.map), nil, fpull, ShadowMap.snug(nil), fsway)
-    for i, nb in ipairs(state.neighbors or {}) do
-      if neighborLimit == nil or i <= neighborLimit then
-        if ViewBox.showsMap(nb) then
-          Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), fpull, ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)), fsway)
+    if ChunkMesher and ChunkMesher.flowers then
+      Voxel3D.draw(ChunkMesher.flowers(state.map), atlasFor(state.map), nil, fpull, ShadowMap.snug(nil), fsway)
+      for i, nb in ipairs(state.neighbors or {}) do
+        if neighborLimit == nil or i <= neighborLimit then
+          if ViewBox.showsMap(nb) then
+            Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), fpull, ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)), fsway)
+          end
         end
       end
     end

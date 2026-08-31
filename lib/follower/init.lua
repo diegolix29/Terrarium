@@ -35,7 +35,6 @@ local function supportedVersion()
   local ok, v = pcall(GV.get)
   if not ok or v == nil then return true end
   return v == "red" or v == "blue" or v == "yellow"
-      or v == "gold" or v == "silver" or v == "crystal"
 end
 
 function Follower.new(mod, opts)

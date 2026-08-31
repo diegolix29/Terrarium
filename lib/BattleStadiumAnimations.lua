@@ -20,6 +20,32 @@
 local V = ...
 local M = {}
 
+local function animationsEnabled()
+  local opts = V and V.mod and V.mod.options
+  if not (opts and type(opts.get) == "function") then return true end
+  local ok, value = pcall(opts.get, opts, "stadiumBattleAnimations")
+  if not ok or value == nil then return true end
+  return not (value == false or value == 0 or value == "0" or value == "false" or value == "off")
+end
+
+local function stadiumFxPort()
+  if V and type(V.StadiumBattleFXPort) == "table" then return V.StadiumBattleFXPort end
+  if V and type(V.require) == "function" then
+    local ok, value = pcall(V.require, "StadiumBattleFXPort")
+    if ok and type(value) == "table" then V.StadiumBattleFXPort=value; return value end
+  end
+end
+
+local function hitReactionsEnabled()
+  local Port=stadiumFxPort()
+  return not (Port and Port.hitReactionsEnabled and not Port.hitReactionsEnabled())
+end
+
+local function faintAnimationsEnabled()
+  local Port=stadiumFxPort()
+  return not (Port and Port.faintAnimationsEnabled and not Port.faintAnimationsEnabled())
+end
+
 local function safeLog(level, fmt, ...)
   local log = V and V.mod and V.mod.log
   local fn = log and log[level]
@@ -71,6 +97,44 @@ local function moveIndex(battle, moveInst)
   if type(moveInst) == "table" then
     local n = tonumber(moveInst.index or moveInst.id)
     if n and n >= 1 then return n end
+  end
+  return nil
+end
+
+local function resolveMoveIndex(moveId, def)
+  local index = tonumber(moveId)
+  if index and index >= 1 then return index end
+  if type(def) == "table" then
+    index = tonumber(def.index or def.moveIndex or def.number)
+    if not index then index = tonumber(def.id) end
+    if index and index >= 1 then return index end
+  end
+  return nil
+end
+
+local function goldMoveDef(screen, moveId)
+  local battle = screen and screen.battle
+  if battle and type(battle.moveDef) == "function" then
+    local okDef, def = pcall(battle.moveDef, battle, moveId)
+    if okDef and type(def) == "table" then return def end
+  end
+  local data = (screen and screen.game and screen.game.data)
+    or (battle and battle.data) or {}
+  local moves = data and data.moves
+  if type(moves) == "table" then
+    local direct = moves[moveId]
+    if type(direct) == "table" then return direct end
+    local want = tonumber(moveId)
+    for _, def in pairs(moves) do
+      if type(def) == "table" then
+        local index = tonumber(def.index or def.moveIndex or def.number)
+        if want and index == want then return def end
+        if type(moveId) == "string" then
+          local id = tostring(def.id or def.name or "")
+          if id == moveId then return def end
+        end
+      end
+    end
   end
   return nil
 end
@@ -135,25 +199,6 @@ function M.install()
   end
   if Stadium._stadiumOverworldStage1Installed then return true end
 
-  -- IMPORTANT: newer Dramatic Shape builds already install the complete
-  -- Stadium battle state machine themselves (per-move attack animation,
-  -- entrance/grow and delayed faint).  Detect that BEFORE looking inside the
-  -- Stadium session or wrapping BattleState. v0.1.18 did this check too late,
-  -- so on those builds it double-wrapped startGrowIn/performMove and could
-  -- crash exactly when the player's Pokemon was sent out.
-  local okB, BattleState = pcall(require, "src.battle.BattleState")
-  if not (okB and type(BattleState) == "table") then
-    return false, "BattleState unavailable"
-  end
-  if BattleState.dramaticShapeStadiumHook then
-    Stadium._stadiumOverworldStage1Installed = true
-    Stadium._stadiumOverworldStage1Native = true
-    safeLog("info", "Pokemon Stadium Stage 1: using Dramatic Shape native battle animation hooks")
-    return true
-  end
-
-  -- Older builds may have Stadium models but no battle animation hooks. Only
-  -- those builds receive the compatibility wrappers below.
   local getSession = installSessionGetter(Stadium)
   if not getSession then
     return false, "could not access live Dramatic Shape Stadium session"
@@ -161,18 +206,19 @@ function M.install()
 
   local pendingFaint = setmetatable({}, { __mode = "k" })
   local lastHP = setmetatable({}, { __mode = "k" })
+  local goldLastHP = setmetatable({}, { __mode = "k" })
 
-  -- Whole-body damage recoil.  Stadium's extracted model set does not expose a
-  -- universal victim/flinch clip, so this is deliberately a transform motion,
-  -- not a fake mapping to the generic ATTACK slot.
+  -- Whole-body damage recoil. Stadium's extracted model set does not expose a
+  -- universal victim/flinch clip, so this remains a small transform reaction
+  -- layered on top of the real skeletal pose rather than pretending an attack
+  -- clip is a damage animation.
   if type(StadiumMon.matrix) == "function" and not StadiumMon._stage1RecoilMatrix then
     local innerMatrix = StadiumMon.matrix
     StadiumMon.matrix = function(self, x, groundY, z, faceX, faceZ, ...)
-      local recoil = tonumber(self._stage1Recoil) or 0
+      local recoil = hitReactionsEnabled() and (tonumber(self._stage1Recoil) or 0) or 0
       if recoil > 0 and faceX and faceZ then
         local len = math.sqrt(faceX * faceX + faceZ * faceZ)
         if len > 0.0001 then
-          -- Move away from the opponent by at most ~1.2 world pixels.
           local push = math.sin(math.min(1, recoil) * math.pi) * 1.20
           x = x - (faceX / len) * push
           z = z - (faceZ / len) * push
@@ -183,90 +229,198 @@ function M.install()
     StadiumMon._stage1RecoilMatrix = true
   end
 
-  -- Let the installed Dramatic Shape performMove wrapper run first.  If it
-  -- already selected an attack animation, mon.state will be "attack" and this
-  -- becomes a no-op.  Otherwise we supply the exact move animation ourselves.
-  if type(BattleState.performMove) == "function" and not BattleState._stadiumStage1Move then
-    local innerMove = BattleState.performMove
-    BattleState.performMove = function(self, user, target, moveInst, isCalled)
-      local out = { innerMove(self, user, target, moveInst, isCalled) }
-      local session = getSession()
-      local side = sideOf(self, user)
-      local mon = session and side and session[side]
-      if mon and mon.rig and mon.state ~= "attack" and mon.state ~= "faint" then
-        requestAttack(mon, moveIndex(self, moveInst))
+  --------------------------------------------------------------------------
+  -- GOLD / GEN 2
+  --------------------------------------------------------------------------
+  -- Gold does not call the legacy src.battle.BattleState.performMove seam.
+  -- Its real presentation seam is src.ui.gen2.BattleState:animForMove(), the
+  -- same call that starts the cart-authentic AnimRunner.  Drive the Stadium
+  -- actor from that exact event so wild AND trainer battles animate.
+  local goldMoveToken = 0
+  local okGold, GoldBattleState = pcall(require, "src.ui.gen2.BattleState")
+  if okGold and type(GoldBattleState) == "table"
+      and type(GoldBattleState.animForMove) == "function"
+      and not GoldBattleState._stadiumStage1GoldMove then
+    local innerGoldMove = GoldBattleState.animForMove
+    GoldBattleState.animForMove = function(self, moveId, side, ...)
+      local started = innerGoldMove(self, moveId, side, ...)
+      if animationsEnabled() and moveId ~= nil and (side == "player" or side == "enemy") then
+        local def = goldMoveDef(self, moveId)
+        local moveIndex = resolveMoveIndex(moveId, def)
+
+        goldMoveToken = goldMoveToken + 1
+        self._stadiumSkeletalMove = moveId
+        self._stadiumSkeletalIndex = moveIndex
+        self._stadiumSkeletalDef = def
+        local modelSide = (side == "player" and self._stadiumDuoPartnerEvent)
+          and "player2" or side
+        self._stadiumSkeletalSide = side
+        self._stadiumSkeletalModelSide = modelSide
+        self._stadiumSkeletalToken = goldMoveToken
+        self._stadiumSkeletalAppliedToken = nil
+
+        local session = getSession()
+        local mon = session and session[modelSide] or nil
+        if mon and mon.rig and mon.state ~= "faint" then
+          local played = false
+          if moveIndex and type(mon.attackGen2) == "function" then
+            local okPlay, out = pcall(mon.attackGen2, mon, moveIndex, def)
+            played = okPlay and out and true or false
+          end
+          -- The exact move index is preferred, but a modded/unknown move still
+          -- gets a real skeletal attack instead of silently doing nothing.
+          if not played then played = requestAttack(mon, moveIndex) end
+          if played then self._stadiumSkeletalAppliedToken = goldMoveToken end
+        end
       end
-      return table.unpack(out)
+      return started
     end
-    BattleState._stadiumStage1Move = true
+    GoldBattleState._stadiumStage1GoldMove = true
   end
 
-  -- Entrance/send-out is intentionally NOT wrapped on legacy builds.
-  -- The Stadium model may not exist yet when BattleState.startGrowIn fires,
-  -- and forcing a request at that seam is what caused the v0.1.18 summon
-  -- crash. Modern Dramatic Shape handles entrance natively; legacy builds
-  -- safely keep their normal send-out rather than risking the battle.
-
-  -- Record the faint, but do not collapse until the displayed HP bar has
-  -- reached zero. This matches the visual moment the battle says the Pokemon
-  -- is actually down instead of falling while its bar is still draining.
-  if type(BattleState.onFaint) == "function" and not BattleState._stadiumStage1Faint then
-    local innerFaint = BattleState.onFaint
-    BattleState.onFaint = function(self, battler, ...)
+  -- Gold applies battle HP to its active Mon directly. Watch that value on the
+  -- same update that skins the models so a successful hit produces a visible
+  -- target recoil in both wild and trainer fights. The pending move is keyed by
+  -- our own token rather than by AnimRunner identity: Gold can replace the
+  -- native runner before the 3D world update without cancelling the Stadium
+  -- performance.
+  if type(Stadium.updateGen2) == "function" and not Stadium._stage1GoldUpdateWrapped then
+    local innerUpdateGen2 = Stadium.updateGen2
+    Stadium.updateGen2 = function(dt, screen, groundY, ...)
+      local out = { innerUpdateGen2(dt, screen, groundY, ...) }
       local session = getSession()
-      local side = sideOf(self, battler)
-      if session and side then pendingFaint[self] = pendingFaint[self] or {}; pendingFaint[self][side] = true end
-      return innerFaint(self, battler, ...)
-    end
-    BattleState._stadiumStage1Faint = true
-  end
+      local battle = screen and screen.battle
+      if session and battle and animationsEnabled() then
+        local token = screen._stadiumSkeletalToken
+        local moveSide = screen._stadiumSkeletalSide
+        local modelSide = screen._stadiumSkeletalModelSide or moveSide
+        if token ~= nil and (moveSide == "player" or moveSide == "enemy")
+            and screen._stadiumSkeletalAppliedToken ~= token then
+          local mon = session[modelSide]
+          if mon and mon.rig and mon.state ~= "faint" then
+            local moveIndex = tonumber(screen._stadiumSkeletalIndex)
+            local def = screen._stadiumSkeletalDef
+              or goldMoveDef(screen, screen._stadiumSkeletalMove)
+            if not moveIndex then
+              moveIndex = resolveMoveIndex(screen._stadiumSkeletalMove, def)
+              screen._stadiumSkeletalIndex = moveIndex
+            end
+            local played = false
+            if moveIndex and type(mon.attackGen2) == "function" then
+              local okPlay, outPlay = pcall(mon.attackGen2, mon, moveIndex, def)
+              played = okPlay and outPlay and true or false
+            end
+            if not played then played = requestAttack(mon, moveIndex) end
+            if played then screen._stadiumSkeletalAppliedToken = token end
+          end
+        end
 
-  -- Stadium.update runs every staged battle frame.  It is a convenient,
-  -- renderer-independent place to handle damage recoil and delayed fainting.
-  if type(Stadium.update) == "function" and not Stadium._stage1UpdateWrapped then
-    local innerUpdate = Stadium.update
-    Stadium.update = function(dt, battle, groundY, ...)
-      local out = { innerUpdate(dt, battle, groundY, ...) }
-      local session = getSession()
-      if session and battle then
         for _, side in ipairs({ "player", "enemy" }) do
-          local battler = side == "player" and battle.player or battle.enemy
+          local battler = battle[side]
           local mon = session[side]
-          local hp = battlerHP(battler)
-          local prev = lastHP[battler]
+          local hp = battler and tonumber(battler.hp) or nil
+          local prev = battler and goldLastHP[battler] or nil
           if hp ~= nil then
-            if prev ~= nil and hp < prev and hp > 0 and mon and mon.rig then
+            if prev ~= nil and hp < prev and hp > 0 and mon and mon.rig and hitReactionsEnabled() then
               mon._stage1Recoil = 1
             end
-            lastHP[battler] = hp
+            goldLastHP[battler] = hp
           end
-
           if mon and mon._stage1Recoil then
             local t = tonumber(mon._stage1Recoil) or 0
-            -- Normalized countdown; around 0.18 s total at any framerate.
             t = t - (tonumber(dt) or 0) / 0.18
             if t <= 0 then t = nil end
             mon._stage1Recoil = t
-          end
-
-          local due = pendingFaint[battle] and pendingFaint[battle][side]
-          if due then
-            if not battlerIsFainted(battler) then
-              pendingFaint[battle][side] = nil
-            elseif barAtZero(battler) then
-              pendingFaint[battle][side] = nil
-              if mon and mon.rig and mon.state ~= "faint" then requestState(mon, "faint") end
-            end
           end
         end
       end
       return table.unpack(out)
     end
-    Stadium._stage1UpdateWrapped = true
+    Stadium._stage1GoldUpdateWrapped = true
+  end
+
+  --------------------------------------------------------------------------
+  -- LEGACY / GEN 1 COMPATIBILITY
+  --------------------------------------------------------------------------
+  -- Newer Dramatic Shape builds already install the legacy Gen-1 Stadium state
+  -- machine. Do not double-wrap it, but importantly DO NOT return early: that
+  -- old early return was also skipping all of the Gold hooks above.
+  local okB, BattleState = pcall(require, "src.battle.BattleState")
+  if okB and type(BattleState) == "table" and not BattleState.dramaticShapeStadiumHook then
+    if type(BattleState.performMove) == "function" and not BattleState._stadiumStage1Move then
+      local innerMove = BattleState.performMove
+      BattleState.performMove = function(self, user, target, moveInst, isCalled)
+        local out = { innerMove(self, user, target, moveInst, isCalled) }
+        if not animationsEnabled() then return table.unpack(out) end
+        local session = getSession()
+        local side = sideOf(self, user)
+        local mon = session and side and session[side]
+        if mon and mon.rig and mon.state ~= "attack" and mon.state ~= "faint" then
+          requestAttack(mon, moveIndex(self, moveInst))
+        end
+        return table.unpack(out)
+      end
+      BattleState._stadiumStage1Move = true
+    end
+
+    if type(BattleState.onFaint) == "function" and not BattleState._stadiumStage1Faint then
+      local innerFaint = BattleState.onFaint
+      BattleState.onFaint = function(self, battler, ...)
+        local session = getSession()
+        local side = sideOf(self, battler)
+        if session and side then
+          pendingFaint[self] = pendingFaint[self] or {}
+          pendingFaint[self][side] = true
+        end
+        return innerFaint(self, battler, ...)
+      end
+      BattleState._stadiumStage1Faint = true
+    end
+
+    if type(Stadium.update) == "function" and not Stadium._stage1UpdateWrapped then
+      local innerUpdate = Stadium.update
+      Stadium.update = function(dt, battle, groundY, ...)
+        local out = { innerUpdate(dt, battle, groundY, ...) }
+        local session = getSession()
+        if session and battle then
+          for _, side in ipairs({ "player", "enemy" }) do
+            local battler = side == "player" and battle.player or battle.enemy
+            local mon = session[side]
+            local hp = battlerHP(battler)
+            local prev = lastHP[battler]
+            if hp ~= nil then
+              if prev ~= nil and hp < prev and hp > 0 and mon and mon.rig then
+                mon._stage1Recoil = 1
+              end
+              lastHP[battler] = hp
+            end
+            if mon and mon._stage1Recoil then
+              local t = tonumber(mon._stage1Recoil) or 0
+              t = t - (tonumber(dt) or 0) / 0.18
+              if t <= 0 then t = nil end
+              mon._stage1Recoil = t
+            end
+            local due = pendingFaint[battle] and pendingFaint[battle][side]
+            if due then
+              if not battlerIsFainted(battler) then
+                pendingFaint[battle][side] = nil
+              elseif barAtZero(battler) then
+                pendingFaint[battle][side] = nil
+                if faintAnimationsEnabled() and mon and mon.rig and mon.state ~= "faint" then requestState(mon, "faint") end
+              end
+            end
+          end
+        end
+        return table.unpack(out)
+      end
+      Stadium._stage1UpdateWrapped = true
+    end
+  elseif okB and type(BattleState) == "table" and BattleState.dramaticShapeStadiumHook then
+    Stadium._stadiumOverworldStage1Native = true
   end
 
   Stadium._stadiumOverworldStage1Installed = true
-  safeLog("info", "Pokemon Stadium Stage 1 battle animations installed")
+  safeLog("info", "Pokemon Stadium Stage 1: Gold move events now drive imported skeletal attack clips")
   return true
 end
 

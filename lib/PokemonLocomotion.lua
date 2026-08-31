@@ -1,4 +1,4 @@
--- Overworld locomotion classification and tuning for Gen 1.
+-- Overworld locomotion classification and tuning for Gen 1 + Gen 2.
 --
 -- Pokemon Stadium's battle model set does not contain a universal named
 -- "walk" clip. The overworld bridge therefore reuses each species' second
@@ -9,11 +9,11 @@
 -- v0.1.17 broadens walking beyond the earlier grounded-biped-only set.
 -- The user specifically wanted basically every NON-FLYING-TYPE Pokemon to walk,
 -- even if some of them are really just doing a simple waddle. We therefore make
--- every Gen 1 species eligible except the canonical Flying-type Pokemon, while
+-- every Gen 1/2 species eligible except the canonical Flying-type Pokemon, while
 -- still allowing per-species overrides from the config file.
 local L = {}
 
--- Gen 1 Flying-type Pokemon. These stay on the old animation behavior by
+-- Gen 1/2 Flying-type Pokemon. These stay on the old animation behavior by
 -- default because winged / aerial movement usually looks worse when forced into
 -- the generic ground-step overlay.
 local FLYING_TYPE = {
@@ -29,6 +29,20 @@ local FLYING_TYPE = {
   [142]=true,                      -- Aerodactyl
   [144]=true, [145]=true, [146]=true, -- Legendary birds
   [149]=true,                      -- Dragonite
+  -- Generation 2
+  [163]=true, [164]=true,          -- Hoothoot / Noctowl
+  [165]=true, [166]=true,          -- Ledyba / Ledian
+  [169]=true,                      -- Crobat
+  [176]=true,                      -- Togetic
+  [177]=true, [178]=true,          -- Natu / Xatu
+  [187]=true, [188]=true, [189]=true, -- Hoppip line
+  [193]=true,                      -- Yanma
+  [198]=true,                      -- Murkrow
+  [207]=true,                      -- Gligar
+  [225]=true,                      -- Delibird
+  [226]=true,                      -- Mantine
+  [227]=true,                      -- Skarmory
+  [249]=true, [250]=true,          -- Lugia / Ho-Oh
 }
 
 -- Species-specific feel adjustments. Values multiply the generic cadence and
@@ -171,7 +185,7 @@ function L.isGroundedBiped(dex, overrides)
   if type(overrides) == "table" and overrides[dex] ~= nil then
     return overrides[dex] and true or false
   end
-  return type(dex) == "number" and dex >= 1 and dex <= 151 and not FLYING_TYPE[dex]
+  return type(dex) == "number" and dex >= 1 and dex <= 251 and not FLYING_TYPE[dex]
 end
 
 function L.tuning(dex)

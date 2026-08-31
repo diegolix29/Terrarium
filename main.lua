@@ -78,6 +78,7 @@ local KEY_WILD   = "n"   -- WILD roam ladder
 local KEY_MAP    = "p"   -- minimap ON/FULL/OFF
 local KEY_HAZE   = "h"   -- V-HAZE aerial perspective
 local KEY_SKYLINE = "k"  -- HORIZON far silhouettes
+local KEY_JUMP   = "space"  -- JUMP (ledge hop / cosmetic jump)
 -- Free of engine 2-5, of upstream DRAMATIC_SHAPE's 3/5/6/7/8/9, and of every
 -- letter above. Fires one impact sheet at the player's feet and steps to the
 -- next on each press -- the only way to SEE the pack without a fight, and
@@ -86,6 +87,7 @@ local KEY_FX = "j"
 V.KEYS = {
   voxel = KEY_VOXEL, grid = KEY_GRID, tilt = KEY_TILT,
   curve = KEY_CURVE, battle = KEY_BATTLE, wild = KEY_WILD, map = KEY_MAP,
+  jump = KEY_JUMP,
 }
 
 local function chunkFor(rel)
@@ -181,6 +183,82 @@ local HiddenItems = V.require("HiddenItems")
 local ExpShare = V.require("ExpShare")
 local Comforts = V.require("Comforts")
 local MiniMap = V.require("MiniMap")
+-- ds_fp_ceiling integrated modules
+local Ceiling = V.require("Ceiling")
+local Backdrop = V.require("Backdrop")
+local SkyLayer = V.require("SkyLayer")
+local Flora = V.require("Flora")
+local ModSetting = V.require("ModSetting")
+
+-- ds_fp_ceiling additional settings
+local fpShadows = ModSetting.new("fpshadows", "CONTACT SHADOW",
+  { true, false }, { "ON", "OFF" })
+local fpRails = ModSetting.new("fprails", "RAIL AND SKIRTING",
+  { true, false }, { "ON", "OFF" })
+local fpSpill = ModSetting.new("fpspill", "DOORWAY LIGHT",
+  { true, false }, { "ON", "OFF" })
+local fpFittings = ModSetting.new("fpfittings", "CEILING LAMPS",
+  { true, false }, { "ON", "OFF" })
+local fpBacks = ModSetting.new("fpbacks", "BUILDING BACKS",
+  { true, false }, { "ON", "OFF" })
+local fpRock = ModSetting.new("fprock", "CAVE ROCK",
+  { true, false }, { "ON", "OFF" })
+local fpPools = ModSetting.new("fppools", "CAVE POOLS",
+  { true, false }, { "ON", "OFF" })
+local fpSconces = ModSetting.new("fpsconces", "CAVE TORCHES",
+  { true, false }, { "ON", "OFF" })
+local fpBats = ModSetting.new("fpbats", "BATS",
+  { true, false }, { "ON", "OFF" })
+local fpDark = ModSetting.new("fpdark", "CAVE DARKNESS",
+  { true, false }, { "ON", "OFF" })
+local fpThird = ModSetting.new("fpthird", "3RD CEILING",
+  { "NONE", "CUTAWAY", "FULL" }, { "NONE", "CUTAWAY", "FULL" })
+local fpBackdrop = ModSetting.new("fpbackdrop", "HORIZON",
+  { true, false }, { "ON", "OFF" })
+local fpHorizonart = ModSetting.new("fphorizonart", "HORIZON ART",
+  { "KANTO", "FUJI", "VALLEY", "CITY" }, { "KANTO", "FUJI", "VALLEY", "CITY" })
+local fpClouds = ModSetting.new("fpclouds", "CLOUDS",
+  { true, false }, { "ON", "OFF" })
+local fpStars = ModSetting.new("fpstars", "NIGHT SKY",
+  { true, false }, { "ON", "OFF" })
+local fpBirds = ModSetting.new("fpbirds", "BIRDS",
+  { true, false }, { "ON", "OFF" })
+local fpAircraft = ModSetting.new("fpaircraft", "AIRCRAFT",
+  { true, false }, { "ON", "OFF" })
+local fpRainbows = ModSetting.new("fprainbows", "RAINBOWS",
+  { true, false }, { "ON", "OFF" })
+local fpRain = ModSetting.new("fprain", "RAIN",
+  { "OFF", "SOMETIMES", "ALWAYS" }, { "OFF", "SOMETIMES", "ALWAYS" })
+local fpLightning = ModSetting.new("fplightning", "LIGHTNING",
+  { true, false }, { "ON", "OFF" })
+local fpUmbrellas = ModSetting.new("fpumbrellas", "NPC UMBRELLAS",
+  { true, false }, { "ON", "OFF" })
+local fpPuddles = ModSetting.new("fppuddles", "PUDDLES",
+  { true, false }, { "ON", "OFF" })
+local fpGrass = ModSetting.new("fpgrass", "GRASS HEIGHT",
+  { "OFF", "SUBTLE", "WILD" }, { "OFF", "SUBTLE", "WILD" })
+local fpWind = ModSetting.new("fpwind", "WIND",
+  { "OFF", "BREEZE", "GUSTY" }, { "OFF", "BREEZE", "GUSTY" })
+local fpParticles = ModSetting.new("fpparticles", "PARTICLES",
+  { true, false }, { "ON", "OFF" })
+local fpInsects = ModSetting.new("fpinsects", "INSECTS",
+  { true, false }, { "ON", "OFF" })
+local fpGroundflock = ModSetting.new("fpgroundflock", "GROUND FLOCK",
+  { true, false }, { "ON", "OFF" })
+local fpCanopy = ModSetting.new("fpcanopy", "FOREST CANOPY",
+  { true, false }, { "ON", "OFF" })
+local fpVines = ModSetting.new("fpvines", "HANGING VINES",
+  { true, false }, { "ON", "OFF" })
+local fpShafts = ModSetting.new("fpshafts", "SUN SHAFTS",
+  { true, false }, { "ON", "OFF" })
+local fpFog = ModSetting.new("fpfog", "LAVENDER FOG",
+  { true, false }, { "ON", "OFF" })
+local fpLights = ModSetting.new("fplights", "LAMPLIGHT",
+  { true, false }, { "ON", "OFF" })
+local fpJump = ModSetting.new("fpjump", "JUMP FEEL",
+  { "OFF", "SUBTLE", "BIG" }, { "OFF", "SUBTLE", "BIG" })
+local fpDoorstep = ModSetting.new("fpdoorstep", "DOORWAY STEP",
+  { true, false }, { "ON", "OFF" })
 -- Camera and movement modules for 1ST/3RD person views
 local Jump = V.require("Jump")
 local FirstPerson = V.require("FirstPerson")
@@ -212,6 +290,74 @@ local HordeSfx = V.require("HordeSfx")
 -- row, the wraps and the experience math; Pokeball the animated prop.
 local LetsGo = V.require("LetsGo")
 local Pokeball = V.require("Pokeball")
+-- Follower system (ported from VOXEL_ULTIMATE)
+local Follower = V.require("follower/init")
+-- Follower water compatibility module
+local FollowersWaterCompat = V.require("followers_water_compat")
+
+-- Follower settings rows
+local FollowerSettings = V.require("follower/settings")
+
+-- Instantiate water compat and attach to V namespace for follower system
+V.followersWater = FollowersWaterCompat.new(mod, {
+  resolveWaterSprite = function(speciesId, shiny, form, o)
+    -- Delegate to sprite resolver
+    local SpriteResolver = V.require("sprite_resolver")
+    if SpriteResolver and SpriteResolver.resolveFollowerSprite then
+      return SpriteResolver:resolveFollowerSprite({
+        species = speciesId,
+        shiny = shiny,
+        form = form,
+        surface = "surfing",
+        style = V.require("config").spriteStyle(mod),
+        role = "primary",
+      })
+    end
+    return nil
+  end,
+  resolveLandSprite = function(speciesId, shiny, form, o)
+    -- Delegate to sprite resolver
+    local SpriteResolver = V.require("sprite_resolver")
+    if SpriteResolver and SpriteResolver.resolveFollowerSprite then
+      return SpriteResolver:resolveFollowerSprite({
+        species = speciesId,
+        shiny = shiny,
+        form = form,
+        surface = "land",
+        style = V.require("config").spriteStyle(mod),
+        role = "primary",
+      })
+    end
+    return nil
+  end,
+})
+
+-- Create follower settings rows
+local ModSetting = V.require("ModSetting")
+
+-- Follow Control Mode: trainer (player controls follower) vs pokemon (you control pokemon)
+local followControlSetting = ModSetting.new(
+  "follow_control",
+  "FOLLOW CONTROL",
+  { "trainer", "pokemon" },
+  { "TRAINER", "POKÉMON" }
+)
+
+-- Trainer Trail: when controlling pokemon, does trainer follow behind?
+local trainerTrailSetting = ModSetting.new(
+  "trainer_trail",
+  "TRAINER TRAIL",
+  { false, true },
+  { "OFF", "ON" }
+)
+
+-- Follower Count: 0-6 extra party followers
+local followerCountSetting = ModSetting.new(
+  "follower_count",
+  "FOLLOWER COUNT",
+  { 0, 1, 2, 3, 4, 5, 6 },
+  { "0", "1", "2", "3", "4", "5", "6" }
+)
 
 -- Forward declaration: the voxel pipeline's update hook (registered below)
 -- calls this, and it is defined further down with the settings it drives.
@@ -1017,6 +1163,26 @@ local SETTINGS = {
     .. "switches the blind roll off, so what you fight is what you walked "
     .. "into; MIX leaves it on as well; OFF is the dice alone.",
     full = true, cat = "wildlife" },
+  -- ------- Follower system settings (ported from VOXEL_ULTIMATE)
+  --
+  -- These control how the party follower behaves: who controls it,
+  -- whether the trainer trails behind when controlling pokemon, and
+  -- how many extra party members follow in a pack.
+  { followControlSetting,
+    "Who controls the follower: TRAINER (you walk, the Pokemon follows) "
+    .. "or POKÉMON (you control the Pokemon directly). POKÉMON mode can "
+    .. "also show the trainer trailing behind with TRAINER TRAIL.",
+    cat = "followers" },
+  { trainerTrailSetting,
+    "When controlling the Pokémon directly, the trainer trails behind. "
+    .. "OFF keeps the trainer at the camera; ON adds the trainer sprite "
+    .. "following the controlled Pokémon.",
+    cat = "followers" },
+  { followerCountSetting,
+    "How many extra party members follow in a pack (0–6). 0 is just the "
+    .. "primary follower; higher values add more party members in a line. "
+    .. "Only applies in POKÉMON control mode without TRAINER TRAIL.",
+    cat = "followers" },
   -- Only offered while something is out there to count. With WILD OFF the
   -- number of them is zero whatever this says, and a row that no longer
   -- decides anything is worse than no row.
@@ -1123,11 +1289,301 @@ local SETTINGS = {
     .. "Stadium 2 models instead of sprites. When OFF, all Pokemon use sprites "
     .. "or Stadium 1 models (Gen 1 only).",
     full = true, cat = "battles" },
+  -- ------- ds_fp_ceiling integrated settings
+  -- Interior ceiling and walls
+  { Ceiling.setting,
+    "Interior ceilings and walls in first-person mode. Rooms get walls, "
+    .. "ceilings with configurable headroom, and proper doors. The diorama "
+    .. "rungs use a Sims-style cutaway view.",
+    cat = "world" },
+  { Ceiling.headroom,
+    "Ceiling height: AIRY (32px), MID (24px), or SNUG (16px).",
+    cat = "world" },
+  { Ceiling.cutaway,
+    "Sims-style cutaway in diorama view: near walls melt away so you can "
+    .. "see into rooms from outside.",
+    cat = "world" },
+  -- Interior details
+  { fpShadows, "Contact shadows under furniture and props.", cat = "world" },
+  { fpRails, "Rail and skirting boards along walls.", cat = "world" },
+  { fpSpill, "Light spilling from doorways into dark rooms.", cat = "world" },
+  { fpFittings, "Ceiling lamps and light fixtures.", cat = "world" },
+  { fpBacks, "Building backs - rear walls on exterior buildings.", cat = "world" },
+  -- Cave features
+  { fpRock, "Rock formations in caves.", cat = "world" },
+  { fpPools, "Water pools in cave floors.", cat = "world" },
+  { fpSconces, "Wall torches in caves.", cat = "world" },
+  { fpBats, "Flying bats in caves.", cat = "world" },
+  { fpDark, "Cave darkness effect in unlit areas.", cat = "world" },
+  -- Third person ceiling
+  { fpThird, "Ceiling visibility in third-person mode: NONE, CUTAWAY, or FULL.", cat = "world" },
+  -- Horizon backdrop
+  { fpBackdrop, "Distant horizon backdrop for outdoor maps.", cat = "world" },
+  { fpHorizonart, "Horizon art style: KANTO, FUJI, VALLEY, or CITY.", cat = "world" },
+  -- Sky features
+  { fpClouds, "Clouds drifting across the sky.", cat = "world" },
+  { fpStars, "Stars and nebula at night.", cat = "world" },
+  { fpBirds, "Birds flying in the sky.", cat = "world" },
+  { fpAircraft, "Rare aircraft (planes and blimps) in the sky.", cat = "world" },
+  { fpRainbows, "Rainbows after rain showers.", cat = "world" },
+  -- Weather effects
+  { fpRain, "Rain frequency: OFF, SOMETIMES, or ALWAYS.", cat = "world" },
+  { fpLightning, "Lightning during storms.", cat = "world" },
+  { fpUmbrellas, "NPCs open umbrellas during rain.", cat = "world" },
+  { fpPuddles, "Puddles form on the ground during rain.", cat = "world" },
+  -- Ground detail
+  { fpGrass, "Grass height: OFF, SUBTLE, or WILD.", cat = "world" },
+  { fpWind, "Wind effect on grass: OFF, BREEZE, or GUSTY.", cat = "world" },
+  { fpParticles, "Particle effects (seeds, drips, fireflies, etc.).", cat = "world" },
+  { fpInsects, "Insects buzzing around.", cat = "world" },
+  { fpGroundflock, "Ground flocks of birds that flush when approached.", cat = "world" },
+  -- Forest features
+  { fpCanopy, "Forest canopy overhead.", cat = "world" },
+  { fpVines, "Hanging vines in forests.", cat = "world" },
+  { fpShafts, "Sun shafts through forest canopy.", cat = "world" },
+  -- Town features
+  { fpFog, "Lavender Town fog effect.", cat = "world" },
+  { fpLights, "Street lamps and town lighting.", cat = "world" },
+  -- Movement
+  { fpJump, "Jump feel: OFF, SUBTLE, or BIG.", cat = "world" },
+  { fpDoorstep, "Step up/down when passing through doorways.", cat = "world" },
 }
+
+-- Custom key binding system for jump key (must be defined before SettingsMenu hook)
+_G.keyBindingState = {
+  active = false,
+  justActivated = false,
+  bindingType = nil -- "keyboard" or "gamepad"
+}
+
+-- The engine's own input:wasPressed(name) only recognizes its fixed set of
+-- logical actions (up/down/left/right/a/b/start/select and so on). It has
+-- no idea what "f1" or "leftshoulder" mean, so routing a custom binding
+-- through it silently does nothing for anything outside that set -- and
+-- for names the action table happens to share with a raw key or pad
+-- button (like "a" or "b") it fires for EITHER the keyboard action or the
+-- pad press interchangeably, which is what made keyboard and gamepad
+-- bindings read as swapped. These two helpers poll LÖVE directly instead,
+-- edge-detected so a held key or button fires once per press rather than
+-- every frame it stays down.
+local rawKeyDown, rawPadDown = {}, {}
+
+local function rawKeyboardPressed(key)
+  if not (key and love and love.keyboard and love.keyboard.isDown) then return false end
+  local ok, down = pcall(love.keyboard.isDown, key)
+  down = ok and down or false
+  local was = rawKeyDown[key]
+  rawKeyDown[key] = down
+  return down and not was
+end
+
+local function rawGamepadPressed(button)
+  if not (button and love and love.joystick and love.joystick.getJoysticks) then return false end
+  local down = false
+  local ok, sticks = pcall(love.joystick.getJoysticks)
+  if ok and sticks then
+    for _, js in ipairs(sticks) do
+      local okPad, isPad = pcall(js.isGamepad, js)
+      if okPad and isPad then
+        local okDown, isDown = pcall(js.isGamepadDown, js, button)
+        if okDown and isDown then
+          down = true
+          break
+        end
+      end
+    end
+  end
+  local was = rawPadDown[button]
+  rawPadDown[button] = down
+  return down and not was
+end
+
+local function getJumpKey()
+  local mod = V.mod
+  if mod and mod.options then
+    local ok, value = pcall(mod.options.get, mod.options, "jumpKey")
+    if ok and value then return value end
+  end
+  return "keyboard:space"
+end
+
+local function setJumpKey(key)
+  local mod = V.mod
+  if mod and mod.world and mod.world.game then
+    local game = mod.world.game
+    local opts = game and game.save and game.save.options
+    if opts then
+      opts.modOptions = opts.modOptions or {}
+      opts.modOptions[mod.id] = opts.modOptions[mod.id] or {}
+      opts.modOptions[mod.id]["jumpKey"] = key
+    end
+    local loader = game and game.mods
+    if loader then
+      loader.modOptions = loader.modOptions or {}
+      loader.modOptions[mod.id] = loader.modOptions[mod.id] or {}
+      loader.modOptions[mod.id]["jumpKey"] = key
+    end
+    if game and game.writeOptions then pcall(game.writeOptions, game) end
+  end
+end
+
+local function parseJumpKey(binding)
+  -- Parse "keyboard:key" or "gamepad:button" format
+  local bindingType, key = binding:match("^(.-):(.+)$")
+  if bindingType and key then
+    return bindingType, key
+  end
+  -- Fallback for old format
+  return "keyboard", binding
+end
+
+-- Hook into SettingsMenu to add jump key option and help
+local SettingsMenu = V.require("SettingsMenu")
+local originalRows = SettingsMenu.rows
+SettingsMenu.rows = function(catId, game)
+  local out = originalRows(catId, game)
+  if type(out) ~= "table" then return out end
+  
+  -- Add jump key row to the "world" category
+  if catId == "world" then
+    local jumpRow = {
+      id = "DRAMATIC_SHAPE:jumpKey",
+      label = "JUMP KEY",
+      value = function()
+        -- Use _G.keyBindingState to ensure we access the global
+        local state = _G.keyBindingState or { active = false }
+        if state.active then
+          return "PRESS BUTTON..."
+        end
+        local binding = getJumpKey()
+        local bindingType, key = parseJumpKey(binding)
+        return (bindingType:upper() .. ":" .. key:upper())
+      end,
+      activate = function(game)
+        if _G.keyBindingState then
+          _G.keyBindingState.active = true
+          _G.keyBindingState.justActivated = true
+          _G.keyBindingState.bindingType = nil
+        end
+      end,
+    }
+    table.insert(out, jumpRow)
+  end
+  return out
+end
+
+-- Add help text for jump key
+local originalHelpFor = SettingsMenu.helpFor
+SettingsMenu.helpFor = function(id)
+  if id == "DRAMATIC_SHAPE:jumpKey" then
+    return "Press A to bind any keyboard key or gamepad button to the jump action. The jump allows you to hop over ledges in the overworld."
+  end
+  return originalHelpFor(id)
+end
+
+-- Hook into SettingsMenu.update to capture key presses when in binding mode
+local originalUpdate = SettingsMenu.update
+SettingsMenu.update = function(self)
+  -- If in binding mode, capture key presses
+  if _G.keyBindingState and _G.keyBindingState.active then
+    local input = self.game and self.game.input
+    if input then
+      -- Skip the activation key
+      if _G.keyBindingState.justActivated then
+        _G.keyBindingState.justActivated = false
+        return
+      end
+      
+      -- Check for escape to cancel. These three stay routed through the
+      -- engine's own action system on purpose (unlike a jump binding, menu
+      -- cancel is meant to answer to whatever the player already has
+      -- escape/B/start mapped to, keyboard or pad alike).
+      if input:wasPressed("escape") or input:wasPressed("b") or input:wasPressed("start") then
+        _G.keyBindingState.active = false
+        return
+      end
+
+      -- The actual key/button capture happens in the raw Game.keypressed
+      -- and Game.gamepadpressed hooks below, which see LÖVE's real key and
+      -- button names directly instead of the engine's abstracted actions.
+      -- Polling input:wasPressed() here for every possible key/button name
+      -- was the bug: it only ever fires for the handful of names the
+      -- engine treats as logical actions, and keyboard letters overlap
+      -- gamepad button names ("a", "b", ...) in that table, so a press on
+      -- either device could bind as the other.
+    end
+    return
+  end
+  
+  -- Normal update when not in binding mode
+  return originalUpdate(self)
+end
+
+-- Handle key capture for jump binding
+mod.hooks:wrap("Game.keypressed", function(next, game, key)
+  if _G.keyBindingState and _G.keyBindingState.active then
+    if _G.keyBindingState.justActivated then
+      _G.keyBindingState.justActivated = false
+      return true -- Consume the activation key
+    end
+    
+    -- Don't bind menu navigation keys
+    local menuKeys = {
+      "escape", "return", "tab", "up", "down", "left", "right",
+      "w", "a", "s", "d", "z", "x", "c", "v", "b", "n", "m"
+    }
+    local isMenuKey = false
+    for _, mk in ipairs(menuKeys) do
+      if key == mk then
+        isMenuKey = true
+        break
+      end
+    end
+    
+    if not isMenuKey then
+      setJumpKey("keyboard:" .. key)
+      _G.keyBindingState.active = false
+      return true
+    elseif key == "escape" then
+      _G.keyBindingState.active = false
+      return true
+    end
+    return next(game, key)
+  end
+  return next(game, key)
+end)
+
+-- Handle gamepad button capture for jump binding. Mirrors the keypressed
+-- hook above but for a real pad press (button names here are LÖVE's own
+-- gamepad button constants -- "a", "leftshoulder", "dpup", and so on --
+-- the same vocabulary the binding is stored and later polled with).
+do
+  local Game = require("src.core.Game")
+  local inner = Game.gamepadpressed
+  function Game:gamepadpressed(joystick, button, ...)
+    if _G.keyBindingState and _G.keyBindingState.active then
+      if _G.keyBindingState.justActivated then
+        _G.keyBindingState.justActivated = false
+        return
+      end
+      if button == "back" or button == "start" then
+        _G.keyBindingState.active = false
+        return
+      end
+      setJumpKey("gamepad:" .. button)
+      _G.keyBindingState.active = false
+      return
+    end
+    if inner then return inner(self, joystick, button, ...) end
+  end
+end
 
 local schema = {}
 for i, entry in ipairs(SETTINGS) do
-  schema[i] = entry[1]:schema(entry[2])
+  -- Only generate schema for ModSetting objects (which have :schema method)
+  if type(entry[1]) == "table" and type(entry[1].schema) == "function" then
+    schema[#schema + 1] = entry[1]:schema(entry[2])
+  end
 end
 mod.options:define(schema)
 
@@ -1136,6 +1592,89 @@ mod.options:define(schema)
 -- reads it back for PRESENTATION -- the categories, the screens, the help
 -- text -- rather than owning a second copy that could drift from this one.
 SettingsMenu.define(SETTINGS)
+
+-- ------- ds_fp_ceiling config bridge
+--
+-- The Ceiling, Backdrop, SkyLayer, and Flora modules expect a companion
+-- mod (ds_fp_ceiling) to publish configuration via _G.__ds_ceiling_config.
+-- Since we've integrated those modules directly, we provide this bridge
+-- so they can read from our own options instead.
+local HEADROOM = { AIRY = 32, MID = 24, SNUG = 16 }
+_G.__ds_ceiling_config = function()
+  -- Use the actual setting objects where available
+  local ceilingOn = true
+  local headroomVal = 32
+  local cutawayOn = true
+  if Ceiling and Ceiling.setting then
+    local ok, v = pcall(function() return Ceiling.setting:get() end)
+    if ok then ceilingOn = (v ~= false) end
+  end
+  if Ceiling and Ceiling.headroom then
+    local ok, v = pcall(function() return Ceiling.headroom:get() end)
+    if ok and v then headroomVal = HEADROOM[v] or 32 end
+  end
+  if Ceiling and Ceiling.cutaway then
+    local ok, v = pcall(function() return Ceiling.cutaway:get() end)
+    if ok then cutawayOn = (v ~= false) end
+  end
+  
+  -- Helper to get setting value with fallback
+  local function getSetting(settingObj, default)
+    if settingObj then
+      local ok, v = pcall(function() return settingObj:get() end)
+      if ok then return v end
+    end
+    return default
+  end
+  
+  -- Map horizonart choice to backdrop file
+  local horizonArt = getSetting(fpHorizonart, "VALLEY")
+  local backdropMap = { KANTO = "backdrop.png", FUJI = "backdrop2.png", VALLEY = "backdrop3.png", CITY = "backdrop4.png" }
+  local backdropFile = backdropMap[horizonArt] or "backdrop.png"
+  _G.__ds_backdrop_path = mod.path .. "/lib/" .. backdropFile
+  
+  return {
+    ceiling = ceilingOn,
+    headroom = headroomVal,
+    cutaway = cutawayOn,
+    shadows = getSetting(fpShadows, true) ~= false,
+    rails = getSetting(fpRails, true) ~= false,
+    spill = getSetting(fpSpill, true) ~= false,
+    fittings = getSetting(fpFittings, true) ~= false,
+    rock = getSetting(fpRock, true) ~= false,
+    backs = getSetting(fpBacks, true) ~= false,
+    pools = getSetting(fpPools, true) ~= false,
+    sconces = getSetting(fpSconces, true) ~= false,
+    bats = getSetting(fpBats, true) ~= false,
+    third = getSetting(fpThird, "CUTAWAY"),
+    backdrop = getSetting(fpBackdrop, true) ~= false,
+    horizonart = horizonArt,
+    jump = getSetting(fpJump, "SUBTLE"),
+    -- Grass disabled by default as requested
+    grass = getSetting(fpGrass, "OFF"),
+    particles = getSetting(fpParticles, true) ~= false,
+    dark = getSetting(fpDark, true) ~= false,
+    rain = getSetting(fpRain, "SOMETIMES"),
+    umbrellas = getSetting(fpUmbrellas, true) ~= false,
+    puddles = getSetting(fpPuddles, true) ~= false,
+    lightning = getSetting(fpLightning, true) ~= false,
+    lights = getSetting(fpLights, true) ~= false,
+    shafts = getSetting(fpShafts, true) ~= false,
+    canopy = getSetting(fpCanopy, true) ~= false,
+    vines = getSetting(fpVines, true) ~= false,
+    fog = getSetting(fpFog, true) ~= false,
+    doorstep = getSetting(fpDoorstep, true) ~= false,
+    clouds = getSetting(fpClouds, true) ~= false,
+    stars = getSetting(fpStars, true) ~= false,
+    birds = getSetting(fpBirds, true) ~= false,
+    aircraft = getSetting(fpAircraft, true) ~= false,
+    rainbows = getSetting(fpRainbows, true) ~= false,
+    insects = getSetting(fpInsects, true) ~= false,
+    groundflock = getSetting(fpGroundflock, true) ~= false,
+    wind = getSetting(fpWind, "BREEZE"),
+  }
+end
+_G.__ds_posters_dir = mod.path .. "/"
 
 -- ------- this mod's hotkeys
 --
@@ -1226,6 +1765,109 @@ local HOTKEYS = {
 -- the mod should care that a human is walking the list one press at a time.
 local vfxDemoIndex = 0
 
+-- ------- Manual jump helpers (ported from red_3d_player)
+--
+-- Helper to get setting value with fallback (shared with config bridge)
+local function getSettingValue(setting, default)
+  if not setting then return default end
+  if type(setting.get) == "function" then
+    local ok, value = pcall(setting.get, setting)
+    if ok and value ~= nil then return value end
+  end
+  return default
+end
+
+-- Check if manual jump is enabled via the jump setting
+local function manualJumpEnabled()
+  local jumpSetting = getSettingValue(fpJump, "SUBTLE")
+  return jumpSetting ~= "OFF"
+end
+
+-- Simple jump trigger without setting check for testing
+local function canJump(player)
+  if not player then return false end
+  if player.inputLocked then return false end
+  if player.fishing then return false end
+  if player.surfing then return false end
+  if player.onBike then return false end
+  if player.hopFrames and player.hopFrames > 0 then return false end
+  if player.red3dManualJumpFrames and player.red3dManualJumpFrames > 0 then return false end
+  return true
+end
+
+-- Simple ledge hop trigger - just call the engine's function
+local function tryLedgeHop(top, player)
+  if not top or not player then return false end
+  if type(top.checkLedgeHop) == "function" then
+    local ok, result = pcall(top.checkLedgeHop, top, player.facing)
+    if ok and result == true then return true end
+  end
+  -- Fallback: try to manually trigger hop by setting hopFrames
+  -- This simulates what the engine does for ledge hops
+  local dx, dy = 0, 0
+  if player.facing == "left" then dx = -1
+  elseif player.facing == "right" then dx = 1
+  elseif player.facing == "up" then dy = -1
+  elseif player.facing == "down" then dy = 1
+  else return false end
+  local targetX = (player.cellX or 0) + dx * 2
+  local targetY = (player.cellY or 0) + dy * 2
+  if top.map and top.map:inBounds(targetX, targetY) then
+    player.targetX = targetX
+    player.targetY = targetY
+    player.moving = true
+    player.hopFrames = 32
+    return true
+  end
+  return false
+end
+
+-- Try to jump over a one-cell border/fence (Dramatic Shape fences)
+local function tryBorderJump(top, player, facing)
+  if not top or not top.map or not player then return false end
+  local map = top.map
+  local okCollision, Collision = pcall(require, "src.world.Collision")
+  if not okCollision or not Collision then return false end
+
+  local dx, dy = 0, 0
+  if facing == "left" then dx = -1
+  elseif facing == "right" then dx = 1
+  elseif facing == "up" then dy = -1
+  elseif facing == "down" then dy = 1
+  else return false end
+
+  -- Check the cell in front (the blocked border)
+  local bx = (player.cellX or 0) + dx
+  local by = (player.cellY or 0) + dy
+  if not map:inBounds(bx, by) then return false end
+
+  -- Check the landing cell (two cells ahead)
+  local lx = (player.cellX or 0) + dx * 2
+  local ly = (player.cellY or 0) + dy * 2
+  if not map:inBounds(lx, ly) then return false end
+
+  -- The border cell must be blocked (not walkable)
+  if map:isWalkableCell(bx, by) then return false end
+
+  -- The landing cell must be walkable and not occupied
+  if not map:isWalkableCell(lx, ly) then return false end
+  if Collision.occupied(top.entities, lx, ly, player) then return false end
+
+  -- Check if we can move to the border cell (collision check)
+  if not Collision.canMove(map, top.entities, player, facing) then return false end
+
+  -- Perform the jump
+  player.facing = facing
+  player.turnArmed = false
+  player.turnTimer = 0
+  player.bumpFrames = nil
+  player.targetX, player.targetY = lx, ly
+  player.moving = true
+  player.progress = 0
+  player.hopFrames = 32
+  return true
+end
+
 
 do
   local Game = require("src.core.Game")
@@ -1233,6 +1875,18 @@ do
   local inner = Game.keypressed
 
   function Game:keypressed(key)
+    -- Handle jump on space key directly, before HOTKEYS table
+    -- This ensures jump works regardless of voxel mode or other conditions
+    if key == KEY_JUMP then
+      local top = self.stack and self.stack:top()
+      local player = top and top.isOverworld and top.player
+      -- Try the engine's real ledge crossing without canJump check
+      if player then
+        if tryLedgeHop(top, player) then
+          return
+        end
+      end
+    end
     -- HORDE MODE owns the keyboard's spare keys while it runs (restored
     -- from DRAMATIC_SHAPE): R reloads, and every mode key below is
     -- swallowed rather than left to change the rung or the post-
@@ -1313,6 +1967,43 @@ do
             -- the tile the player is standing on rather than its corner.
             Vfx.play(keys[vfxDemoIndex],
                      p.cellX * 16 + 8, 0, p.cellY * 16 + 8)
+          end
+        end
+        return
+      elseif claim == "jump" then
+        -- Manual jump: keyboard space or controller X button
+        -- When a real ledge is directly in front, call the overworld's
+        -- checkLedgeHop() so landing validation, NPC collision, SFX and
+        -- the two-cell movement all stay owned by the engine.
+        -- Everywhere else the button remains a visual jump in place.
+        local ow = self.overworld
+        local p = ow and ow.player
+        if canJump(p) then
+          -- First try the engine's real ledge crossing
+          local crossed = false
+          if top and type(top.checkLedgeHop) == "function" then
+            local ok, result = pcall(top.checkLedgeHop, top, p.facing)
+            crossed = ok and result == true
+          end
+          if not crossed then
+            -- Try border jump (one cell fence hop)
+            crossed = tryBorderJump(top, p, p.facing)
+          end
+          if crossed then
+            -- Real ledge/border crossing owns the 32-frame hop
+            p.red3dManualJumpFrames = nil
+            p.red3dManualJumpTotal = nil
+          else
+            -- Cosmetic jump in place
+            local jumpFrames = 32
+            p.red3dManualJumpTotal = jumpFrames
+            p.red3dManualJumpFrames = jumpFrames
+          end
+          -- Invalidate cached skin keys so takeoff appears immediately
+          local renderer = rawget(_G, "red3dPlayerRenderer")
+          if renderer then
+            renderer.skinKey = nil
+            renderer.voxelUploadedKey = nil
           end
         end
         return
@@ -2039,6 +2730,41 @@ do
   end
 end
 
+-- ------- Jump via input.step hook
+--
+-- Use the custom key binding to trigger jump
+mod.hooks:wrap("input.step", function(next, game, dt)
+  local out = next(game, dt)
+  local top = game.stack and game.stack:top()
+  local player = top and top.isOverworld and top.player
+  local jumpKey = getJumpKey()
+  local bindingType, key = parseJumpKey(jumpKey)
+
+  if player then
+    -- Poll LÖVE directly rather than the engine's input:wasPressed(),
+    -- which only recognizes its own fixed action names. A raw keyboard
+    -- key (e.g. "f1") or a raw gamepad button (e.g. "leftshoulder")
+    -- bound here would otherwise just never fire, since the engine has
+    -- no such action -- and both branches used to call the very same
+    -- input:wasPressed(key), so a gamepad binding was really being
+    -- checked as a keyboard action and vice versa.
+    local pressed = false
+    if bindingType == "keyboard" then
+      pressed = rawKeyboardPressed(key)
+    elseif bindingType == "gamepad" then
+      pressed = rawGamepadPressed(key)
+    end
+
+    if pressed then
+      if tryLedgeHop(top, player) then
+        -- Jump succeeded
+      end
+    end
+  end
+  return out
+end)
+
+
 -- ------- 1ST and 3RD person camera and movement
 --
 -- FirstPerson.install claims the LOOK inputs the engine ignores: the right
@@ -2069,6 +2795,47 @@ Horde.install()
 -- every byte untouched. The battle-side wraps (throwBall, safariAction)
 -- and the experience hooks install here too.
 LetsGo.install()
+
+-- ------- Follower system (ported from VOXEL_ULTIMATE)
+--
+-- Unified follower system with selection, persistence, control modes,
+-- trailers, talk interaction, and sprite refresh. Compatible with
+-- Followers EX and PokéPC through migration.
+local followerInstance = Follower.new(mod, {
+  logic = V,
+  render = V,
+})
+
+-- Register follower sprites during load phase
+mod.events:on("content.loaded", function()
+  pcall(function() followerInstance:registerContent() end)
+end)
+
+-- Install follower system after mods are loaded
+mod.events:on("mods.loaded", function()
+  local Game = require("src.core.Game")
+  pcall(function()
+    followerInstance:reassertAfterModsLoaded(Game)
+  end)
+end)
+
+-- Event handlers for follower lifecycle
+mod.events:on("save.loaded", function()
+  pcall(function() followerInstance:onSaveLoaded() end)
+end)
+
+mod.events:on("map.entered", function(ev)
+  pcall(function() followerInstance:onMapEntered(ev) end)
+end)
+
+mod.events:on("mod.options_changed", function(payload)
+  if payload and payload.mod == mod.id then
+    pcall(function() followerInstance:onOptionsChanged(payload) end)
+  end
+end)
+
+-- Export follower API for companion mods
+mod.exports.follower = followerInstance
 
 -- ------- what time it is
 --
@@ -2231,6 +2998,51 @@ local function installOverworldStadium()
   end
 
   return true
+end
+
+-- Patch engine's OptionRows to handle string values (fix for older engines)
+local okOptionRows, OptionRows = pcall(require, "src.ui.OptionRows")
+if okOptionRows and OptionRows and OptionRows.draw then
+  local originalDraw = OptionRows.draw
+  OptionRows.draw = function(game, rows, index, scroll, bottomLabel, bottomRow)
+    -- Call original but intercept row.value handling
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.rectangle("fill", 0, 0, 160, 144)
+    local Font = require("src.render.Font")
+    local Theme = require("src.ui.Theme")
+    for slot = 1, OptionRows.VISIBLE do
+      local i = scroll + slot
+      local row = rows[i]
+      if not row then break end
+      Font.drawBox(0, (slot - 1) * 4, 20, 4)
+      love.graphics.setColor(0, 0, 0, 1)
+      Font.draw(row.label, 16, ((slot - 1) * 4 + 1) * 8)
+      -- FIX: Check if row.value is a function before calling it
+      local displayValue = ""
+      if row.value then
+        if type(row.value) == "function" then
+          displayValue = row.value(game)
+        else
+          displayValue = tostring(row.value)
+        end
+      end
+      Font.draw(displayValue, 24, ((slot - 1) * 4 + 2) * 8)
+      if i == index then
+        Font.drawCode(Theme.cursor, 8, ((slot - 1) * 4 + 1) * 8)
+      end
+    end
+    if scroll + OptionRows.VISIBLE < #rows then
+      Font.drawCode(Theme.moreArrow, 144, 128)
+    end
+    if bottomLabel then
+      love.graphics.setColor(0, 0, 0, 1)
+      Font.draw(bottomLabel, 16, 136)
+      if bottomRow and index == bottomRow then
+        Font.drawCode(Theme.cursor, 8, 136)
+      end
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+  end
 end
 
 pcall(installOverworldStadium)

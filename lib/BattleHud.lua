@@ -61,17 +61,10 @@ local SHADER = [[
 
 local shader = nil            -- nil = untried, false = unavailable
 
--- Cache the shader availability to prevent repeated re-checking during
--- route/scene changes. Once the shader is successfully compiled, we assume
--- the hardware capabilities don't change during gameplay (context loss is
--- handled elsewhere).
-local shaderCache = nil  -- nil = untried, true = available, false = unavailable
-
 local function getShader()
   if shader == nil then
     local ok, sh = pcall(love.graphics.newShader, SHADER)
     shader = (ok and sh) or false
-    shaderCache = (ok and sh) and true or false
   end
   return shader or nil
 end
@@ -232,11 +225,7 @@ end
 function BattleHud.invalidate()
   frost, blurA, blurB = nil, nil, nil
   frostW, frostH = 0, 0
-  luma = {}
-  wasDark = false
-  layer, hudLayer = nil, nil
-  shader = nil
-  shaderCache = nil
+  hudLayer = nil
 end
 
 return BattleHud

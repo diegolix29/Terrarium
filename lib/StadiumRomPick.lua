@@ -50,37 +50,51 @@
 local V = ...
 
 local StadiumInstall = V.require("StadiumInstall")
-local Stadium2Install = V.require("Stadium2Install")
+local Compat = V.require("EngineCompat")
 
 local StadiumRomPick = {}
 
-StadiumRomPick.LABEL = "STADIUM ROM"
-StadiumRomPick.ID = "DRAMATIC_SHAPE:stadiumRom"
+local function isGen2()
+  return type(StadiumInstall.gameGeneration) == "function"
+     and StadiumInstall.gameGeneration() == 2
+end
 
--- Names the REVISION, because that is the thing a player gets wrong: the
--- model offsets are keyed to US 1.0 and nothing else is going to work.
-local PROMPT = "Choose your Pokemon Stadium (US 1.0 or Stadium 2 US) ROM"
+StadiumRomPick.ID = ((V.mod and V.mod.id) or "STADIUM2_OVERWORLD_MODELS") .. ":stadiumRom"
+
+local function label()
+  return isGen2() and "STADIUM 2 ROM" or "STADIUM ROM"
+end
+
+local function prompt()
+  if isGen2() then
+    return "Choose your Pokemon Stadium 2 ROM (Gen 2 models)"
+  end
+  return "Choose your Pokemon Stadium (US) 1.0 ROM"
+end
+
+-- Keep LABEL readable for older callers while the row/value functions below
+-- refresh it from the active game generation.
+StadiumRomPick.LABEL = label()
 
 -- ------- the host, at arm's length
 --
--- Everything below is read through pcall and a presence test. The mod loader
--- hands a mod the real `io` and `os` today, but a mod that TAKES that for
--- granted is one that stops loading the day a sandbox arrives -- and this is
--- a convenience on top of a folder scan that works without any of it.
+-- Everything below goes through EngineCompat. Current Gen1Recomp deliberately
+-- sandboxes raw io and love.system/love.filesystem away from mod chunks, while
+-- engine-owned Platform / SaveData / HostShell still provide the same services
+-- safely. Older builds fall back through the same guarded compatibility layer.
 
 local function haveShell()
-  local ok, popen = pcall(function() return io and io.popen end)
-  return (ok and popen) and true or false
+  local shell = Compat.hostShell()
+  return shell and type(shell.popen) == "function"
 end
 
 local function haveFiles()
-  local ok, open = pcall(function() return io and io.open end)
-  return (ok and open) and true or false
+  local f = Compat.fs()
+  return f and type(f.read) == "function" and type(f.getInfo) == "function"
 end
 
 local function osName()
-  local ok, name = pcall(function() return love.system.getOS() end)
-  return ok and name or nil
+  return Compat.osName()
 end
 
 -- Run a command and return its trimmed stdout, or nil for anything that did
@@ -88,89 +102,58 @@ end
 -- is not there.
 local function commandOutput(cmd)
   if not haveShell() then return nil end
-  local ok, pipe = pcall(io.popen, cmd)
-  if not (ok and pipe) then return nil end
-  local okRead, out = pcall(pipe.read, pipe, "*a")
-  pcall(pipe.close, pipe)
-  if not (okRead and type(out) == "string") then return nil end
-  out = out:gsub("^%s+", ""):gsub("%s+$", "")
-  return (out ~= "") and out or nil
+  return Compat.pipeOutput(Compat.hostShell(), cmd)
 end
 
 -- ------- can this machine open a DIALOG
 --
--- Desktop gets a real per-OS shell dialog (see choose() below). Android gets
--- a real dialog too, but a DIFFERENT one -- love.system.pickFile, the same
--- native SAF bridge src/import/RomImporter.lua uses for the Game Boy ROM,
--- the mod .zip, and the .sav import. It is real, it is wired, and calling
--- it correctly needs none of System.cpp changed and no APK rebuild -- an
--- earlier version of this file called it wrong (`pickFile("rom", "stadium")`,
--- a made-up two-argument, made-up-kind call) and that mismatch, not a
--- missing native feature, is what crashed the picker. See PICKED and
--- chooseAndroid below for the real call and why reusing the ROM kind here
--- is safe rather than reckless.
+-- Desktop only, and honestly so.
+--
+-- On ANDROID the picker is a native bridge (love.system.pickFile) whose
+-- kind -> filename mapping is a fixed list of three in the engine's own C++,
+-- and an unrecognised kind falls through to `picked_rom.gb`. That is not
+-- merely the wrong name -- it is the file the engine's Game Boy importer is
+-- watching, and reading that code settles it: the importer's size test only
+-- SKIPS a 1 MB file it has already imported, so a 32 MB N64 ROM landing
+-- there falls straight through to `love.filesystem.remove` and
+-- `startData` -- deleted, and then reported to the player as a broken Game
+-- Boy ROM. So the bridge is not called until it learns the kind, which is a
+-- two-line change in System.cpp and an APK rebuild (see README).
+--
+-- Android is not stuck without it: conf.lua points the save directory at the
+-- app's external-files folder, so `baseroms/` there is reachable over USB or
+-- any file manager with no root and no permission prompt. What Android
+-- lacked was being TOLD that -- the row vanished, and the folder's absolute
+-- path was only ever written to a console no phone shows. That is what the
+-- note below is for.
 function StadiumRomPick.canDialog()
+  if not (haveShell() and haveFiles()) then return false end
   local p = osName()
-  if p == "Windows" or p == "OS X" or p == "Linux" then
-    return haveShell() and haveFiles()
-  end
-  if p == "Android" then
-    return (love and love.system and love.system.pickFile) and true or false
-  end
-  return false
+  return p == "Windows" or p == "OS X" or p == "Linux"
 end
 
 -- Kept as the old name for callers that only wanted "is there a dialog".
 StadiumRomPick.available = StadiumRomPick.canDialog
 
--- ------- the Android picker, done the way RomImporter.lua actually does it
---
--- love.system.pickFile(kind) is called with exactly ONE argument in every
--- real call site (RomImporter.lua: pickFile("mod"), pickFile("sav"), and
--- pickFile() with none at all for a ROM). There is no second "hint"
--- argument and no "stadium" kind -- the previous version of this file
--- invented both. The bare, no-argument call is the ROM kind, and
--- RomImporter's own comments say exactly where its result lands: "GameActivity
--- always writes the SAF pick to picked_rom.gb". That is not a placeholder
--- name waiting for a native change -- it is the one guaranteed-wired
--- destination on every build, because it is the same call the base game's
--- own launcher already ships and tests.
---
--- Reusing that exact filename for a Stadium cartridge is safe, for a reason
--- that only holds together once you see WHEN this row can be pressed. The
--- collision this file used to warn about -- a 32 MB N64 ROM landing where
--- the Game Boy importer expects its own file -- can only happen while
--- RomImporter is alive, and RomImporter only exists as `Importer` in
--- main.lua during the launcher/boot screen: main.lua only forwards
--- love.focus/love.update to it while that variable is non-nil, and it goes
--- nil the moment a game boots. The STADIUM ROM row lives on the in-game
--- OPTIONS menu, reachable only after boot -- by the time a player can press
--- it, Importer is already nil, nothing is watching picked_rom.gb on the
--- Game Boy side, and there is nothing left to collide with.
-StadiumRomPick.PICKED = "picked_rom.gb"
+-- Where a SAF pick would land if the native bridge grows a Stadium kind.
+-- Watched unconditionally (see poll): on a build that never writes it this
+-- costs one getInfo a frame, and on one that does the mod needs no further
+-- change to use it.
+StadiumRomPick.PICKED = "picked_stadium.z64"
 
--- True from the moment chooseAndroid successfully opens the SAF picker
--- until poll() consumes (or a later game session forgets) the result. Not
--- persisted -- an armed pick that never lands (app killed while the picker
--- was up) simply stops being armed on the next boot, and the row still
--- reads IMPORT so the player can just try again.
-StadiumRomPick.armed = false
-
--- Open the dialog. Returns the chosen absolute path (desktop, synchronous),
--- or nil when the player cancelled, no dialog could be opened, or (Android)
--- the pick was merely STARTED -- see the note on poll() for why Android
--- cannot return a path here the way the desktop dialogs do.
+-- Open the dialog. Returns the chosen absolute path, or nil when the player
+-- cancelled or no dialog could be opened.
 function StadiumRomPick.choose()
   local p = osName()
   if p == "OS X" then
     return commandOutput(
       ([[osascript -e 'POSIX path of (choose file with prompt "%s" of type ]]
-       .. [[{"z64", "n64", "v64"})' 2>/dev/null]]):format(PROMPT))
+       .. [[{"z64", "n64", "v64"})' 2>/dev/null]]):format(prompt()))
   elseif p == "Windows" then
     local script = table.concat({
       "Add-Type -AssemblyName System.Windows.Forms;",
       "$d=New-Object System.Windows.Forms.OpenFileDialog;",
-      "$d.Title='" .. PROMPT .. "';",
+      "$d.Title='" .. prompt() .. "';",
       "$d.Filter='Nintendo 64 ROM (*.z64;*.n64;*.v64)|*.z64;*.n64;*.v64"
       .. "|All files (*.*)|*.*';",
       -- as UTF-8: the console's OEM codepage would mangle a non-ASCII path
@@ -184,39 +167,15 @@ function StadiumRomPick.choose()
     local path = commandOutput(
       ([[zenity --file-selection --title="%s" ]]
        .. [[--file-filter="Nintendo 64 ROM | *.z64 *.n64 *.v64" 2>/dev/null]])
-        :format(PROMPT))
+        :format(prompt()))
     if path then return path end
     -- zenity is absent on plenty of installs (and on most handheld Linux
     -- distributions); KDE's own dialog is the usual second answer
     return commandOutput(
       [[kdialog --getopenfilename "$HOME" "*.z64 *.n64 *.v64|]]
       .. [[Nintendo 64 ROM" 2>/dev/null]])
-  elseif p == "Android" then
-    StadiumRomPick.chooseAndroid()
-    return nil -- never a synchronous path on Android; see poll()
   end
   return nil
-end
-
--- Arms the SAF pick and returns whether it was actually opened. The pick
--- itself is a separate Android activity: it does not return a path (or
--- anything at all) to this call, and the OS is free to even kill and
--- restart the app while it is up. The only way to notice the result is to
--- poll for PICKED landing in the save directory (poll(), below) -- the same
--- pattern RomImporter.lua uses for its own ROM/mod/save pickers.
-function StadiumRomPick.chooseAndroid()
-  local love_system = love and love.system
-  local fn = love_system and love_system.pickFile
-  if not fn then return false end
-  -- Clear out anything already sitting at PICKED -- a cancelled previous
-  -- attempt, or a stray file -- so poll cannot mistake it for the pick
-  -- about to happen and act on stale bytes.
-  local f = love and love.filesystem
-  if f and f.remove then pcall(f.remove, StadiumRomPick.PICKED) end
-  local ok, opened = pcall(fn) -- no arguments: the ROM kind (see PICKED)
-  if not (ok and opened) then return false end
-  StadiumRomPick.armed = true
-  return true
 end
 
 -- Read an ABSOLUTE path, which love.filesystem cannot: it only sees inside
@@ -224,10 +183,11 @@ end
 -- bytes, or nil plus a reason short enough to fit the loading screen.
 function StadiumRomPick.read(path)
   if not haveFiles() then return nil, "no file access" end
-  local ok, fp = pcall(io.open, path, "rb")
-  if not (ok and fp) then return nil, "could not open that file" end
-  local okRead, bytes = pcall(fp.read, fp, "*a")
-  pcall(fp.close, fp)
+  local okStage, relOrErr = Compat.stageExternal(path, StadiumRomPick.PICKED)
+  if not okStage then return nil, relOrErr or "could not open that file" end
+  local f = Compat.fs()
+  local okRead, bytes = pcall(f.read, StadiumRomPick.PICKED)
+  if type(f.remove) == "function" then pcall(f.remove, StadiumRomPick.PICKED) end
   if not (okRead and type(bytes) == "string" and #bytes > 0) then
     return nil, "could not read that file"
   end
@@ -249,7 +209,7 @@ end
 -- player who has just chosen the wrong file is owed a reason and not a row
 -- that quietly goes on saying IMPORT.
 function StadiumRomPick.import(game)
-  if StadiumInstall.status.state == "building" or Stadium2Install.status.state == "building" then return false end
+  if StadiumInstall.status.state == "building" then return false end
   local StadiumScreen = V.require("StadiumScreen")
 
   -- No dialog on this platform: say where the file goes, on screen, because
@@ -257,19 +217,10 @@ function StadiumRomPick.import(game)
   -- somewhere they can read it.
   if not StadiumRomPick.canDialog() then
     if game and game.stack then
-      game.stack:push(StadiumScreen.newNote(game, "STADIUM ROM",
-        "PUT STADIUM US 1.0 OR STADIUM 2 US HERE:",
+      game.stack:push(StadiumScreen.newNote(game, label(),
+        isGen2() and "PUT POKEMON STADIUM 2 HERE:" or "PUT STADIUM US 1.0 HERE:",
         StadiumInstall.romHintFile()))
     end
-    return false
-  end
-
-  -- Android: choose() only ARMS the SAF pick and returns nil immediately --
-  -- there is no path to read yet, and may not be for several frames (see
-  -- poll()). Nothing to push here; poll() puts the loading screen up once
-  -- the pick actually lands.
-  if osName() == "Android" then
-    StadiumRomPick.choose()
     return false
   end
 
@@ -278,8 +229,6 @@ function StadiumRomPick.import(game)
   local function fail(why)
     StadiumInstall.status.state = "failed"
     StadiumInstall.status.error = why
-    Stadium2Install.status.state = "failed"
-    Stadium2Install.status.error = why
     if game and game.stack then
       game.stack:push(StadiumScreen.new(game, true))
     end
@@ -289,20 +238,7 @@ function StadiumRomPick.import(game)
   local bytes, err = StadiumRomPick.read(path)
   if not bytes then return fail(err or "could not read that file") end
 
-  -- Detect which ROM this is by trying StadiumRom2 first
-  local StadiumRom2 = V.require("StadiumRom2")
-  local ok2, rom2 = pcall(StadiumRom2.open, bytes)
-  local isStadium2 = ok2 and rom2 ~= nil
-
-  local ok, beginErr
-  if isStadium2 then
-    -- It's Stadium 2
-    ok, beginErr = Stadium2Install.beginFrom(bytes, path)
-  else
-    -- Try Stadium 1
-    ok, beginErr = StadiumInstall.beginFrom(bytes, path)
-  end
-
+  local ok, beginErr = StadiumInstall.beginFrom(bytes, path)
   if not ok then return fail(tostring(beginErr)) end
   if game and game.stack then
     game.stack:push(StadiumScreen.new(game, true))
@@ -325,12 +261,13 @@ end
 -- nil where no dialog can be opened, which takes the row off the menu
 -- entirely rather than offering a button that cannot do anything.
 function StadiumRomPick.row()
+  StadiumRomPick.LABEL = label()
   return {
     id = StadiumRomPick.ID,
     label = StadiumRomPick.LABEL,
     value = function()
-      if StadiumInstall.status.state == "building" or Stadium2Install.status.state == "building" then return "BUILDING" end
-      if StadiumInstall.available() or Stadium2Install.available() then return "READY" end
+      if StadiumInstall.status.state == "building" then return "BUILDING" end
+      if StadiumInstall.available() then return "READY" end
       -- WHERE, not IMPORT, where pressing it can only tell you the folder:
       -- a row that says IMPORT and then does not import is a worse row than
       -- one that says what it actually does
@@ -348,64 +285,38 @@ end
 -- The desktop dialog BLOCKS, so `import` above can read the answer on the
 -- next line. A SAF pick cannot work that way: it is a separate activity,
 -- Android is free to destroy the game while it is up, and the file appears
--- some frames later -- so the only way to notice one is to look for it. This
--- runs every frame unconditionally (main.lua), same as RomImporter's own
--- pending-file polling for the ROM/mod/save pickers.
+-- some frames later -- so the only way to notice one is to look for it.
 --
--- Gated on `armed`: PICKED is a real, shared filename ("picked_rom.gb", see
--- above) that is only OURS to act on between chooseAndroid arming it and
--- this consuming it. Watching it unconditionally would risk reacting to
--- some unrelated leftover; watching it only while armed means this can only
--- ever see the file our own chooseAndroid just asked for.
+-- Nothing writes this filename today (see canDialog). It is watched anyway so
+-- that teaching the native bridge one more kind is the whole of the Android
+-- picker work, with no second change needed here.
 --
 -- Consumed and DELETED either way: a 32 MB file left in the save directory
--- would be tried again on the next poll, and kept forever if the import
+-- would be imported again on the next boot, and kept forever if the import
 -- failed.
 function StadiumRomPick.poll(game)
-  if not StadiumRomPick.armed then return false end
-  local f = love and love.filesystem
-  if not (f and f.getInfo) then return false end
-  if StadiumInstall.status.state == "building" or Stadium2Install.status.state == "building" then return false end
+  local f = Compat.fs()
+  if not (f and type(f.getInfo) == "function") then return false end
+  if StadiumInstall.status.state == "building" then return false end
   local ok, info = pcall(f.getInfo, StadiumRomPick.PICKED, "file")
   if not (ok and info) then return false end
 
-  StadiumRomPick.armed = false
   local okRead, bytes = pcall(f.read, StadiumRomPick.PICKED)
-  pcall(f.remove, StadiumRomPick.PICKED)
-  if not (okRead and type(bytes) == "string") then
+  if type(f.remove) == "function" then pcall(f.remove, StadiumRomPick.PICKED) end
+  if not (okRead and type(bytes) == "string") then return false end
+
+  local okScreen, StadiumScreen = pcall(V.require, "StadiumScreen")
+  local okBegin, started, err = pcall(StadiumInstall.beginFrom, bytes, StadiumRomPick.PICKED)
+  if not okBegin then
     StadiumInstall.status.state = "failed"
-    StadiumInstall.status.error = "could not read the picked file"
-    Stadium2Install.status.state = "failed"
-    Stadium2Install.status.error = "could not read the picked file"
-    local StadiumScreen = V.require("StadiumScreen")
-    if game and game.stack then
-      game.stack:push(StadiumScreen.new(game, true))
-    end
-    return true
-  end
-
-  local StadiumScreen = V.require("StadiumScreen")
-  
-  -- Detect which ROM this is
-  local StadiumRom2 = V.require("StadiumRom2")
-  local ok2, rom2 = pcall(StadiumRom2.open, bytes)
-  local isStadium2 = ok2 and rom2 ~= nil
-
-  local started, err
-  if isStadium2 then
-    started, err = Stadium2Install.beginFrom(bytes, StadiumRomPick.PICKED)
-  else
-    started, err = StadiumInstall.beginFrom(bytes, StadiumRomPick.PICKED)
-  end
-  
-  if not started then
+    StadiumInstall.status.error = tostring(started)
+  elseif not started then
     StadiumInstall.status.state = "failed"
     StadiumInstall.status.error = tostring(err)
-    Stadium2Install.status.state = "failed"
-    Stadium2Install.status.error = tostring(err)
   end
-  if game and game.stack then
-    game.stack:push(StadiumScreen.new(game, true))
+  if okScreen and StadiumScreen and game and game.stack
+      and type(StadiumScreen.new) == "function" then
+    pcall(function() game.stack:push(StadiumScreen.new(game, true)) end)
   end
   return true
 end

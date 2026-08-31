@@ -31,7 +31,6 @@
 local V = ...
 
 local StadiumInstall = V.require("StadiumInstall")
-local Stadium2Install = V.require("Stadium2Install")
 
 local StadiumScreen = {}
 StadiumScreen.__index = StadiumScreen
@@ -146,16 +145,6 @@ function StadiumScreen.new(game, adopt)
                         adopted = adopt and true or false }, StadiumScreen)
 end
 
--- Detect which Stadium ROM is being used and return the appropriate install module
-local function getActiveInstall()
-  if Stadium2Install.available() then
-    return Stadium2Install, "Stadium 2"
-  elseif StadiumInstall.available() then
-    return StadiumInstall, "Stadium 1"
-  end
-  return StadiumInstall, "Stadium 1" -- Default to Stadium 1
-end
-
 -- ------- the same plate, saying something instead of doing something
 --
 -- A NOTE: title, a wrapped body, and a key to dismiss it. It exists because
@@ -166,10 +155,9 @@ end
 --
 -- Same state shape and the same plate as the build screen, so there is one
 -- look and one set of stack manners rather than two.
--- Optional callback parameter for when the note is dismissed (for Android picker)
-function StadiumScreen.newNote(game, title, lead, body, callback)
+function StadiumScreen.newNote(game, title, lead, body)
   return setmetatable({ game = game,
-                        note = { title = title, lead = lead, body = body, onDismiss = callback } },
+                        note = { title = title, lead = lead, body = body } },
                       StadiumScreen)
 end
 
@@ -212,10 +200,6 @@ function StadiumScreen:update()
         if input:wasPressed(btn) then
           if self.game.stack and self.game.stack:top() == self then
             self.game.stack:pop()
-            -- Call the callback if this note has one (for Android picker)
-            if self.note and self.note.onDismiss then
-              self.note.onDismiss()
-            end
           end
           return
         end
@@ -223,10 +207,9 @@ function StadiumScreen:update()
     end
     return
   end
-  local install, _ = getActiveInstall()
-  local status = install.status
+  local status = StadiumInstall.status
   if status.state == "building" then
-    if not install.step() then
+    if not StadiumInstall.step() then
       -- fell out of building: either finished or failed, both of which hold
       -- for a moment so the player sees which
       self.hold = 0
@@ -275,8 +258,7 @@ function StadiumScreen:onKeyPressed(key)
 end
 
 function StadiumScreen:draw()
-  local install, _ = getActiveInstall()
-  local status = install.status
+  local status = StadiumInstall.status
   love.graphics.setColor(0.93, 0.94, 0.90, 1)
   love.graphics.rectangle("fill", 0, 0, W, H)
 
@@ -313,7 +295,7 @@ function StadiumScreen:draw()
   end
 
   local done = status.done or 0
-  local total = status.total or install.COUNT
+  local total = status.total or StadiumInstall.COUNT
   local frac = (total > 0) and (done / total) or 1
   if status.state == "done" then frac = 1 end
   if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
@@ -341,8 +323,14 @@ function StadiumScreen:draw()
     -- offset in the reader was measured against: it may look fine, it may be
     -- subtly wrong, and the player is the only one who can swap the file
     if status.wrongVersion then
-      centred("NOT US 1.0 --", 104)
-      centred("MODELS MAY BE WRONG", 114)
+      if type(StadiumInstall.gameGeneration) == "function"
+          and StadiumInstall.gameGeneration() == 2 then
+        centred("NON-CANONICAL STADIUM 2 --", 104)
+        centred("ARCHIVES WERE VALIDATED", 114)
+      else
+        centred("NOT US 1.0 --", 104)
+        centred("MODELS MAY BE WRONG", 114)
+      end
     end
   else
     local name = speciesName(status.species)
@@ -370,14 +358,14 @@ function StadiumScreen.maybePush()
   if not (ok and Game and Game.stack and Game.overworld) then return false end
   if Game.stack:top() ~= Game.overworld then return false end
   asked = true
-  if not StadiumInstall.pending() and not Stadium2Install.pending() then
+  if not StadiumInstall.pending() then
     -- Say where to put a cartridge, ONCE, and only when there is nothing to
     -- build from and nothing already built. The two STADIUM rungs are simply
     -- absent in that case (ModSetting.setGate), which is the right thing for
     -- a row to do and tells the player nothing about why -- and the answer
     -- they need is an absolute path that depends on how the game was
     -- installed, so it cannot be written into the options help text.
-    if not StadiumInstall.available() and not Stadium2Install.available() then
+    if not StadiumInstall.available() then
       -- The IMPORT row is the answer wherever a file dialog can be opened,
       -- and it is the better one: no folder to create, no path to get right,
       -- no restart. The folder is still said, once, for the platforms with no
@@ -391,9 +379,13 @@ function StadiumScreen.maybePush()
       local label = (okPick and pick and pick.LABEL) or "STADIUM ROM"
       local how = (okPick and pick and pick.canDialog())
                   and "opens a file picker" or "says where to put one"
-      V.mod.log:info("stadium: no Pokemon Stadium ROM found (Stadium 1 US 1.0 or Stadium 2 US), so the "
-                     .. "STADIUM battle rungs are off. OPTIONS -> %s %s; the "
-                     .. "folder is %s", label, how, StadiumInstall.romHint())
+      local sourceName = (type(StadiumInstall.gameGeneration) == "function"
+                          and StadiumInstall.gameGeneration() == 2)
+                         and "Pokemon Stadium 2 ROM"
+                         or "Pokemon Stadium (US) 1.0 ROM"
+      V.mod.log:info("stadium: no %s found, so the STADIUM battle rungs are off. "
+                     .. "OPTIONS -> %s %s; the folder is %s", sourceName,
+                     label, how, StadiumInstall.romHint())
     end
     return false
   end

@@ -9,12 +9,12 @@
 -- of every eye, the highlight down a Pikachu's cheek: all of it turns into a
 -- hole with the world showing through, and the mon reads as a stencil.
 --
--- So the paper is put back, and only where the paper was: the pic is read
--- back once, the transparent region OUTSIDE the figure is flood-filled from
--- the border, and every transparent pixel the flood could not reach -- every
--- hole enclosed by the artwork -- is filled opaque white. The silhouette is
--- untouched, so the mon still cuts cleanly against the world; only its
--- insides stop being see-through.
+-- So the paper is put back, and only where the paper was. Which pixels those
+-- are is the whole problem, and it has to be ANSWERED rather than looked up:
+-- the hardware drew the mon's white belly and the white field behind it with
+-- the same shade, the decoder keyed both to the same alpha, and nothing in the
+-- image says which was which. There is no distinction to recover; there is one
+-- to draw.
 --
 -- The rule is a flood fill from OUTSIDE the figure: whatever the background
 -- can reach is background, and whatever it cannot is paper. What makes that
@@ -160,8 +160,7 @@ local function readBack(img)
   return ok and data or nil
 end
 
--- Mark every transparent pixel reachable from the border. That set is the
--- OUTSIDE; everything transparent it does not reach is an enclosed hole.
+-- The box the artwork actually occupies, or nil for a pic with no ink in it.
 --
 -- Not the image: a pic is centred in a 7x7-tile buffer and a small mon leaves
 -- whole rows and columns of nothing around itself. The bottom of THIS box is

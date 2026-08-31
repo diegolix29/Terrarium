@@ -90,7 +90,7 @@ FirstPerson.BLEND_TIME = 0.45
 
 -- ------- look input tuning
 --
--- MOUSE_SENS isradians per relative-mode count -- about 0.18 degrees per
+-- MOUSE_SENS is radians per relative-mode count -- about 0.18 degrees per
 -- count, the conventional shooter default. STICK rates are radians per
 -- second at full deflection, with a squared response curve so small
 -- deflections aim and full ones turn. TOUCH_TURN is what one full screen
@@ -98,7 +98,7 @@ FirstPerson.BLEND_TIME = 0.45
 FirstPerson.MOUSE_SENS = 0.0032
 FirstPerson.STICK_YAW = 3.5
 FirstPerson.STICK_PITCH = 2.4
-FirstPerson.STICK_DEAD = 0.12
+FirstPerson.STICK_DEAD = 0.18
 FirstPerson.TOUCH_TURN = 2.2 * math.pi
 FirstPerson.MOVE_DEAD = 0.25
 
@@ -249,7 +249,7 @@ end
 -- range it is the first-person problem word for word.
 function FirstPerson.hidePlayer()
   if ThirdPerson.showsPlayer() then return false end
-  return FirstPerson.cardBlend() > 0.5
+  return FirstPerson.cardBlend() > 0.9
 end
 
 -- ------- attitude
@@ -291,7 +291,7 @@ end
 -- which is the one A talks along.
 function FirstPerson.bodyBearing(wx, wz)
   if ThirdPerson.extended() and wx and wz and (wx ~= 0 or wz ~= 0) then
-    return wrapPi(math.atan2(wx, wz) + FirstPerson.yaw)
+    return math.atan2(wx, wz)
   end
   return FirstPerson.yaw
 end
@@ -784,15 +784,13 @@ function FirstPerson.install()
   local mouseHeld = {}
   local MOUSE_BTN = { [1] = "a", [2] = "b" }
   local function hordeMouse(button, down)
-    local ok, Horde = pcall(V.require, "Horde")
-    if not ok or not Horde.playing() then return false end
+    local Horde = V.require("Horde")
+    if not Horde.playing() then return false end
     if button == 1 then
-      local okGun, HordeGun = pcall(V.require, "HordeGun")
-      if okGun and down then HordeGun.fire() end
+      if down then V.require("HordeGun").fire() end
       return true
     elseif button == 2 then
-      local okGun, HordeGun = pcall(V.require, "HordeGun")
-      if okGun then HordeGun.setAds(down) end
+      V.require("HordeGun").setAds(down)
       return true
     end
     return false
@@ -881,10 +879,8 @@ function FirstPerson.install()
           -- a shooter that waits to find out whether you meant it is a
           -- shooter that misses. The same finger still becomes the look
           -- drag below, so aiming and firing are one gesture.
-          local ok, Horde = pcall(V.require, "Horde")
-          if ok and Horde.playing() then
-            local okGun, HordeGun = pcall(V.require, "HordeGun")
-            if okGun then HordeGun.fire() end
+          if V.require("Horde").playing() then
+            V.require("HordeGun").fire()
           end
           lookTouch = { id = id, x = x, y = y }
           return

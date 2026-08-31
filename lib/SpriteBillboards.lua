@@ -1,11 +1,5 @@
 -- Voxel world mode: characters as flat forward-facing sprite billboards.
 --
--- Gen2 patch: SPRITE_BIG_SNORLAX / SPRITE_BIG_LAPRAS (and any def.big sheet)
--- are 32x32 over a 2x2 cell footprint.  The stock card was hard-coded 16x16
--- and only sampled the top-left face tile — that is why DramaticShapes showed
--- a quarter of Snorlax.  Big sheets get a 32x32 card; 16-wide mirrored strips
--- get a dual-quad card that mirrors the left half in UV space.
---
 -- Every character -- the player, NPCs, the ghosts standing on a neighbour
 -- map -- is its CURRENT 2D sprite frame on a single flat quad. The sheets
 -- carry real alpha and the shader discards it, so the quad cuts the
@@ -27,6 +21,10 @@
 -- matrix mirrors, not extra meshes. UVs point into the live sheet image,
 -- so RED++ OBP bakes, SGB palette bakes and sprite-replacing mods all
 -- texture it with no rebuild.
+--
+-- The system now supports dynamic sprite dimensions with separate width and
+-- height scaling, allowing for custom sprite sizes beyond the original 16x16 pixels.
+-- Use def.scale for overall scaling, or def.heightScale for height-specific scaling.
 
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
@@ -38,102 +36,87 @@ local SpriteBillboards = {}
 
 local meshes = {}
 
-local function isBigDef(def)
-  if not def then return false end
-  if def.big then return true end
-  local id = def.id or ""
-  return id == "SPRITE_BIG_SNORLAX"
-    or id == "SPRITE_BIG_LAPRAS"
-    or id == "SPRITE_BIG_DOLL"
-end
-
--- Standard 16x16 walker frame (Gen1 / normal Gen2 NPCs).
-local function buildCard16(img, frame)
-  local iw, ih = img:getDimensions()
-  local fy = frame * 16
-  if fy + 16 > ih then fy = 0 end
-  local u0, u1 = 0.02 / iw, (16 - 0.02) / iw
-  local v0, v1 = (fy + 0.05) / ih, (fy + 15.95) / ih
-  local verts = {
-    { 0, 0, 0, u0, v1, 1 }, { 16, 0, 0, u1, v1, 1 },
-    { 16, 16, 0, u1, v0, 1 }, { 0, 16, 0, u0, v0, 1 },
-  }
-  local indices = {}
-  Voxel3D.pushQuad(indices, 0)
-  return Voxel3D.newMesh(verts, indices)
-end
-
--- Full 32x32 body (extractor already mirrored the left half into the sheet).
-local function buildCard32(img)
-  local iw, ih = img:getDimensions()
-  local u0, u1 = 0.02 / iw, (math.min(32, iw) - 0.02) / iw
-  local v0, v1 = 0.05 / ih, (math.min(32, ih) - 0.05) / ih
-  local verts = {
-    { 0, 0, 0, u0, v1, 1 }, { 32, 0, 0, u1, v1, 1 },
-    { 32, 32, 0, u1, v0, 1 }, { 0, 32, 0, u0, v0, 1 },
-  }
-  local indices = {}
-  Voxel3D.pushQuad(indices, 0)
-  return Voxel3D.newMesh(verts, indices)
-end
-
--- 16x32 left-half strip: two side-by-side quads, right one mirrors U.
-local function buildCardMirrored16x32(img)
-  local iw, ih = img:getDimensions()
-  local h = math.min(32, ih)
-  local u0, u1 = 0.02 / iw, (16 - 0.02) / iw
-  local v0, v1 = 0.05 / ih, (h - 0.05) / ih
-  -- left half
-  local verts = {
-    { 0, 0, 0, u0, v1, 1 }, { 16, 0, 0, u1, v1, 1 },
-    { 16, h, 0, u1, v0, 1 }, { 0, h, 0, u0, v0, 1 },
-    -- right half = mirror of left (u1→u0)
-    { 16, 0, 0, u1, v1, 1 }, { 32, 0, 0, u0, v1, 1 },
-    { 32, h, 0, u0, v0, 1 }, { 16, h, 0, u1, v0, 1 },
-  }
-  local indices = {}
-  Voxel3D.pushQuad(indices, 0)
-  Voxel3D.pushQuad(indices, 4)
-  return Voxel3D.newMesh(verts, indices)
-end
-
+-- One flat quad UV-mapped to a whole frame, with dynamic dimensions based on
+-- the actual sprite size. A hair of inset keeps the sampler inside this frame
+-- rather than picking up the neighbouring one along the shared edge.
 local function buildCard(def, frame)
   local ok, img = pcall(Assets.image, def.image)
   if not (ok and img) then return nil end
   local iw, ih = img:getDimensions()
-
-  if isBigDef(def) or iw >= 32 then
-    if iw >= 32 and ih >= 32 then
-      return buildCard32(img)
-    end
-    -- Still a 16-wide FacingBigDollSymmetric strip
-    return buildCardMirrored16x32(img)
+  
+  -- Calculate frame dimensions dynamically from the sprite sheet
+  -- Assume frames are arranged vertically in the sheet
+  local frameCount = def.frames or 1
+  local frameHeight = ih / frameCount
+  local frameWidth = iw  -- Assume full width is used for one frame
+  
+  -- Get scale factor from sprite definition (defaults to 1.0)
+  local scale = def.scale or 1.0
+  
+  -- Get height-specific scale factor (defaults to regular scale)
+  local heightScale = def.heightScale or scale
+  
+  -- Calculate world dimensions (physical size in 3D space)
+  local worldWidth = frameWidth * scale
+  local worldHeight = frameHeight * heightScale
+  
+  local fy = frame * frameHeight
+  if fy + frameHeight > ih then fy = 0 end
+  
+  -- Calculate UV coordinates with small inset to prevent bleeding
+  local insetX = 0.02
+  local insetY = 0.05
+  local u0, u1 = insetX / iw, (frameWidth - insetX) / iw
+  local v0, v1 = (fy + insetY) / ih, (fy + frameHeight - insetY) / ih
+  
+  -- Create quad vertices with world dimensions (scaled physical size)
+  local verts = {
+    { 0, 0, 0, u0, v1, 1 }, { worldWidth, 0, 0, u1, v1, 1 },
+    { worldWidth, worldHeight, 0, u1, v0, 1 }, { 0, worldHeight, 0, u0, v0, 1 },
+  }
+  local indices = {}
+  Voxel3D.pushQuad(indices, 0)
+  local mesh = Voxel3D.newMesh(verts, indices)
+  
+  -- Apply high-quality texture filtering for scaled sprites
+  if mesh and love and love.graphics then
+    -- Enable linear filtering for smooth downsampling
+    local filterMode = (scale < 1.0 or heightScale < 1.0) and "linear" or "nearest"
+    pcall(function()
+      mesh:setTexture(img)
+      img:setFilter(filterMode, filterMode, 16) -- 16x anisotropic for quality
+    end)
   end
-
-  return buildCard16(img, frame or 0)
+  
+  return mesh
 end
 
+-- The card for one (sprite def, frame index), or nil (headless / no
+-- image), cached like every other derived GPU object.
+--
+-- The solid draw, the sun pass and the player's occlusion silhouette all
+-- take THIS mesh. That the three agree is load-bearing, not tidiness: the
+-- silhouette is drawn with the depth test INVERTED, so any self-overlap in
+-- the mesh would read as "behind something" and repaint the figure on open
+-- ground whether or not anything hides it; and the sun must see the same
+-- outline the camera does, or a shadow stops matching what casts it.
 function SpriteBillboards.mesh(def, frame)
-  local big = isBigDef(def)
-  local key = def.image .. "#" .. (big and "big" or tostring(frame))
+  local key = def.image .. "#" .. frame
   if meshes[key] == nil then
     local ok, m = pcall(buildCard, def, frame)
     meshes[key] = (ok and m) or false
+    
+    -- Apply high-quality filtering to the image if mesh was created successfully
+    if ok and m then
+      local scale = def.scale or 1.0
+      local heightScale = def.heightScale or scale
+      local imgOk, img = pcall(Assets.image, def.image)
+      if imgOk and img then
+        SpriteBillboards.setHighQualityFiltering(img, scale, heightScale)
+      end
+    end
   end
   return meshes[key] or nil
-end
-
-SpriteBillboards.shadowQuad = SpriteBillboards.mesh
-
-function SpriteBillboards.invalidate()
-  meshes = {}
-end
-
--- World-space half-width used by VoxelScene to centre the card on the
--- footprint (8 for 16px walkers, 16 for 32px big dolls).
-function SpriteBillboards.halfWidth(def)
-  if isBigDef(def) then return 16 end
-  return 8
 end
 
 -- Get the dimensions of a sprite frame for dynamic sizing
@@ -143,16 +126,73 @@ function SpriteBillboards.getSpriteDimensions(def, frame)
   if not (ok and img) then return 16, 16, 16, 16 end
   local iw, ih = img:getDimensions()
   
-  if isBigDef(def) or iw >= 32 then
-    if iw >= 32 and ih >= 32 then
-      return 32, 32, 32, 32
-    end
-    return 32, math.min(32, ih), 32, math.min(32, ih)
+  -- Calculate frame dimensions dynamically from the sprite sheet
+  local frameCount = def.frames or 1
+  local frameHeight = ih / frameCount
+  local frameWidth = iw  -- Assume full width is used for one frame
+  
+  -- Get scale factor from sprite definition (defaults to 1.0)
+  local scale = def.scale or 1.0
+  
+  -- Get height-specific scale factor (defaults to regular scale)
+  local heightScale = def.heightScale or scale
+  
+  -- Calculate world dimensions (physical size in 3D space)
+  local worldWidth = frameWidth * scale
+  local worldHeight = frameHeight * heightScale
+  
+  return frameWidth, frameHeight, worldWidth, worldHeight
+end
+
+-- Set high-quality texture filtering for scaled sprites
+-- This ensures that sprites scaled down to 0.25 or less still look sharp
+function SpriteBillboards.setHighQualityFiltering(img, scale, heightScale)
+  if not (img and love and love.graphics) then return end
+  
+  local filterMode = "linear"
+  local anisotropy = 16 -- Maximum anisotropic filtering for quality
+  
+  -- Use the smaller of the two scales for quality determination
+  local effectiveScale = math.min(scale or 1.0, heightScale or 1.0)
+  
+  -- For very small scales, use maximum quality settings
+  if effectiveScale < 0.5 then
+    anisotropy = 16
+  elseif effectiveScale < 0.75 then
+    anisotropy = 8
+  else
+    anisotropy = 4
   end
   
-  local fy = (frame or 0) * 16
-  if fy + 16 > ih then fy = 0 end
-  return 16, 16, 16, 16
+  pcall(function()
+    img:setFilter(filterMode, filterMode, anisotropy)
+    -- Set mipmap filter for better downscaling quality
+    img:setMipmapFilter(filterMode, 0.5) -- 0.5 sharpness balance
+  end)
+end
+
+-- Get the recommended LOD bias for a sprite based on scale
+function SpriteBillboards.getLodBiasForScale(scale)
+  local lodBias = 0.0
+  if scale < 0.25 then
+    lodBias = -2.0  -- Maximum sharpness for very small sprites
+  elseif scale < 0.5 then
+    lodBias = -1.5  -- High sharpness for small sprites
+  elseif scale < 0.75 then
+    lodBias = -1.0  -- Moderate sharpness
+  else
+    lodBias = -0.5  -- Slight sharpness boost
+  end
+  return lodBias
+end
+
+-- Kept as its own name because the shadow and ghost passes read as their
+-- own thing at the call sites; it once carried a different mesh from the
+-- solid draw, and now deliberately does not.
+SpriteBillboards.shadowQuad = SpriteBillboards.mesh
+
+function SpriteBillboards.invalidate()
+  meshes = {}
 end
 
 Assets.register(SpriteBillboards.invalidate)

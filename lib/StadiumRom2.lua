@@ -198,15 +198,41 @@ function Rom:attachAnimations(data, fileno)
   return true
 end
 
--- Stadium 2's battle move/context routing table has not yet been mapped into
--- this extractor.  For overworld use we need a stable valid standby clip, so
--- all 185 Stadium-format routing slots conservatively select animation 0.
--- This keeps Gold/Silver overworld models animated without inventing semantic
--- attack/faint labels.  A later verified GS routing-table map can replace this
--- function without changing the DSM format or importer UI.
-function Rom:battleRows(_species)
+-- Stadium 2's real per-move battle routing table (which of the 165 moves
+-- plays which clip) has not been reverse engineered. What HAS been reverse
+-- engineered -- and is already decoded above in attachAnimations -- is each
+-- species' own ordered bank of named clips (idle, attack, faint, entrance,
+-- ...), same as Stadium 1's clip ordering convention. Rather than pin every
+-- slot to clip 0 (which only ever shows idle motion), every move shares the
+-- species' one general-purpose "attack" clip, and the named context slots
+-- point at their real counterparts when the species has that many clips.
+-- This is the same generic-routing approach other Stadium 2 ports use until
+-- a real move-by-move table exists; it can be replaced without changing the
+-- DSM format or importer UI. attachAnimations always runs first (see
+-- StadiumBuild.species), so self._animCounts[species] is already populated.
+function Rom:battleRows(species)
+  local n = (self._animCounts and self._animCounts[species]) or 1
+  local idle     = 0
+  local attack   = n > 1 and 1 or idle
+  local faint    = n > 2 and 2 or idle
+  local entrance = n > 3 and 3 or idle
+
   local rows = {}
-  for e = 0, 184 do rows[e] = { 0, -1 } end
+  for e = 0, 184 do rows[e] = { idle, -1 } end
+  for m = 0, StadiumRom.N_MOVES - 1 do rows[m] = { attack, -1 } end
+
+  -- Context slots start at 165, in StadiumBuild.CONTEXTS order: idle,
+  -- attack_default, faint, entrance, six reaction slots, struggle, idle_alt,
+  -- faint_alt, flinch, four more reaction slots, entrance_alt, idle_return.
+  rows[165] = { idle, 0 }      -- idle
+  rows[166] = { attack, 0 }    -- attack_default
+  rows[167] = { faint, 0 }     -- faint
+  rows[168] = { entrance, 0 }  -- entrance
+  rows[176] = { idle, 0 }      -- idle_alt
+  rows[177] = { faint, 0 }     -- faint_alt
+  rows[183] = { entrance, 0 }  -- entrance_alt
+  rows[184] = { idle, 0 }      -- idle_return
+
   rows.n = 185
   return rows
 end

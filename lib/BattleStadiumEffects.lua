@@ -768,11 +768,14 @@ local FAMILY = {
   ICE = "ice",
   PSYCHIC = "psychic",
   POISON = "poison",
+  -- Dark is a special type in Gen 2; reuse the readable psychic/shadow-like
+  -- procedural family for moves without a dedicated signature effect.
+  DARK = "psychic",
 }
 
 local PHYSICAL = {
   NORMAL = true, FIGHTING = true, GROUND = true, ROCK = true,
-  BUG = true, GHOST = true, DRAGON = true,
+  BUG = true, GHOST = true, DRAGON = true, STEEL = true,
 }
 
 local function familyFor(def)

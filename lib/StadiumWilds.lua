@@ -306,12 +306,36 @@ function StadiumWilds.drawEntity(entity)
   local y = entity.py or 0
   local gh = entity.gh or 0
   
+  -- For Gen 2, ensure we get the correct ground height from the map
+  -- This fixes sprite placement issues where sprites appear on top of ledges
+  local mod = V.mod
+  local map = mod and mod.world and mod.world.map
+  if map and entity.cellX and entity.cellY then
+    local VoxelScene = V.require("VoxelScene")
+    local okGround, correctGh = pcall(VoxelScene.groundAt, map, entity.cellX, entity.cellY)
+    if okGround and correctGh ~= nil then
+      gh = correctGh
+    end
+  end
+  
   -- Determine facing direction
   local facing = entity.facing or "down"
+  
+  -- Check if we're in free-roam mode (1st or 3rd person)
+  local FirstPerson = V.require("FirstPerson")
+  local b = FirstPerson.cardBlend()
+  
   local fx, fz = 0, 1
-  if facing == "up" then fx, fz = 0, -1
-  elseif facing == "left" then fx, fz = -1, 0
-  elseif facing == "right" then fx, fz = 1, 0
+  if b > 0 then
+    -- In free-roam mode, use camera-relative direction
+    local yaw = FirstPerson.cardYaw(x + 8, y + 8)
+    fx, fz = math.sin(yaw), math.cos(yaw)
+  else
+    -- In normal mode, use entity's facing direction
+    if facing == "up" then fx, fz = 0, -1
+    elseif facing == "left" then fx, fz = -1, 0
+    elseif facing == "right" then fx, fz = 1, 0
+    end
   end
   
   -- Build model matrix using StadiumMon's matrix method
