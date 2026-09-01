@@ -204,18 +204,18 @@ local function groundAt(map, cellX, cellY)
   -- exactly one step -- the "hops like a ledge" seam bug.
   if not map:inBounds(cellX, cellY) then return 0 end
   local shapes = TileShape.forMap(map)
-  local tile = map:cellTile(cellX, cellY)
-  -- Gen 2 tilesets carry NO per-tile fallback in `shapes` (forMap skips it
-  -- deliberately -- see its `perTile` comment): an unauthored tile there
-  -- resolves only through TileShape.at's cell-level rules -- the collision
-  -- class table (a counter, a bookcase, a console...) and the plain
-  -- walkable/water checks. Indexing `shapes[tile]` straight past those, as
-  -- this used to, answers `wall` (16px, upright) for every one of them, so
-  -- Gen 2 furniture -- and Gen 2 floor tiles with no explicit ground pin --
-  -- stood characters at wall height instead of the furniture's own, or the
-  -- floor's 0. Gen 1 never had a class table, so its `shapes[tile]` was
-  -- already the fully-resolved answer and this changes nothing for it.
-  local s = TileShape.at(map, shapes, tile, cellX * 2, cellY * 2 + 1)
+  -- The same full resolution the mesher draws with, NOT the raw collision
+  -- table: on Gen 2, map:cellTile answers a COLLISION CLASS (a counter, a
+  -- bookcase, a console...), not a tile id. Indexing TileShape with that
+  -- class resolved some unrelated tile's box instead of the one actually
+  -- underfoot, and stood every character above the floor/furniture they
+  -- were standing on -- the "characters float above the ground" bug on
+  -- Gen 2 maps. map:tileAt(tx, ty) is the real tile id at the same
+  -- sub-cell TileShape.at expects; Gen 1 resolves identically either way,
+  -- since its cellTile already returns a tile id.
+  local tx, ty = cellX * 2, cellY * 2 + 1
+  local tile = map:tileAt(tx, ty)
+  local s = TileShape.at(map, shapes, tile, tx, ty)
   if not s then return 0 end
   -- a recessed class (water) still supports whatever stands on it; only
   -- raised ground lifts the model.  Stairs never do: the class height is
@@ -300,10 +300,11 @@ local ROUND_ART = {
 local function flatTop(map, cellX, cellY)
   if not map:inBounds(cellX, cellY) then return false end
   local shapes = TileShape.forMap(map)
-  local tile = map:cellTile(cellX, cellY)
-  -- Same reasoning as groundAt above: Gen 2 needs TileShape.at's cell rules
-  -- to resolve a class at all, so this has to ask the same way groundAt does.
-  local s = TileShape.at(map, shapes, tile, cellX * 2, cellY * 2 + 1)
+  -- Same reasoning as groundAt above: on Gen 2, map:cellTile is a collision
+  -- class, not a tile id, so this has to resolve the real tile the same way
+  -- groundAt does (map:tileAt at the full-resolution sub-cell).
+  local tx, ty = cellX * 2, cellY * 2 + 1
+  local s = TileShape.at(map, shapes, map:tileAt(tx, ty), tx, ty)
   -- no shape is flat ground at zero, which groundAt already reports as 0 and
   -- every caller here rejects on its own
   if not s then return true end

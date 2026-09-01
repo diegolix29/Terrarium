@@ -50,7 +50,7 @@ StadiumInstall.MARKER = StadiumInstall.DIR .. "/pack.info"
 
 -- Bumped whenever the .dsm format changes, so an old cache is rebuilt rather
 -- than misread. Must track StadiumPack's magic.
-StadiumInstall.FORMAT = "DSM7"
+StadiumInstall.FORMAT = "DSM4"
 
 -- Bumped when the packs' CONTENT changes without the byte layout moving, so
 -- a cache built by an older extractor is rebuilt rather than trusted. Rev 2

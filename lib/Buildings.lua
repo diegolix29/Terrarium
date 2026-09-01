@@ -1536,15 +1536,29 @@ function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
   end
 
   -- the ground the building stands on: the commonest flat tile around its
-  -- feet, so a house on a path keeps its path
+  -- feet, so a house on a path keeps its path -- and, by the same vote, the
+  -- HEIGHT of that ground.
+  --
+  -- A model is built in its own space starting at y = 0 and copied into
+  -- place; until this datum vote is applied only x and z move, so every
+  -- building stands on the world datum whatever it is. On flat ground that
+  -- is invisible. Put a house on a TERRACE (common on Gen-2 maps) and it is
+  -- a house sunk to its eaves in the deck.
   local votes, best, bestN = {}, nil, 0
+  local hvotes, base, baseN = {}, 0, 0
   local function vote(x, y)
     local k = keyOf(x, y)
     local ns = S.shapeAt[k]
-    if ns and ns.flat and ns.class ~= "void" then
+    -- a TERRACE is ground you stand on even though its art rides the top
+    -- face of a box, so it votes for the datum alongside flat ground; only
+    -- its TILE stays out of the paint vote below.
+    if ns and (ns.flat or ns.class == "terrace") and ns.class ~= "void" then
       local tile = S.tileAt[k]
       votes[tile] = (votes[tile] or 0) + 1
       if votes[tile] > bestN then best, bestN = tile, votes[tile] end
+      local h = ns.h or 0
+      hvotes[h] = (hvotes[h] or 0) + 1
+      if hvotes[h] > baseN then base, baseN = h, hvotes[h] end
     end
   end
   for c = 0, bw - 1 do
@@ -1556,10 +1570,26 @@ function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
     vote(tx + bw, ty + r)
   end
 
+  -- the vote is in: tell the mesher which datum this plot stands on, so the
+  -- floor it paints under the model rises with it
+  shape.base = base
   for r = 0, bh - 1 do
     for c = 0, bw - 1 do
       local k = keyOf(tx + c, ty + r)
-      if keep and keep[S.tileAt[k]] then
+      -- A COORDINATE OVERRIDE IS NEVER CLAIMED.
+      --
+      -- The stamp replaces a footprint tile's shape outright, so a height
+      -- set on one square of a modelled building was resolved by TileShape
+      -- and then overwritten here -- the edit existed everywhere except in
+      -- the world. A profile pin is still claimed (`authored` alone is not
+      -- enough): a pinned facade tile inside a house is a statement about
+      -- the DRAWING, and the house is the more specific answer. A
+      -- coordinate override is a statement about that square of that map,
+      -- made by somebody looking at the thing they are overruling.
+      local cur = S.shapeAt[k]
+      if cur and cur.override then
+        S.ground[k] = best or false
+      elseif keep and keep[S.tileAt[k]] then
         -- unclaimed by request: the tile keeps its pin (the plant's
         -- cutout pool) and the standee scan finds it there. Only the
         -- ground is set now, so the scan's own claim of these tiles has
@@ -1575,13 +1605,14 @@ function Buildings.stamp(S, map, quads, tx, ty, bw, bh, t)
   end
 
   local mx, mz = tx * 8, ty * 8
+  local my = base
   local out = S.objectQuads
   for _, q in ipairs(quads) do
     out[#out + 1] = {
-      { q[1][1] + mx, q[1][2], q[1][3] + mz },
-      { q[2][1] + mx, q[2][2], q[2][3] + mz },
-      { q[3][1] + mx, q[3][2], q[3][3] + mz },
-      { q[4][1] + mx, q[4][2], q[4][3] + mz },
+      { q[1][1] + mx, q[1][2] + my, q[1][3] + mz },
+      { q[2][1] + mx, q[2][2] + my, q[2][3] + mz },
+      { q[3][1] + mx, q[3][2] + my, q[3][3] + mz },
+      { q[4][1] + mx, q[4][2] + my, q[4][3] + mz },
       uv = q.uv, shade = q.shade,
       -- placements only ever scan the BODY, so a building is always this
       -- map's own structure: the mesher's edge keep-rules must not eat

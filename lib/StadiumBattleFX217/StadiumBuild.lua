@@ -26,6 +26,7 @@ local V = ...
 local StadiumRom = V.require("StadiumModelRom")
 local StadiumFragment = V.require("StadiumFragment")
 local StadiumFx = V.require("StadiumFx")
+local AnimationRouting = V.require("AnimationRouting")
 
 local StadiumBuild = {}
 
@@ -136,6 +137,9 @@ end
 -- bone's own accumulated scale applied on the right. Folding the scale into
 -- the chain instead applies every ancestor's scale twice -- which is exactly
 -- the multiplicative propagation glTF has and the game does not.
+--
+-- Returns both draw matrices (with scale applied) and pivot matrices (without scale)
+-- for proper normal transformation on non-uniformly scaled species.
 local function bindMatrices(bones, sample)
   sample = sample or restSample(bones)
   local pivot, draw, acc = {}, {}, {}
@@ -161,7 +165,10 @@ local function bindMatrices(bones, sample)
       { m[3][1] * a[1], m[3][2] * a[2], m[3][3] * a[3], m[3][4] },
     }
   end
-  return draw
+  -- Callers posing renderable models also need the rotation/translation-only
+  -- chain for normals.  Applying accumulated bone scale to a normal distorts
+  -- lighting on non-uniformly scaled species (Muk is a conspicuous case).
+  return draw, pivot
 end
 
 StadiumBuild.bindMatrices = bindMatrices
@@ -492,6 +499,12 @@ local function labelAnimations(data, rows, nAux)
     anims[i].aux = best
   end
 
+  -- Apply animation routing to pair skeletal clips with texture/facial streams
+  -- This aligns external animations with auxiliary streams using duration matching
+  if #anims > 0 and #data.auxAnims > 0 then
+    AnimationRouting.apply(anims, data.auxAnims)
+  end
+
   local seenName = {}
   for i = 1, n do
     local base = anims[i].name
@@ -507,7 +520,6 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   local w = newWriter()
   local bones, prims = data.bones, data.prims
   local textures, anims, aux = data.textures, data.anims, data.auxAnims
-  local attachments = data.attachments or {}
 
   local height, floorY, radius = stance(data)
 
@@ -515,14 +527,13 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   local idle = (idleIndex ~= NONE16) and anims[idleIndex + 1] or nil
   local static = idleIsBroken(data, idle)
 
-  w:raw("DSM7")
+  w:raw("DSM4")
   w:u16(species)
   w:u16(#bones)
   w:u16(#prims)
   w:u16(#textures)
   w:u16(#anims)
   w:u16(#aux)
-  w:u16(#attachments)
   w:f32(data.rootScale[1])
   -- 1 = hold the bind pose, never play an animation
   w:u8(static and 1 or 0)
@@ -538,31 +549,7 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
     local row = moveRows[m]
     w:i16((row and row[2] >= 0 and row[2] < #aux) and row[2] or -1)
   end
-  -- Stadium invokes a primary effect once for byte 2 and, when byte 3 is not
-  -- 0xFF, once more for byte 3. Keep the raw sentinel: it means the
-  -- combatant's body origin, not attachment tag 0xFF.
-  for m = 1, N_MOVES do w:u8((moveRows[m] and moveRows[m][3]) or 0xFF) end
-  for m = 1, N_MOVES do w:u8((moveRows[m] and moveRows[m][4]) or 0xFF) end
-  -- DSM6 retained the twelve bytes DSM5 discarded; DSM7 keeps those rows
-  -- and adds per-material texture-coordinate generation for the renderer.
-  for m = 1, N_MOVES do
-    local row = moveRows[m]
-    for field = 5, 16 do
-      w:u8((row and row.raw and row.raw[field]) or 0)
-    end
-  end
   for i = 1, #ctx do w:u16(ctx[i]) end
-  -- Defender/impact effects take their tags from context row 168 (A80), but
-  -- retain every context row so this format remains a faithful battle-table
-  -- carrier rather than baking one caller's interpretation into the pack.
-  for i = 1, #ctx do
-    local row = data.battleRows and data.battleRows[CTX_BASE + i - 1]
-    w:u8((row and row[3]) or 0xFF)
-  end
-  for i = 1, #ctx do
-    local row = data.battleRows and data.battleRows[CTX_BASE + i - 1]
-    w:u8((row and row[4]) or 0xFF)
-  end
 
   for i = 1, #bones do
     local b = bones[i]
@@ -572,24 +559,26 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
     for k = 1, 3 do w:i32(fixed(b.s[k])) end
   end
 
-  -- Geo command 0x24 registers a tag at the current animated bone origin.
-  -- Both values stay signed because -1 is the extractor's "outside a bone"
-  -- sentinel; such a record is preserved for oracle parity and ignored by
-  -- the runtime lookup.
-  for i = 1, #attachments do
-    w:i16(attachments[i].bone)
-    w:i16(attachments[i].tag)
-  end
-
   for i = 1, #prims do
     local p = prims[i]
     w:u16(p.tex)
-    -- the display list's own cull mode: 1024 is G_CULL_BACK
-    w:u8((p.cull and p.cull ~= 0) and 1 or 0)
-    w:u8((p.blend == "add") and 1 or 0)
-    w:u8(p.texGen and 1 or 0)
+    local flags = ((p.cull and p.cull ~= 0) and 1 or 0)
+      + ((p.blend == "add") and 2 or 0)
+      + (p.lighting and 4 or 0)
+      + (p.callbackTextureRequired and 8 or 0)
+      + (p.vertexSemantics == "color" and 16 or 0)
+      + (p.sourceTextureMissing and 32 or 0)
+      + (p.decal and 64 or 0)
+      + (p.effect == "fire" and 128 or 0)
+    w:u8(flags)
+    w:u32(p.geometryMode or 0)
+    local sampler = p.sampler or {}
+    w:u8(sampler.cms or 0); w:u8(sampler.cmt or 0)
+    w:u8(sampler.masks or 0); w:u8(sampler.maskt or 0)
+    w:u8(sampler.shifts or 0); w:u8(sampler.shiftt or 0)
+    local scale = p.textureScale or { 1, 1 }
+    w:f32(scale[1] or 1); w:f32(scale[2] or 1)
     w:i16(p.texAnim or -1)
-    -- sorted by the stream's own byte, which is what the reader keys on
     local keys = {}
     if p.texMap then
       for k in pairs(p.texMap) do keys[#keys + 1] = k end
@@ -605,21 +594,24 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
     if frames then
       for k = 1, #frames do w:u16(frames[k]) end
     end
-    local pos, uv, nrm, skin = p.pos, p.uv, p.nrm, p.skin
+    local pos, uv, nrm, color, skin = p.pos, p.uv, p.nrm, p.color, p.skin
     w:u16(p.nverts)
     w:u16(p.nidx)
     for k = 1, p.nverts do
       w:i16(pos[k * 3 - 2])
       w:i16(pos[k * 3 - 1])
       w:i16(pos[k * 3])
-      -- 1/512, which puts a texel of the largest texture in the set well
-      -- inside a step and still reaches the +-32 the wrapped coordinates of
-      -- some display lists run to
       w:i16(roundHalfEven(uv[k * 2 - 1] * 512))
       w:i16(roundHalfEven(uv[k * 2] * 512))
-      w:i8(roundHalfEven(nrm[k * 3 - 2] * 127))
-      w:i8(roundHalfEven(nrm[k * 3 - 1] * 127))
-      w:i8(roundHalfEven(nrm[k * 3] * 127))
+      if color then
+        w:u8(color[k * 4 - 3]); w:u8(color[k * 4 - 2])
+        w:u8(color[k * 4 - 1]); w:u8(color[k * 4])
+      else
+        w:u8(roundHalfEven(nrm[k * 3 - 2] * 127) % 256)
+        w:u8(roundHalfEven(nrm[k * 3 - 1] * 127) % 256)
+        w:u8(roundHalfEven(nrm[k * 3] * 127) % 256)
+        w:u8(255)
+      end
       w:u8(skin[k])
     end
     for k = 1, p.nidx do w:u16(p.idx[k]) end
@@ -671,6 +663,15 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
     for _, ch in ipairs(a.channels) do
       w:u16(ch.n)
       for k = 1, ch.n do w:u16(ch[k]) end
+    end
+  end
+
+  -- Add handler extension if present (for model handlers system)
+  if data.handlerOps and #data.handlerOps > 0 then
+    local Handlers = V.require("StadiumModelHandlers") or {}
+    if Handlers.packExtension then
+      w:raw(Handlers.packExtension(data.handlerOps, data.handlerSourceBase or 0x8FF00000,
+        data.handlerFragment or "", { prims = prims, handlerTextures = data.handlerTextures or {} }))
     end
   end
 
