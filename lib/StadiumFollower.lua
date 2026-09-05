@@ -105,17 +105,8 @@ function StadiumFollower.setSpecies(dex)
     return true
   end
   
-  -- Load the Stadium model - use Stadium2Pack for Gen 2 (152-251)
-  local model
-  print("[StadiumFollower.setSpecies] Loading model for dex:", dex)
-  
-  if dex > 151 then
-    print("[StadiumFollower.setSpecies] Gen 2 Pokemon, using Stadium2Pack")
-    model = Stadium2Pack.load(dex, false)
-  else
-    print("[StadiumFollower.setSpecies] Gen 1 Pokemon, using StadiumPack")
-    model = StadiumPack.load(dex, false)
-  end
+  -- Full DSM3 packs from either ROM install are read by StadiumPack.
+  local model = StadiumPack.load(dex, false)
   
   if not model then
     print("StadiumFollower: Failed to load model for dex", dex)

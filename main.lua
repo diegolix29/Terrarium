@@ -145,6 +145,10 @@ local VoxelGrid = V.require("VoxelGrid")
 local WorldCurve = V.require("WorldCurve")
 local Aerial = V.require("Aerial")
 local Skyline = V.require("Skyline")
+-- Additional modules for Dramatic Shape compatibility
+local Mat4 = V.require("Mat4")
+local ShadowMap = V.require("ShadowMap")
+local SpriteBillboards = V.require("SpriteBillboards")
 -- restored from DRAMATIC_SHAPE: the camera-distance row and the
 -- diorama's own draw-distance ladder, both dropped by TERRARIUM's fork
 local ViewBox = V.require("ViewBox")
@@ -203,6 +207,38 @@ local Backdrop = V.require("Backdrop")
 local SkyLayer = V.require("SkyLayer")
 local Flora = V.require("Flora")
 local ModSetting = V.require("ModSetting")
+
+-- StadiumBattleFX settings
+local stadiumFxEnabled = ModSetting.new("stadiumFxPortEnabled", "STADIUM FX",
+  { true, false }, { "ON", "OFF" })
+local stadiumTrainerPortraits = ModSetting.new("stadiumTrainerPortraits", "TRAINER PORTRAITS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxAttackCamera = ModSetting.new("stadiumFxAttackCamera", "ATTACK CAMERA",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxAttackSpeed = ModSetting.new("stadiumFxAttackSpeed", "ATTACK SPEED",
+  { "50", "75", "100", "125", "150" }, { "50%", "75%", "100%", "125%", "150%" })
+local stadiumAnnouncer = ModSetting.new("stadiumAnnouncer", "ANNOUNCER",
+  { true, false }, { "ON", "OFF" })
+local stadiumAnnouncerScope = ModSetting.new("stadiumAnnouncerScope", "ANNOUNCER SCOPE",
+  { "gym", "trainer", "all" }, { "GYM ONLY", "TRAINER", "ALL BATTLES" })
+local stadiumFxCinematicZoom = ModSetting.new("stadiumFxCinematicZoom", "CINEMATIC ZOOM",
+  { "off", "10", "25", "50" }, { "OFF", "10%", "25%", "50%" })
+local stadiumBossArenas = ModSetting.new("stadiumBossArenas", "BOSS ARENAS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxScreenEffects = ModSetting.new("stadiumFxScreenEffects", "SCREEN EFFECTS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxHitReactions = ModSetting.new("stadiumFxHitReactions", "HIT REACTIONS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxFaintAnimations = ModSetting.new("stadiumFxFaintAnimations", "FAINT ANIMATIONS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxNativeScheduler = ModSetting.new("stadiumFxNativeScheduler", "NATIVE SCHEDULER",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxNativeSync = ModSetting.new("stadiumFxNativeSync", "NATIVE SYNC",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxFallbackNotice = ModSetting.new("stadiumFxFallbackNotice", "FALLBACK NOTICE",
+  { true, false }, { "ON", "OFF" })
+local stadiumFx2DLayer = ModSetting.new("stadiumFx2DLayer", "2D EFFECT LAYER",
+  { "authentic", "all", "off" }, { "AUTHENTIC", "ALL", "OFF" })
 
 -- ds_fp_ceiling additional settings
 local fpShadows = ModSetting.new("fpshadows", "CONTACT SHADOW",
@@ -965,7 +1001,13 @@ local SETTINGS = {
     full = true, cat = "weather" },
   -- `full = true` like WEATHER: clouds are what the sky is doing, not a
   -- camera filter, and FULL is where people watch a storm roll in.
-  -- Note: Sky.cloudSetting removed - cloud functionality not available in this version
+  { Sky.cloudSetting,
+    "Volumetric clouds, painted into the sky pass itself rather than drawn "
+    .. "as a flat layer. ON keeps a few fair-weather puffs drifting even "
+    .. "under a clear hour, thickening on their own as WEATHER builds a "
+    .. "front. THICK forces a heavier deck at every hour, clear or not, for "
+    .. "screenshots or a showcase run. OFF leaves the sky the bands alone.",
+    full = true, cat = "weather" },
   -- `full = true` like WEATHER, and for the same reason: what the ground is
   -- doing after a shower is what the world is doing, not a knob on the
   -- camera. Offered only while the WEATHER row can produce something to
@@ -1167,6 +1209,55 @@ local SETTINGS = {
     "Pokemon GO-style catching -- flick to throw the ball, with FULL "
     .. "adding half-price balls and party experience (needs 3D-BTL).",
     full = true, cat = "battles" },
+  -- ------- StadiumBattleFX settings
+  --
+  -- These control the Pokemon Stadium-style battle effects presentation
+  { stadiumFxEnabled,
+    "Enables Pokemon Stadium-style battle effects, including attack animations, "
+    .. "camera movements, and presentation enhancements.",
+    cat = "battles" },
+  { stadiumTrainerPortraits,
+    "Shows Stadium-style trainer portraits during battles. Requires Stadium 1 ROM for Gen 1 trainers.",
+    cat = "battles" },
+  { stadiumFxAttackCamera,
+    "Enables dynamic camera movements during attack animations for a more cinematic presentation.",
+    cat = "battles" },
+  { stadiumFxAttackSpeed,
+    "Adjusts the speed of attack animations. Higher values make attacks faster.",
+    cat = "battles" },
+  { stadiumAnnouncer,
+    "Enables the Stadium announcer voice during battles. Requires Stadium 1 ROM for voice data.",
+    cat = "battles" },
+  { stadiumAnnouncerScope,
+    "Controls when the announcer speaks: gym leader battles only, trainer battles, or all battles including wild encounters.",
+    cat = "battles" },
+  { stadiumFxCinematicZoom,
+    "Controls the intensity of camera zoom effects during powerful attacks.",
+    cat = "battles" },
+  { stadiumBossArenas,
+    "Enables special gym leader and Elite Four arena backgrounds during important battles.",
+    cat = "battles" },
+  { stadiumFxScreenEffects,
+    "Enables screen-wide effects like flashes, shakes, and color tints during attacks.",
+    cat = "battles" },
+  { stadiumFxHitReactions,
+    "Enables Pokemon flinch and recoil animations when taking damage.",
+    cat = "battles" },
+  { stadiumFxFaintAnimations,
+    "Enables special Pokemon fainting animations when HP reaches zero.",
+    cat = "battles" },
+  { stadiumFxNativeScheduler,
+    "Uses the game's native animation timing for Stadium effects.",
+    cat = "battles" },
+  { stadiumFxNativeSync,
+    "Syncs Stadium model animations with the game's battle timing.",
+    cat = "battles" },
+  { stadiumFxFallbackNotice,
+    "Shows a notification when Stadium effects fall back to generic animations.",
+    cat = "battles" },
+  { stadiumFx2DLayer,
+    "Controls which 2D battle effects are shown: authentic Stadium effects, all effects, or none.",
+    cat = "battles" },
   -- `full` for the reason the battle rows have it and more plainly: this is
   -- not a knob on the diorama at all, it is what the grass is made of. A
   -- preset that owns the look has no business owning it.
@@ -3001,6 +3092,23 @@ local function installOverworldStadium()
     mod.log:warn("BattleStadium3DFx not loaded: %s", tostring(fxErr))
   end
 
+  -- StadiumBattleFX 2.1.7: authentic move FX, boss arenas, announcer, portraits.
+  -- The source tree lives under lib/StadiumBattleFX217/; this port adapts it to
+  -- Gold's live overworld battle compositor.  Without install() the Lua files
+  -- load but none of the battle hooks or ROM-derived caches ever start.
+  local StadiumBattleFXPort, portErr = loadLocal("lib/StadiumBattleFXPort.lua", OverworldV)
+  if StadiumBattleFXPort then
+    OverworldV.StadiumBattleFXPort = StadiumBattleFXPort
+    local portInstalled, portInstallErr = pcall(StadiumBattleFXPort.install)
+    if portInstalled and portInstallErr ~= false then
+      mod.log:info("StadiumBattleFX 2.1.7 Gold presentation layer installed")
+    else
+      mod.log:warn("StadiumBattleFX port not installed: %s", tostring(portInstallErr))
+    end
+  else
+    mod.log:warn("StadiumBattleFXPort not loaded: %s", tostring(portErr))
+  end
+
   -- Exports for companion mods
   mod.exports.overworld = OverworldStadium
   mod.exports.romMenu = StadiumRomMenu
@@ -3067,3 +3175,49 @@ mod.exports.version = "1.15.0-mobile.snow.1"
 mod.exports.lib = V
 mod.exports.pipelines = { voxel = PIPE_VOXEL, tiltshift = PIPE_TILT }
 mod.exports.keys = V.KEYS
+
+-- Mark this mod as providing Dramatic Shape compatibility for mod.find()
+-- This allows gen1_true_3d_characters and other mods to find us via mod.find("DRAMATIC_SHAPE")
+mod.exports._dramaticShapeCompat = true
+
+-- Compatibility layer for gen1_true_3d_characters and other Dramatic Shape-dependent mods
+-- Ensure VoxelScene and related modules are properly exported for compatibility
+if VoxelScene then
+  V.VoxelScene = VoxelScene
+end
+if Voxel3D then
+  V.Voxel3D = Voxel3D
+end
+if Mat4 then
+  V.Mat4 = Mat4
+end
+if ShadowMap then
+  V.ShadowMap = ShadowMap
+end
+if SpriteBillboards then
+  V.SpriteBillboards = SpriteBillboards
+end
+
+-- Ensure the library modules are accessible through V.require for compatibility
+-- This allows mods like gen1_true_3d_characters to find the modules they expect
+local originalRequire = V.require
+V.require = function(name)
+  -- First try the original require
+  local result = originalRequire(name)
+  if result then return result end
+  
+  -- Fallback compatibility mappings for common Dramatic Shape module names
+  local compatMap = {
+    VoxelScene = VoxelScene,
+    Voxel3D = Voxel3D,
+    Mat4 = Mat4,
+    ShadowMap = ShadowMap,
+    SpriteBillboards = SpriteBillboards,
+  }
+  
+  if compatMap[name] then
+    return compatMap[name]
+  end
+  
+  return nil
+end

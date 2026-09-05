@@ -7,19 +7,13 @@ local V = ...
 
 local Stadium2Integration = {}
 
--- Get the appropriate pack loader based on species number
--- Gen 1 (1-151): Use Stadium 1
--- Gen 2 (152-251): Use Stadium 2
+-- Runtime pack loader for battle/overworld rigs.
+--
+-- Stadium2Install only differs at BUILD time (which ROM is extracted).  Both
+-- Stadium 1 and Stadium 2 builds land as full DSM3 packs read by StadiumPack
+-- and consumed by StadiumRig.  Stadium2Pack.load delegates there too.
 function Stadium2Integration.getPackLoader(species)
-  if type(species) ~= "number" then
-    return V.require("StadiumPack") -- Default to Stadium 1
-  end
-  
-  if species > 151 then
-    return V.require("Stadium2Pack") -- Gen 2 Pokemon
-  else
-    return V.require("StadiumPack") -- Gen 1 Pokemon
-  end
+  return V.require("StadiumPack")
 end
 
 -- Get the appropriate install module based on species number

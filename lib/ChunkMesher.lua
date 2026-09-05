@@ -139,6 +139,18 @@ local function keyOf(tx, ty)
   return (ty + 64) * 4096 + (tx + 64)
 end
 
+-- Face sign: -1 for up-facing quads (pointing at the sky), +1 otherwise.
+-- This encodes the face normal's Y component in the sign of the shade value,
+-- which the shader splits apart again (see Voxel3D shader's vUp calculation).
+local function faceSign(c, sky)
+  if sky ~= nil then return sky and -1 or 1 end
+  local a, b, d = c[1], c[2], c[3]
+  local dx, dz = b[1] - a[1], b[3] - a[3]
+  local ex, ez = d[1] - a[1], d[3] - a[3]
+  local ny = dz * ex - dx * ez
+  return (ny > 1e-6 or ny < -1e-6) and -1 or 1
+end
+
 -- ------------------------------------------------------- spatial chunking
 --
 -- The module has been called ChunkMesher since the first cut, but until now
@@ -201,12 +213,13 @@ end
 local function newTableSink()
   local verts, indices, quads = {}, {}, 0
   return {
-    push = function(c, uv, shade)
+    push = function(c, uv, shade, sky, water)
       local flat = type(shade) ~= "table"
+      local w = water and 1.0 or 0.0
       for i = 1, 4 do
         local cc, t = c[i], uv[i]
         verts[#verts + 1] = { cc[1], cc[2], cc[3], t[1], t[2],
-                              flat and shade or shade[i] }
+                              flat and shade or shade[i], w }
       end
       Voxel3D.pushQuad(indices, quads)
       quads = quads + 1
@@ -229,85 +242,45 @@ end
 
 local TRI_ORDER = { 1, 2, 3, 1, 3, 4 }
 
-local function newFfiSink()
-  local cap = 4096 * 6
-  local buf = ffi.new("float[?]", cap * 6)
-  local n = 0
+local function newFfiSink(cap0)
+  local capQuads = cap0 or 4096
+  local buf = ffi.new("float[?]", capQuads * 4 * 7)      -- 4 verts/quad, 7 floats/vert (added water flag)
+  local ibuf = ffi.new("uint32_t[?]", capQuads * 6)      -- 6 indices/quad
+  local nQuads = 0
   local sink
   sink = {
-    push = function(c, uv, shade)
-      if n + 6 > cap then
-        local grown = ffi.new("float[?]", cap * 2 * 6)
-        ffi.copy(grown, buf, n * 6 * 4)
-        buf, cap = grown, cap * 2
+    push = function(c, uv, shade, sky, water)
+      if nQuads + 1 > capQuads then
+        local grownV = ffi.new("float[?]", capQuads * 2 * 4 * 7)
+        ffi.copy(grownV, buf, nQuads * 4 * 7 * 4)
+        local grownI = ffi.new("uint32_t[?]", capQuads * 2 * 6)
+        ffi.copy(grownI, ibuf, nQuads * 6 * 4)
+        buf, ibuf, capQuads = grownV, grownI, capQuads * 2
       end
       local flat = type(shade) ~= "table"
-      local base = n * 6
-      for k = 1, 6 do
-        local i = TRI_ORDER[k]
+      local s = faceSign(c, sky)
+      local w = water and 1.0 or 0.0
+      local base = nQuads * 4 * 7
+      for i = 1, 4 do
         local cc, t = c[i], uv[i]
         buf[base] = cc[1]
         buf[base + 1] = cc[2]
         buf[base + 2] = cc[3]
         buf[base + 3] = t[1]
         buf[base + 4] = t[2]
-        buf[base + 5] = flat and shade or shade[i]
-        base = base + 6
+        buf[base + 5] = s * (flat and shade or shade[i])
+        buf[base + 6] = w
+        base = base + 7
       end
-      n = n + 6
-    end,
-    vertexCount = function()
-      return n
-    end,
-    -- Spill the raw six-float stream straight to disk, in the same slices
-    -- the GPU upload uses and with a budget tick between them, so baking a
-    -- whole region never stalls a frame. Writing from here rather than from
-    -- the cache module keeps every cdata pointer inside this file.
-    -- Called by the cache as `sink:writeRaw(path)`, so the sink itself
-    -- arrives first; a plain `sink.writeRaw(path)` works too. Getting this
-    -- wrong is silent -- the path becomes a table and the write lands
-    -- nowhere -- so it is checked rather than assumed.
-    writeRaw = function(a, b)
-      local path = b
-      if path == nil and type(a) == "string" then path = a end
-      if type(path) ~= "string" then return false, "writeRaw needs a path" end
-      if not (love and love.filesystem and love.filesystem.newFile
-              and love.data and love.data.newByteData) then
-        return false, "no filesystem"
+      local ibase, vbase = nQuads * 6, nQuads * 4
+      for k = 1, 6 do
+        ibuf[ibase + k - 1] = vbase + TRI_ORDER[k] - 1
       end
-      local okFile, file = pcall(love.filesystem.newFile, path)
-      if not okFile or not file then
-        return false, "could not create " .. tostring(path)
-      end
-      local okOpen, opened = pcall(file.open, file, "w")
-      if not okOpen or opened == false then
-        pcall(file.close, file)
-        return false, "could not open " .. tostring(path)
-      end
-      local okWrite, err = pcall(function()
-        local CHUNK = 65536
-        local i = 0
-        while i < n do
-          local count = math.min(CHUNK, n - i)
-          local bytes = count * 6 * 4
-          local data = love.data.newByteData(bytes)
-          ffi.copy(data:getFFIPointer(), buf + i * 6, bytes)
-          local wrote = file:write(data:getString())
-          if data.release then pcall(data.release, data) end
-          if wrote == false then error("short write") end
-          i = i + count
-          Budget.check()
-        end
-      end)
-      pcall(file.close, file)
-      if not okWrite then
-        pcall(love.filesystem.remove, path)
-        return false, tostring(err)
-      end
-      return true
+      nQuads = nQuads + 1
     end,
     finish = function()
-      if n == 0 then return nil end
+      if nQuads == 0 then return nil end
+      local n = nQuads * 4          -- vertex count
       -- upload in slices with budget ticks between: a route-sized mesh
       -- is ~10-20MB and one atomic setVertices was the last remaining
       -- frame spike. The mesh is not cached (so never drawn) until the
@@ -319,13 +292,39 @@ local function newFfiSink()
         local i = 0
         while i < n do
           local count = math.min(CHUNK, n - i)
-          local bytes = count * 6 * 4
+          local bytes = count * 7 * 4  -- 7 floats per vertex now
           local data = love.data.newByteData(bytes)
-          ffi.copy(data:getFFIPointer(), buf + i * 6, bytes)
+          ffi.copy(data:getFFIPointer(), buf + i * 7, bytes)
           m:setVertices(data, i + 1)
           data:release()
           i = i + count
           Budget.check()
+        end
+        -- the index buffer: LOVE auto-picks uint16 vs uint32 by vertex
+        -- count when setVertexMap gets a Lua table, but the raw-Data
+        -- overload (used here to avoid building a several-hundred-
+        -- thousand-entry Lua table) takes the width explicitly, so this
+        -- mirrors that same rule (vertex::getIndexDataTypeFromMax in
+        -- LOVE's own source) by hand.
+        local nIdx = nQuads * 6
+        Budget.check()
+        if n <= 65535 then
+          local u16 = ffi.new("uint16_t[?]", nIdx)
+          for k = 0, nIdx - 1 do
+            u16[k] = ibuf[k]
+            if k % 16384 == 0 then Budget.tick() end
+          end
+          local bytes = nIdx * 2
+          local data = love.data.newByteData(bytes)
+          ffi.copy(data:getFFIPointer(), u16, bytes)
+          m:setVertexMap(data, "uint16", nIdx)
+          data:release()
+        else
+          local bytes = nIdx * 4
+          local data = love.data.newByteData(bytes)
+          ffi.copy(data:getFFIPointer(), ibuf, bytes)
+          m:setVertexMap(data, "uint32", nIdx)
+          data:release()
         end
         return m
       end)
@@ -335,12 +334,62 @@ local function newFfiSink()
   return sink
 end
 
-local function newSink()
+local function newSink(cap0)
   if ffi and love and love.data and love.data.newByteData
      and love.graphics and love.graphics.newMesh then
-    return newFfiSink()
+    return newFfiSink(cap0)
   end
   return newTableSink()
+end
+
+
+-- ------------------------------------------------------- spatial chunking
+--
+-- The module has been called ChunkMesher since the first cut, but until now
+-- there were no chunks: a map's terrain was ONE mesh, and every frame
+-- submitted all of it -- plus all of every connected neighbour's -- whether
+-- or not any of it was on screen, and then again from the sun. The mesher's
+-- own note puts a route-sized mesh at 10 to 20 MB of vertices. A house is
+-- a few hundred kilobytes, which is why indoors was always fine and a route
+-- never was: the cost is not the camera, it is the map.
+--
+-- So the geometry walk now feeds a sink per spatial bucket instead of one
+-- for the map, and a draw submits only the buckets whose bounds meet the
+-- camera's. Nothing in runGeometry knows about it -- a quad is routed by
+-- where its first corner landed, which is the one thing every quad in this
+-- mesher has in common.
+--
+-- The cells are WIDE AND SHALLOW on purpose, and that is not arbitrary:
+-- Gen 1 overworld maps are narrow and tall (a route is ten blocks across
+-- and twenty down), while the view is the other way round -- wide, and
+-- shallow in the direction the camera looks. So almost all of the culling
+-- that is there to be had is along Z, and paying for fine cells along X
+-- would buy nothing but draw calls.
+local CHUNK_X = 256          -- world pixels: eight blocks across
+local CHUNK_Z = 64           -- two blocks deep
+
+-- Slack on a cell's bounds, in world pixels. A quad is filed by its first
+-- corner, and a few of the things this mesher emits -- a stamped tree
+-- hull, a prop's prism -- reach past the cell that corner landed in. This
+-- is bigger than any of them; over-generous bounds cost a little culling
+-- and nothing else, while short ones would clip geometry out of a frame it
+-- belongs in.
+local CHUNK_MARGIN = 96
+
+-- A finished map's terrain: the list of chunk meshes and their bounds.
+--
+-- It carries a `release` of its own, which is what lets every existing
+-- caller keep treating a map's terrain as one opaque thing -- the cache's
+-- swapSlot and releaseEntry call `mesh.release` and neither has to learn
+-- that there is now more than one mesh under it.
+local Group = {}
+Group.__index = Group
+
+function Group:release()
+  for _, ch in ipairs(self.chunks) do
+    if ch.mesh and ch.mesh.release then pcall(ch.mesh.release, ch.mesh) end
+  end
+  self.chunks = {}
 end
 
 local function newChunkedSink()
@@ -367,7 +416,7 @@ local function newChunkedSink()
   end
 
   return {
-    push = function(c, uv, shade, sky)
+    push = function(c, uv, shade, sky, water)
       local corner = c[1]
       local b = bucketFor(corner[1], corner[3])
       -- How TALL this cell gets, which is the other half of culling it.
@@ -387,7 +436,7 @@ local function newChunkedSink()
       if c[3][2] > y then y = c[3][2] end
       if c[4][2] > y then y = c[4][2] end
       if y > b.ymax then b.ymax = y end
-      b.sink.push(c, uv, shade, sky)
+      b.sink.push(c, uv, shade, sky, water)
     end,
     finish = function()
       local chunks = {}
@@ -494,6 +543,13 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     if run then return run.h end
     local s = S.shapeAt[k]
     return s and shapeHeight(tx, ty, s) or 0
+  end
+
+    local function isWaterAt(tx, ty)
+    local k = keyOf(tx, ty)
+    local s = S.shapeAt[k]
+    if not s then return false end
+    return s.class == "water"
   end
 
   -- one atlas-rect UV, optionally cropped to art rows [vTop, vBot] of 8
@@ -618,12 +674,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
 
   -- `to` routes the quad somewhere other than the main sink -- the water
   -- surface is the only caller that ever does (see runGeometry's header).
-  local function topQuad(x0, z0, h, tile, shade, to)
+  local function topQuad(x0, z0, h, tile, shade, water, to)
     local u0, u1, v0, v1 = uvRect(tile, 0, 8)
     ;(to or push)({ { x0, h, z0 }, { x0 + 8, h, z0 },
                     { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
                   { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
-                  aoShades(x0 / 8, z0 / 8, h, shade))
+         aoShades(x0 / 8, z0 / 8, h, shade), nil, water)
   end
 
   -- vertical quad for face direction `d` of the tile column at (x0, z0),
@@ -631,7 +687,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   -- Corners run bottom-left, bottom-right, top-right, top-left as seen
   -- from outside; u follows +X on the north/south faces so a door or sign
   -- never draws mirrored.
-  local function sideQuad(d, x0, z0, y0, y1, tile, vTop, vBot, shade)
+  local function sideQuad(d, x0, z0, y0, y1, tile, vTop, vBot, shade, water)
     local x1, z1 = x0 + 8, z0 + 8
     local c
     if d == 5 then                                       -- south, at z1
@@ -644,7 +700,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
       c = { { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 } }
     end
     local u0, u1, v0, v1 = uvRect(tile, vTop, vBot)
-    push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, shade)
+    push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, shade, nil, water)
   end
 
   local def = map.def
@@ -709,7 +765,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           -- so a house on a terrace paints its floor on the terrace instead
           -- of on the world datum sixteen pixels below it.
           local gy = s.base or 0
-          topQuad(tx * 8, ty * 8, gy, g, 1)
+          topQuad(tx * 8, ty * 8, 0, g, 1, false)
           -- the claimed tile is still ground at height 0, and water next
           -- door still recesses below it: without the same below-ground
           -- side bands ordinary ground emits, the two-pixel shoreline
@@ -731,7 +787,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                   sideQuad(d, tx * 8, ty * 8, y0, y1, g,
                            (band * 8 + 8) - y1, (band * 8 + 8) - y0,
                            sideShades(hl, hr, y0, y1, y0 <= nh,
-                                      Voxel3D.FACE_SHADE[d]))
+                                      Voxel3D.FACE_SHADE[d]), false)
                 end
               end
             end
@@ -868,11 +924,11 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           local u0, u1, v0, v1 = uvRect(roofTile, 0, 8)
           push({ { x0, swY, z0 + 8 }, { x0 + 8, seY, z0 + 8 },
                  { x0 + 8, neY, z0 }, { x0, nwY, z0 } },
-               { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95)
+               { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95, nil, s.class == "water")
         elseif run then
           local m = math.min(2, run.extent)
           local topTile = map:tileAt(tx, run.north + ((ty - run.north) % m))
-          topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE)
+          topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, s.class == "water")
         else
           local topTile = tile
           if s.art == "upright" and s.authored then
@@ -918,7 +974,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           -- which is right -- a sign at the waterline stands on a plot, not
           -- on the pond.
           topQuad(x0, z0, h, topTile,
-                  s.art == "upright" and VOLUME_TOP_SHADE or 1,
+                  s.art == "upright" and VOLUME_TOP_SHADE or 1, s.class == "water",
                   (s.class == "water") and waterPush or nil)
         end
 
@@ -989,7 +1045,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                 end
                 sideQuad(d, x0, z0, y0, y1, src,
                          (band * 8 + 8) - y1, (band * 8 + 8) - y0,
-                         sideShades(hl, hr, y0, y1, y0 <= nh, shade))
+                         sideShades(hl, hr, y0, y1, y0 <= nh, shade), s.class == "water")
               end
             end
           end
@@ -1065,7 +1121,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     -- the neighbour will ever draw that geometry
     if q.own or outwardOnEdge(q, x0, z0, x1, z1)
        or keepQuad(x0, z0, x1, z1) then
-      push({ q[1], q[2], q[3], q[4] }, quadUV(q), groundShades(q, q.shade))
+      push({ q[1], q[2], q[3], q[4] }, quadUV(q), groundShades(q, q.shade), nil, false)
     end
   end
 
@@ -1121,7 +1177,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           ok = keepQuad(x0, z0, x1, z1)
         end
         if ok then
-          push(sc, quadUV(q), groundShades(sc, q.shade))
+          push(sc, quadUV(q), groundShades(sc, q.shade), q.sky, false)
         end
       end
     end
@@ -1204,7 +1260,7 @@ local function quadsMesh(quads)
     for i = 1, 4 do
       local c = q[i]
       local uv = q.uv and q.uv[i] or { q.u, q.v }
-      verts[#verts + 1] = { c[1], c[2], c[3], uv[1], uv[2], s * q.shade }
+      verts[#verts + 1] = { c[1], c[2], c[3], uv[1], uv[2], s * q.shade, 0.0 }
     end
     Voxel3D.pushQuad(indices, n)
     n = n + 1

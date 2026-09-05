@@ -259,7 +259,10 @@ function StadiumMon:setSpecies(dex, variant)
       and sourceToken == self.sourceToken then
     return self.rig ~= nil
   end
-  local model = dex and StadiumPack.load(dex, variant) or nil
+  -- Use Stadium2Integration to select the correct pack loader based on species
+  local Stadium2Integration = V.require("Stadium2Integration")
+  local packLoader = Stadium2Integration.getPackLoader(dex)
+  local model = dex and packLoader.load(dex, variant) or nil
   return self:setModel(dex, variant, model, sourceToken)
 end
 

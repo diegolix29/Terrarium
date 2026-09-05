@@ -60,8 +60,6 @@ local V = ...
 
 local Mat4 = V.require("Mat4")
 local StadiumPack = V.require("StadiumPack")
-local Stadium2Pack = V.require("Stadium2Pack")
-local Stadium2Pack = V.require("Stadium2Pack")
 local StadiumRig = V.require("StadiumRig")
 
 local StadiumMon = {}
@@ -295,27 +293,13 @@ function StadiumMon:setSpecies(dex, shiny)
   self.grow, self.grewOwn = nil, nil
   if not dex then return false end
   
-  -- Try Stadium 2 first if available (contains all 251 Pokemon including Gen 1)
-  -- Add fallback: if primary pack fails, try the other pack
-  local model
-  local stadium2Available = Stadium2Pack.available()
-  
-  if stadium2Available then
-    model = Stadium2Pack.load(dex, shiny)
-    if not model then
-      model = StadiumPack.load(dex, shiny)
-    end
-  elseif dex > 151 then
-    model = Stadium2Pack.load(dex, shiny)
-    if not model then
-      model = StadiumPack.load(dex, shiny)
-    end
-  else
-    model = StadiumPack.load(dex, shiny)
-    if not model then
-      model = Stadium2Pack.load(dex, shiny)
-    end
-  end
+  -- Stadium 1 and Stadium 2 installs both write full DSM3 packs through
+  -- StadiumBuild; StadiumPack.load is the one reader that unpacks mesh
+  -- geometry, rgba textures, and skeletal tracks for StadiumRig.  Do not
+  -- branch on dex or Stadium2Pack here -- the old Stadium2Pack.unpack stub
+  -- omitted vertices and texture bytes, which is what caused missing meshes
+  -- and wrong textures on Gen-2 species when a Stadium 2 ROM was present.
+  local model = StadiumPack.load(dex, shiny)
   
   if not model then return false end
   -- the pack falls back to the normal model when a species has no shiny

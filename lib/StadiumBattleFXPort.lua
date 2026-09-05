@@ -40,6 +40,14 @@ local OPTION_ALIAS = {
   announcer = "stadiumAnnouncer",
   announcer_scope = "stadiumAnnouncerScope",
   battle_cinematics_zoom = "stadiumFxCinematicZoom",
+  boss_arenas = "stadiumBossArenas",
+  screen_effects = "stadiumFxScreenEffects",
+  hit_reactions = "stadiumFxHitReactions",
+  faint_animations = "stadiumFxFaintAnimations",
+  native_scheduler = "stadiumFxNativeScheduler",
+  native_sync = "stadiumFxNativeSync",
+  fallback_notice = "stadiumFxFallbackNotice",
+  fx_2d_layer = "stadiumFx2DLayer",
 }
 
 local proxyOptions = {}
@@ -970,7 +978,16 @@ local function installEvents()
   if not (events and type(events.on) == "function") then return end
 
   events:on("battle.started", function(payload)
-    beginAnnouncer(payload and payload.battle)
+    local gold = payload and payload.battle
+    beginAnnouncer(gold)
+    -- Boss gym/E4 arenas need the live trainer class from the started battle.
+    if gold and V and type(V.require) == "function" then
+      local ok, ow = pcall(V.require, "OverworldBattle")
+      if ok and ow and type(ow.arena) == "function" then
+        local arena = ow.arena()
+        if arena then M.decorateArena(arena, gold) end
+      end
+    end
   end)
 
   events:on("battle.move_used", function(payload)

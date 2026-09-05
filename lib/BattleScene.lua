@@ -258,9 +258,18 @@ local function castShadows(state, arena, terrain, nbMesh, cx, cy, vw, vh,
   local drawTerrain = (not discs) or arena.showTerrain
 
   if discs then
+    local fxCast = false
     pcall(function()
-      V.require("StadiumStage").cast(ShadowMap, arena, groundY or 0)
+      local Port = V.require("StadiumBattleFXPort")
+      if Port and Port.castArena and arena._stadiumFxVenue then
+        fxCast = Port.castArena(ShadowMap, arena, groundY or 0) and true or false
+      end
     end)
+    if not fxCast then
+      pcall(function()
+        V.require("StadiumStage").cast(ShadowMap, arena, groundY or 0)
+      end)
+    end
     pcall(function() V.require("Stadium").cast(ShadowMap) end)
   end
 
@@ -401,6 +410,13 @@ function BattleScene.render(state, arena, textures, token)
               cards, token, host, neighbors, water, nbWater, groundY)
 
   local sky = VoxelScene.skyColor(host, 1) or VoxelScene.skyShade(INDOOR_SHADE, 1)
+  pcall(function()
+    local Port = V.require("StadiumBattleFXPort")
+    if Port and Port.arenaSky then
+      local fxSky = Port.arenaSky(arena)
+      if fxSky then sky = fxSky end
+    end
+  end)
 
   if discs and VoxelScene.skyColor(host, 1) then
     local Sky = V.require("Sky")
@@ -423,7 +439,16 @@ function BattleScene.render(state, arena, textures, token)
     end
     
     if discs then
-      V.require("StadiumStage").draw(arena, groundY)
+      local fxDrew = false
+      pcall(function()
+        local Port = V.require("StadiumBattleFXPort")
+        if Port and Port.drawArena and arena._stadiumFxVenue then
+          fxDrew = Port.drawArena(Voxel3D, arena, groundY) and true or false
+        end
+      end)
+      if not fxDrew then
+        V.require("StadiumStage").draw(arena, groundY)
+      end
     end
     
     -- Only draw the actual map if terrain is toggled ON

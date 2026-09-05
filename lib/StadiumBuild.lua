@@ -54,8 +54,7 @@ StadiumBuild.CONTEXTS = {
 local NAME_PREF = { "idle", "attack_default", "faint", "entrance",
                     "struggle", "flinch" }
 
-local N_MOVES = StadiumRom.N_MOVES
-local CTX_BASE = 165
+local N_MOVES = StadiumRom.N_MOVES  -- Stadium 1's / DSM3's move count; a rom with its own rom.N_MOVES overrides this
 local NONE16 = 0xFFFF
 
 -- ------- the bind pose
@@ -406,10 +405,12 @@ end
 -- upward of the species' own battle table, in slot order. An entry naming an
 -- animation the species does not have is written as "none" rather than
 -- clamped -- the mod would rather fall back than play the wrong clip.
-function StadiumBuild.contextTable(rows, nAnims)
+function StadiumBuild.contextTable(rows, nAnims, contexts)
+  contexts = contexts or StadiumBuild.CONTEXTS
+  local ctxBase = rows.n - #contexts
   local ctx = {}
-  for i = 1, #StadiumBuild.CONTEXTS do
-    local row = rows[CTX_BASE + i - 1]
+  for i = 1, #contexts do
+    local row = rows[ctxBase + i - 1]
     local ai = row and row[1] or nil
     ctx[i] = (ai ~= nil and ai < nAnims) and ai or NONE16
   end
@@ -424,7 +425,10 @@ end
 -- oracle diff to mean anything. They also make a packed file readable in a
 -- hex dump, which is worth the byte apiece.
 
-local function labelAnimations(data, rows, nAux)
+local function labelAnimations(data, rows, nAux, nMoves, contexts)
+  nMoves = nMoves or N_MOVES
+  contexts = contexts or StadiumBuild.CONTEXTS
+  local ctxBase = rows.n - #contexts
   local anims = data.anims
   local n = #anims
   local uses, moveUses = {}, {}
@@ -436,11 +440,11 @@ local function labelAnimations(data, rows, nAux)
   for e = 0, rows.n - 1 do
     local ai = rows[e][1]
     if ai < n then
-      if e < N_MOVES then
+      if e < nMoves then
         moveUses[ai + 1] = moveUses[ai + 1] + 1
-      elseif e >= CTX_BASE and e < CTX_BASE + #StadiumBuild.CONTEXTS then
+      elseif e >= ctxBase and e < ctxBase + #contexts then
         local list = uses[ai + 1]
-        list[#list + 1] = StadiumBuild.CONTEXTS[e - CTX_BASE + 1]
+        list[#list + 1] = contexts[e - ctxBase + 1]
       end
       local ax = rows[e][2]
       if ax >= 0 and ax < nAux then
@@ -505,7 +509,12 @@ end
 
 -- ------- the pack
 
-function StadiumBuild.pack(data, species, moveRows, ctx)
+-- `magic` selects the on-disk move-table width: "DSM3" is Stadium 1's
+-- original 165-move format (also what Stadium 2 wrote before its real
+-- 251-move dispatch table was decoded); "DSM5" is Stadium 2's full-width
+-- format, #moveRows == 251. Readers dispatch the move-table loop count off
+-- this same magic, so old DSM3 caches keep reading correctly unchanged.
+function StadiumBuild.pack(data, species, moveRows, ctx, magic)
   local w = newWriter()
   local bones, prims = data.bones, data.prims
   local textures, anims, aux = data.textures, data.anims, data.auxAnims
@@ -516,9 +525,7 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   local idle = (idleIndex ~= NONE16) and anims[idleIndex + 1] or nil
   local static = idleIsBroken(data, idle)
 
-  w:raw("DSM3")
-  -- Note: Stadium 2 also uses DSM3 format (the packer is compatible)
-  -- The magic string is checked at load time to accept both DSM3 and DSM4
+  w:raw(magic or "DSM3")
   w:u16(species)
   w:u16(#bones)
   w:u16(#prims)
@@ -532,11 +539,11 @@ function StadiumBuild.pack(data, species, moveRows, ctx)
   w:f32(floorY)
   w:f32(radius)
 
-  for m = 1, N_MOVES do
+  for m = 1, #moveRows do
     local row = moveRows[m]
     w:u16((row and row[1] < #anims) and row[1] or NONE16)
   end
-  for m = 1, N_MOVES do
+  for m = 1, #moveRows do
     local row = moveRows[m]
     w:i16((row and row[2] >= 0 and row[2] < #aux) and row[2] or -1)
   end
@@ -666,16 +673,24 @@ function StadiumBuild.species(rom, fileno)
     if not attached then return nil, tostring(attachErr or "external animations failed") end
   end
 
+  -- A rom that carries its own N_MOVES/CONTEXTS/PACK_MAGIC (StadiumRom2, once
+  -- it has a real dispatch table) drives the wider Stadium 2 layout; a rom
+  -- that doesn't (Stadium 1) falls back to the original 165-move DSM3 shape,
+  -- unchanged.
+  local nMoves = rom.N_MOVES or N_MOVES
+  local contexts = rom.CONTEXTS or StadiumBuild.CONTEXTS
+  local magic = rom.PACK_MAGIC
+
   local species = data.species
   local rows = rom:battleRows(species)
-  labelAnimations(data, rows, #data.auxAnims)
+  labelAnimations(data, rows, #data.auxAnims, nMoves, contexts)
   StadiumFx.attach(data, species)
 
   local moveRows = {}
-  for m = 1, N_MOVES do moveRows[m] = rows[m - 1] end
-  local ctx = StadiumBuild.contextTable(rows, #data.anims)
+  for m = 1, nMoves do moveRows[m] = rows[m - 1] end
+  local ctx = StadiumBuild.contextTable(rows, #data.anims, contexts)
   local bytes, height, floorY, radius =
-    StadiumBuild.pack(data, species, moveRows, ctx)
+    StadiumBuild.pack(data, species, moveRows, ctx, magic)
 
   -- ------- and the shiny, from the same extraction
   --
@@ -711,14 +726,14 @@ function StadiumBuild.species(rom, fileno)
             tex.rgba = Stadium2Palette.applyRare(tex.rgba, rare)
           end
         end
-        shinyBytes = StadiumBuild.pack(data, species, moveRows, ctx)
+        shinyBytes = StadiumBuild.pack(data, species, moveRows, ctx, magic)
       end
     else
       -- Stadium 1 uses ShinyPalette
       local spec = ShinyPalette.forDex(species)
       if not spec then return end
       if ShinyPalette.recolorTextures(data.textures, spec) == 0 then return end
-      shinyBytes = StadiumBuild.pack(data, species, moveRows, ctx)
+      shinyBytes = StadiumBuild.pack(data, species, moveRows, ctx, magic)
     end
   end)
   if not ok and V and V.mod and V.mod.log then

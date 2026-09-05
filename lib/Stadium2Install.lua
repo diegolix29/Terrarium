@@ -11,11 +11,15 @@ Stadium2Install.ROM_DIR = "baseroms"
 Stadium2Install.DIR = "dramatic_shape"
 Stadium2Install.MARKER = Stadium2Install.DIR .. "/pack2.info"
 
--- Format for Stadium 2 packs (same as Stadium 1 - DSM3)
-Stadium2Install.FORMAT = "DSM3"
+-- Format for Stadium 2 packs. DSM5 carries the real 251-move dispatch table
+-- (StadiumRom2.lua's Rom:battleRows/Rom.PACK_MAGIC); DSM3 was the old
+-- generic-clip shape borrowed from Stadium 1's 165-move format.
+Stadium2Install.FORMAT = "DSM4"
 
--- Revision for Stadium 2 packs
-Stadium2Install.REV = 1
+-- Bumped alongside FORMAT so existing players' pack2.info marker reads as
+-- stale (old format/rev, see readyCache below) and rebuilds instead of the
+-- old DSM3 packs being read as if they were the new shape.
+Stadium2Install.REV = 2
 
 -- Stadium 2 has 251 Pokemon
 Stadium2Install.COUNT = 251

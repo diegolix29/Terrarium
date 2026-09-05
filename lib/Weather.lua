@@ -614,7 +614,34 @@ local function tick(dt)
   -- walking into a house takes the gloom off with the rain.
   local out = openSky(ow and ow.map) and state.power or 0
   local visible = out > 0 and state.kind or nil
-  DayNight.overcast = state.kind == "snow" and out * 0.75 or out
+  local precip = state.kind == "snow" and out * 0.75 or out
+  -- The CLOUDS row's own fair-weather deck, read straight off Sky's
+  -- setting rather than Sky.cloudAmount(): that getter already reads
+  -- DayNight.overcast for ITS blend, and feeding its output back into
+  -- the value it reads from would make the ground chase its own tail
+  -- frame over frame. Baselines below are the same two numbers Sky
+  -- paints the deck with at zero weather (0.18 ON, 0.62 THICK) --
+  -- copied, not shared, so the sky and the ground agree without one
+  -- calling the other. OFF (or the setting missing) leaves the ground
+  -- exactly as it was: rain and snow are the only thing that dims it.
+  local cloudBase = 0
+  do
+    local ok, Sky = pcall(V.require, "Sky")
+    if ok and Sky and Sky.cloudSetting then
+      local okv, v = pcall(Sky.cloudSetting.get, Sky.cloudSetting)
+      local mode = okv and tonumber(v) or 0
+      if mode >= 2 then cloudBase = 0.62
+      elseif mode >= 1 then cloudBase = 0.18
+      end
+    end
+  end
+  -- Zeroed indoors along with everything else on this line -- openSky
+  -- already folded that into `out`/`precip`; a clear ceiling is not the
+  -- CLOUDS row's business.
+  if not openSky(ow and ow.map) then cloudBase = 0 end
+  -- Rain and snow still win outright: a shower thickens the deck past
+  -- its fair-weather floor, it never gets capped back down to it.
+  DayNight.overcast = math.max(precip, cloudBase)
   -- The storm register, pushed the same way and on the same tick, so the
   -- purple sky and the flash are one fact rather than two that happen to
   -- coincide: this ramps over exactly the band STRIKE_ABOVE gates the

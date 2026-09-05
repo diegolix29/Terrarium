@@ -50,6 +50,7 @@ local V = ...
 
 local Voxel3D = V.require("StadiumRender")
 local StadiumPack = V.require("StadiumPack")
+local Stadium2Integration = V.require("Stadium2Integration")
 local StadiumMon = V.require("StadiumMon")
 local Stadium = {}
 
@@ -489,7 +490,10 @@ function Stadium.update(dt, battle, groundY)
       end
     end
     -- Keep live species hot in the four-entry pack cache.
-    if mon.species then StadiumPack.keep(mon.species, mon.variant) end
+    if mon.species then
+      local packLoader = Stadium2Integration.getPackLoader(mon.species)
+      packLoader.keep(mon.species, mon.variant)
+    end
     mon.visible = (mon.rig ~= nil) and onField(battle, side, mon)
                   and not (battler and battler.substituteHP)
     mon.model_matrix = nil
