@@ -40,12 +40,52 @@
 -- garbage), the count catches a build that was interrupted half way, and the
 -- md5 catches the player swapping the ROM for a different revision.
 
+-- ------- Gen 1 vs Gen 2
+--
+-- Red/Blue/Yellow's 151 Pokemon come from a Pokemon Stadium (US) 1.0 ROM via
+-- StadiumRom. Gold/Silver/Crystal's 251 come from a Pokemon Stadium 2 (US)
+-- ROM via StadiumRom2 -- a different cartridge, a different archive layout,
+-- but the SAME .dsm pack format and the SAME StadiumBuild pipeline once the
+-- reader hands it a model. This file used to only know about the first of
+-- those; everything below marked "gen-aware" is what makes it pick the right
+-- reader, the right species count and the right cartridge name instead of
+-- silently building 151 Gen 1 packs no matter which game is running.
+--
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
 
 local StadiumPack = V.require("StadiumPack")
 
 local StadiumInstall = {}
+
+-- Which generation's engine this game actually is. Read through pcall/type
+-- checks because a Gen 1-only build of the engine has no GameVersion module
+-- at all, and that has to read as "Gen 1", not as an error.
+local function gameGeneration()
+  local ok, GameVersion = pcall(require, "src.core.GameVersion")
+  if ok and type(GameVersion) == "table" then
+    if type(GameVersion.generation) == "function" then
+      local okGen, gen = pcall(GameVersion.generation)
+      if okGen and tonumber(gen) then return tonumber(gen) end
+    end
+    if type(GameVersion.isGen2) == "function" then
+      local okGen2, yes = pcall(GameVersion.isGen2)
+      if okGen2 and yes then return 2 end
+    end
+  end
+  return 1
+end
+
+-- How many species a COMPLETE set means for this generation.
+local function targetCount()
+  return gameGeneration() == 2 and 251 or 151
+end
+
+-- Exposed so StadiumScreen / StadiumRomPick / StadiumRomMenu can show the
+-- right cartridge name and Gen 2-specific messaging without each
+-- re-implementing generation detection.
+StadiumInstall.gameGeneration = gameGeneration
+StadiumInstall.targetCount = targetCount
 
 -- Where a ROM is looked for, and where the built packs are kept.
 StadiumInstall.ROM_DIR = "baseroms"
@@ -70,7 +110,10 @@ StadiumInstall.FORMAT = "DSM3"
 -- and every shiny they met would silently show its normal colours.
 StadiumInstall.REV = 3
 
-StadiumInstall.COUNT = 151
+-- Set once at load from the generation actually running. Gen 2's 251 is
+-- reassigned again in beginFrom (targetCount() is cheap, but there is no
+-- reason to call it twice on the happy path when a build kicks off).
+StadiumInstall.COUNT = targetCount()
 
 -- Named ROM files, then any ROM at all sitting in the folder.
 --
@@ -81,11 +124,21 @@ StadiumInstall.COUNT = 151
 -- instruction. A path they have to build out of two parts is a path half of
 -- them will get wrong, and the failure is silent -- the rungs are simply not
 -- on the row.
-local NAMED = {
-  StadiumInstall.ROM_DIR .. "/baserom.z64",
-  StadiumInstall.ROM_DIR .. "/baserom.n64",
-  StadiumInstall.ROM_DIR .. "/baserom.v64",
-}
+--
+-- Gen-aware: a Gen 2 game looks for `stadium2.*` first (so both cartridges
+-- can sit in the same folder without colliding), then falls back to the
+-- historic `baserom.*` name so an existing Gen 1 setup is not disturbed.
+local function namedRoms()
+  local stem = (gameGeneration() == 2) and "stadium2" or "stadium"
+  return {
+    StadiumInstall.ROM_DIR .. "/" .. stem .. ".z64",
+    StadiumInstall.ROM_DIR .. "/" .. stem .. ".n64",
+    StadiumInstall.ROM_DIR .. "/" .. stem .. ".v64",
+    StadiumInstall.ROM_DIR .. "/baserom.z64",
+    StadiumInstall.ROM_DIR .. "/baserom.n64",
+    StadiumInstall.ROM_DIR .. "/baserom.v64",
+  }
+end
 
 local function fs()
   return love and love.filesystem
@@ -102,7 +155,7 @@ end
 function StadiumInstall.romPath()
   local f = fs()
   if not f then return nil end
-  for _, path in ipairs(NAMED) do
+  for _, path in ipairs(namedRoms()) do
     if isFile(path) then return path end
   end
   local ok, items = pcall(f.getDirectoryItems, StadiumInstall.ROM_DIR)
@@ -161,7 +214,8 @@ end
 -- player can follow, and an instruction that lists every possibility is one
 -- they have to interpret.
 function StadiumInstall.romHintFile()
-  return StadiumInstall.romHint() .. "/" .. (NAMED[1]:match("[^/]+$") or "")
+  local paths = namedRoms()
+  return StadiumInstall.romHint() .. "/" .. (paths[1]:match("[^/]+$") or "")
 end
 
 -- ------- the marker
@@ -200,7 +254,7 @@ end
 local function shipped()
   local mod = V.mod
   if not (mod and mod.read) then return false end
-  for _, dex in ipairs({ 1, 151 }) do
+  for _, dex in ipairs({ 1, targetCount() }) do
     local ok, bytes = pcall(mod.read, mod,
                             ("%s/%03d.dsm"):format(StadiumPack.DIR, dex))
     if not (ok and type(bytes) == "string" and #bytes > 4) then return false end
@@ -322,11 +376,26 @@ function StadiumInstall.beginFrom(bytes, label)
   if not f then return false, "no filesystem" end
   if type(bytes) ~= "string" or #bytes == 0 then return false, "empty file" end
 
-  local StadiumRom = V.require("StadiumRom")
   local StadiumBuild = V.require("StadiumBuild")
-  local rom, err = StadiumRom.open(bytes)
-  if not rom then return false, tostring(err) end
+  local gen = gameGeneration()
+  local wanted = targetCount()
+  StadiumInstall.COUNT = wanted
+  status.total = wanted
   status.wrongVersion = false
+  status.sourceGame = (gen == 2) and "Pokemon Stadium 2" or "Pokemon Stadium"
+
+  -- Gen-aware: Gold/Silver/Crystal reads its 251 models through StadiumRom2
+  -- (a different archive layout, the same downstream .dsm format); every
+  -- other generation keeps using the original Stadium 1 reader unchanged.
+  local RomReader = (gen == 2) and V.require("StadiumRom2") or V.require("StadiumRom")
+
+  local rom, err = RomReader.open(bytes)
+  if not rom then
+    if gen == 2 then
+      return false, "Gold/Silver/Crystal needs a Pokemon Stadium 2 ROM: " .. tostring(err)
+    end
+    return false, tostring(err)
+  end
   if not rom:isExpectedUS() then
     -- Built anyway rather than refused: a dump can differ from the reference
     -- for reasons that do not move a single model offset (a byte-order
@@ -335,11 +404,19 @@ function StadiumInstall.beginFrom(bytes, label)
     -- promised, so it is said loudly, with the md5 that IS expected so the
     -- player can check their own file against it.
     status.wrongVersion = true
-    V.mod.log:warn("stadium: %s is md5 %s -- the model offsets are keyed to "
-                   .. "Pokemon Stadium (US) 1.0, which is md5 %s. Building "
-                   .. "anyway, but the models may be wrong or fail to build.",
-                   tostring(label or "the ROM"), tostring(rom:md5()),
-                   tostring(StadiumRom.US_MD5))
+    if gen == 2 then
+      V.mod.log:warn("stadium2: %s is md5 %s -- canonical Pokemon Stadium 2 US "
+                     .. "is md5 %s. Building anyway, but the models may be "
+                     .. "wrong or fail to build.",
+                     tostring(label or "the ROM"), tostring(rom:md5()),
+                     tostring(RomReader.US_MD5))
+    else
+      V.mod.log:warn("stadium: %s is md5 %s -- the model offsets are keyed to "
+                     .. "Pokemon Stadium (US) 1.0, which is md5 %s. Building "
+                     .. "anyway, but the models may be wrong or fail to build.",
+                     tostring(label or "the ROM"), tostring(rom:md5()),
+                     tostring(RomReader.US_MD5))
+    end
   end
 
   -- ------- refuse a ROM with no models in it, BEFORE anything is written
@@ -360,13 +437,17 @@ function StadiumInstall.beginFrom(bytes, label)
   -- vanish off the row. Nothing below this line runs for a file that cannot
   -- possibly produce a build.
   local models = rom:modelCount()
-  if not (models and models >= StadiumInstall.COUNT) then
+  if not (models and models >= wanted) then
+    if gen == 2 then
+      return false, "needs Pokemon Stadium 2 with the full 251-Pokemon model archive"
+    end
     return false, "needs Pokemon Stadium US 1.0"
   end
 
   pcall(f.createDirectory, StadiumInstall.DIR)
-  job = StadiumBuild.job(rom, writePack, StadiumInstall.COUNT)
+  job = StadiumBuild.job(rom, writePack, wanted)
   job.md5 = rom:md5()
+  job.sourceGame = status.sourceGame
   status.state = "building"
   status.done = 0
   status.total = job.total
@@ -411,7 +492,11 @@ function StadiumInstall.step()
       -- on a few. Worth telling apart, because "0 of 151 models were built"
       -- reads as a broken mod and this reads as a wrong click.
       if #job.failed >= job.total then
-        status.error = "needs Pokemon Stadium US 1.0"
+        if gameGeneration() == 2 then
+          status.error = "needs a compatible Pokemon Stadium 2 ROM / GS model+animation archives"
+        else
+          status.error = "needs Pokemon Stadium US 1.0"
+        end
       else
         status.error = ("%d of %d models could not be built")
                        :format(#job.failed, job.total)
