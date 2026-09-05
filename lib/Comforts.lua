@@ -189,7 +189,12 @@ end
 
 function Comforts.rename(mon, g)
   local Game = g or game()
-  local NamingScreen = require("src.ui.NamingScreen")
+  -- Gen 2 compatibility: use correct NamingScreen path
+  local okNamingScreen, NamingScreen = pcall(require, "src.ui.NamingScreen")
+  if not okNamingScreen then
+    okNamingScreen, NamingScreen = pcall(require, "src.ui.gen2.NamingScreen")
+  end
+  if not okNamingScreen or not NamingScreen then return end
   Game.stack:push(NamingScreen.new(Game, {
     title = require("src.core.Strings")("%s's NICKNAME?", speciesName(Game, mon)),
     -- the SPECIES name, not the current nickname, and that is what makes

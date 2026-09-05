@@ -638,7 +638,22 @@ local function sealedCells(map)
   local seeds = {}
   for k in pairs(sealed) do
     local cx, cy = k % w, math.floor(k / w)
-    if (map.warpAt and map.warpAt[k]) or map:warpAtCell(cx, cy) then
+    -- Gen 1's Map keeps warpAt as a plain lookup TABLE; Gen 2's Map exposes
+    -- it as a METHOD instead (same family of Gen1/Gen2 shape mismatch noted
+    -- elsewhere in this mod, e.g. PartyMenu.drawIcon). `map.warpAt` alone is
+    -- truthy either way, so indexing it with [k] before checking which
+    -- shape it actually is crashed every Gen 2 map with "attempt to index
+    -- field 'warpAt' (a function value)" and took the whole mesh build
+    -- down with it -- this is why voxel terrain failed to build at all on
+    -- affected Gen 2 maps (ROUTE_45, ROUTE_46, etc).
+    local warped
+    if type(map.warpAt) == "table" then
+      warped = map.warpAt[k] ~= nil
+    elseif type(map.warpAt) == "function" then
+      local ok, hit = pcall(map.warpAt, map, cx, cy)
+      warped = ok and hit
+    end
+    if warped or map:warpAtCell(cx, cy) then
       seeds[#seeds + 1] = k
     end
   end

@@ -1,0 +1,3260 @@
+-- Advanced Voxel Mod (full merge): a full 3D diorama overworld, shipped as
+-- a rendering pipeline mod. Base identity (manifest id, hotkey priority) is
+-- ADVANCED_SHAPE's; the code underneath is TERRARIUM's fuller environment
+-- feature set (weather, ecology, town life, quality-of-life), patched in
+-- three places to restore ADVANCED_SHAPE behaviour TERRARIUM's fork had
+-- dropped -- see manifest.json's description for the three changes, and
+-- lib/HorizonArt.lua, lib/VoxelScene.lua and lib/Voxel3D.lua for where.
+--
+-- On top of that base, this revision restores the systems TERRARIUM's fork
+-- had ALSO quietly dropped when it branched off ADVANCED_SHAPE (formerly
+-- DRAMATIC_SHAPE): Horde Mode, LET'S GO capture, VR, the Stadium/player 3D
+-- models, and the mod's own in-game Settings screen (lib/SettingsMenu.lua)
+-- that groups every row instead of leaving them flat on the engine's
+-- OPTIONS list. All of it now lives under the single ADVANCED_SHAPE letter
+-- hotkey scheme rather than TERRARIUM's digit keys -- see "this mod's
+-- hotkeys" below.
+--
+-- The engine's render_pipelines registry (src/mods/Schemas.lua) lets a mod
+-- own part of the frame.  This mod registers two:
+--
+--   voxel      a drawWorld pipeline.  Instead of the flat tile blit, the
+--              overworld's terrain is extruded into real geometry, walked
+--              by a depth-buffered 3D camera, with characters as leaning
+--              sprite slabs and a shadow map throwing real cast shadows
+--              across whatever they land on.  Occlusion is the depth
+--              buffer, not a y-sort: walk behind a building and the
+--              building is simply in front.
+--
+--   tiltshift  a worldPresent pipeline -- the stage that post-processes
+--              the finished world BEFORE the UI composites over it.  A
+--              tilt-shift blur that sells the miniature-model look, on the
+--              diorama only, leaving text boxes and menus crisp.
+--
+-- Everything a display mode needs beyond the two draw functions -- the
+-- OFF/15/35/50 ladder, the options rows, the hotkeys, persistence in
+-- save.options.pipelines, the free-roam gate, the mutual exclusion with
+-- the engine's TILT mode -- is engine plumbing driven by the records
+-- below.  This file declares; lib/ draws.
+--
+-- Nothing here reaches collision, movement, triggers or scripts.  Voxel
+-- mode is purely presentational: it changes what the world LOOKS like and
+-- nothing about what it IS.
+--
+-- This is the Gen 1 backend for Red/Blue/Yellow games. The main.lua router
+-- loads this file when a Gen 1 game is detected.
+
+local mod = ...
+
+-- ------- Generation detection
+--
+-- This is the Gen 1 backend - we know we're on Gen 1 when this file loads
+mod.log:info("Advanced Terrarium Voxel Mod: Gen 1 backend loading")
+
+-- ------- the mod namespace
+--
+-- lib/ modules require each other through V rather than package.path: a
+-- mod directory is not on it, and may live inside a mounted .love archive
+-- that plain require cannot reach.  Each module is loaded once, with V
+-- passed in as its vararg (`local V = ...`).
+
+local V = { mod = mod, path = mod.path }
+
+local function chunkFor(rel)
+  local source = mod:read(rel)
+  if not source then
+    error(("TERRARIUM: %s is missing -- reinstall the mod"):format(rel), 0)
+  end
+  local chunk, err = load(source, "@" .. mod.path .. "/" .. rel)
+  if not chunk then
+    error(("TERRARIUM: %s did not compile: %s"):format(rel, tostring(err)), 0)
+  end
+  return chunk
+end
+
+local modules = {}
+function V.require(name)
+  local hit = modules[name]
+  if hit ~= nil then return hit end
+  local value = chunkFor("lib/" .. name .. ".lua")(V)
+  modules[name] = value
+  return value
+end
+
+local dataFiles = {}
+function V.data(name)
+  local hit = dataFiles[name]
+  if hit ~= nil then return hit end
+  local value = chunkFor("data/" .. name .. ".lua")(V)
+  dataFiles[name] = value
+  return value
+end
+
+-- ------- Host compatibility: GBCFX exists in some Gen1Recomp builds but was removed/renamed
+-- in others. Voxel mode only needs setLevel(0), so absence must never abort the mod.
+local function optionalGBCFX()
+  local ok, fx = pcall(require, "src.render.GBCFX")
+  if ok and type(fx) == "table" then return fx end
+  return { setLevel = function() end }
+end
+
+-- ------- Host compatibility: Tilt exists in some Gen1Recomp builds but may not in others.
+local function optionalTilt()
+  local ok, tilt = pcall(require, "src.render.Tilt")
+  if ok and type(tilt) == "table" then return tilt end
+  return { setLevel = function() end }
+end
+
+-- Registry keys: unified to the shared "voxel" / "tiltshift" pipeline
+-- names for this merge. TERRARIUM originally namespaced these as
+-- "terrarium_voxel" / "terrarium_tiltshift" so it could run BESIDE
+-- upstream ADVANCED_SHAPE (DRAMATIC_SHAPE) without both mods fighting
+-- over the same pipeline slot. That is no longer the situation here --
+-- this mod ships as the only voxel pipeline installed, under
+-- ADVANCED_SHAPE's own manifest id -- so the plain names are used
+-- instead. This also means any ADVANCED_SHAPE-derived file that checks
+-- Pipelines.level("voxel") / Pipelines.canToggle("voxel", ...) directly
+-- (Horde.lua, VR.lua, SettingsMenu.lua -- all three now wired back in
+-- below) reads the SAME flag this file drives, with no translation needed.
+local PIPE_VOXEL = "voxel"
+local PIPE_TILT  = "tiltshift"
+V.PIPE_VOXEL, V.PIPE_TILT = PIPE_VOXEL, PIPE_TILT
+
+-- Letter keys: free of engine 2-5 and of upstream DRAMATIC_SHAPE's 3/5/6/7/8/9,
+-- so both mods can be enabled without fighting for the same presses.
+local KEY_VOXEL  = "v"   -- VOXEL camera ladder (skips FULL)
+local KEY_GRID   = "g"   -- V-GRID wireframe
+local KEY_TILT   = "t"   -- T-SHIFT blur
+local KEY_CURVE  = "c"   -- V-CURVE horizon
+local KEY_BATTLE = "b"   -- 3D-BTL
+local KEY_WILD   = "n"   -- WILD roam ladder
+local KEY_MAP    = "p"   -- minimap ON/FULL/OFF
+local KEY_HAZE   = "h"   -- V-HAZE aerial perspective
+local KEY_SKYLINE = "k"  -- HORIZON far silhouettes
+local KEY_JUMP   = "space"  -- JUMP (ledge hop / cosmetic jump)
+-- Free of engine 2-5, of upstream DRAMATIC_SHAPE's 3/5/6/7/8/9, and of every
+-- letter above. Fires one impact sheet at the player's feet and steps to the
+-- next on each press -- the only way to SEE the pack without a fight, and
+-- the way to tell "the row is off" apart from "the sheet did not decode".
+local KEY_FX = "j"
+V.KEYS = {
+  voxel = KEY_VOXEL, grid = KEY_GRID, tilt = KEY_TILT,
+  curve = KEY_CURVE, battle = KEY_BATTLE, wild = KEY_WILD, map = KEY_MAP,
+  jump = KEY_JUMP,
+}
+
+-- ------- pipelines
+
+local Voxel = V.require("VoxelState")
+local Voxel3D = V.require("Voxel3D")
+local VoxelScene = V.require("VoxelScene")
+local TiltShift = V.require("TiltShift")
+local ChunkMesher = V.require("ChunkMesher")
+local VoxelGrid = V.require("VoxelGrid")
+local WorldCurve = V.require("WorldCurve")
+local Aerial = V.require("Aerial")
+local Skyline = V.require("Skyline")
+-- Additional modules for Dramatic Shape compatibility
+local Mat4 = V.require("Mat4")
+local ShadowMap = V.require("ShadowMap")
+local SpriteBillboards = V.require("SpriteBillboards")
+-- restored from DRAMATIC_SHAPE: the camera-distance row and the
+-- diorama's own draw-distance ladder, both dropped by TERRARIUM's fork
+local ViewBox = V.require("ViewBox")
+local DrawDistance = V.require("DrawDistance")
+-- Gen 1-specific battle features - only load on Gen 1
+local OverworldBattle = not IS_GEN2 and V.require("OverworldBattle") or nil
+local WildRoamers = not IS_GEN2 and V.require("WildRoamers") or nil
+local BattleExit = not IS_GEN2 and V.require("BattleExit") or nil
+-- Stadium 2 support (Gen 2 Pokemon models) - load on both generations
+local okS2, Stadium2Setting = pcall(V.require, "Stadium2Setting")
+-- restored: shiny Pokemon (the "RBY virtual shiny" indicator), on always,
+-- no row to switch it off -- see the "shiny Pokemon" section below
+local Shiny = V.require("Shiny")
+local ShinyBattle = V.require("ShinyBattle")
+local ShinyUI = V.require("ShinyUI")
+local DayNight = V.require("DayNight")
+local DayTint = V.require("DayTint")
+local Quality = V.require("Quality")
+-- restored from DRAMATIC_SHAPE. NOTE: Quality.shadowSetting (below) also
+-- offers a shadow-quality row -- verify against lib/Shadows.lua and
+-- lib/Quality.lua whether these are the same real-time-shadow feature
+-- under two names (in which case one row should be dropped) or genuinely
+-- separate; this merge keeps both and flags it rather than guessing.
+local AntiAlias = V.require("AntiAlias")
+local Shadows = V.require("Shadows")
+-- restored: haze and volumetric light shafts in the deep woods
+local ForestAtmos = V.require("ForestAtmos")
+local Wind = V.require("Wind")
+local Grass3D = V.require("Grass3D")
+local Water = V.require("Water")
+local Light = V.require("Light")
+local RayFX = V.require("RayFX")
+local Anime = V.require("Anime")
+local Vfx = V.require("Vfx")
+local AmbientLife = V.require("AmbientLife")
+local WindFX = V.require("WindFX")
+local Weather = V.require("Weather")
+local Sky = V.require("Sky")
+local GroundFX = V.require("GroundFX")
+local Ecology = V.require("Ecology")
+local AmbientSound = V.require("AmbientSound")
+local Interiors = V.require("Interiors")
+local CityLife = V.require("CityLife")
+local StreetLamps = V.require("StreetLamps")
+local Carry = V.require("Carry")
+local Shelter = V.require("Shelter")
+local Routines = V.require("Routines")
+local AutoFarm = V.require("AutoFarm")
+local QoL = V.require("QoL")
+local HiddenItems = V.require("HiddenItems")
+local ExpShare = V.require("ExpShare")
+local Comforts = V.require("Comforts")
+local MiniMap = V.require("MiniMap")
+-- ds_fp_ceiling integrated modules
+local Ceiling = V.require("Ceiling")
+local Backdrop = V.require("Backdrop")
+local SkyLayer = V.require("SkyLayer")
+local Flora = V.require("Flora")
+local ModSetting = V.require("ModSetting")
+
+-- StadiumBattleFX settings
+local stadiumFxEnabled = ModSetting.new("stadiumFxPortEnabled", "STADIUM FX",
+  { true, false }, { "ON", "OFF" })
+local stadiumTrainerPortraits = ModSetting.new("stadiumTrainerPortraits", "TRAINER PORTRAITS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxAttackCamera = ModSetting.new("stadiumFxAttackCamera", "ATTACK CAMERA",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxAttackSpeed = ModSetting.new("stadiumFxAttackSpeed", "ATTACK SPEED",
+  { "50", "75", "100", "125", "150" }, { "50%", "75%", "100%", "125%", "150%" })
+local stadiumAnnouncer = ModSetting.new("stadiumAnnouncer", "ANNOUNCER",
+  { true, false }, { "ON", "OFF" })
+local stadiumAnnouncerScope = ModSetting.new("stadiumAnnouncerScope", "ANNOUNCER SCOPE",
+  { "gym", "trainer", "all" }, { "GYM ONLY", "TRAINER", "ALL BATTLES" })
+local stadiumFxCinematicZoom = ModSetting.new("stadiumFxCinematicZoom", "CINEMATIC ZOOM",
+  { "off", "10", "25", "50" }, { "OFF", "10%", "25%", "50%" })
+local stadiumBossArenas = ModSetting.new("stadiumBossArenas", "BOSS ARENAS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxScreenEffects = ModSetting.new("stadiumFxScreenEffects", "SCREEN EFFECTS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxHitReactions = ModSetting.new("stadiumFxHitReactions", "HIT REACTIONS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxFaintAnimations = ModSetting.new("stadiumFxFaintAnimations", "FAINT ANIMATIONS",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxNativeScheduler = ModSetting.new("stadiumFxNativeScheduler", "NATIVE SCHEDULER",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxNativeSync = ModSetting.new("stadiumFxNativeSync", "NATIVE SYNC",
+  { true, false }, { "ON", "OFF" })
+local stadiumFxFallbackNotice = ModSetting.new("stadiumFxFallbackNotice", "FALLBACK NOTICE",
+  { true, false }, { "ON", "OFF" })
+local stadiumFx2DLayer = ModSetting.new("stadiumFx2DLayer", "2D EFFECT LAYER",
+  { "authentic", "all", "off" }, { "AUTHENTIC", "ALL", "OFF" })
+
+-- ds_fp_ceiling additional settings
+local fpShadows = ModSetting.new("fpshadows", "CONTACT SHADOW",
+  { true, false }, { "ON", "OFF" })
+local fpRails = ModSetting.new("fprails", "RAIL AND SKIRTING",
+  { true, false }, { "ON", "OFF" })
+local fpSpill = ModSetting.new("fpspill", "DOORWAY LIGHT",
+  { true, false }, { "ON", "OFF" })
+local fpFittings = ModSetting.new("fpfittings", "CEILING LAMPS",
+  { true, false }, { "ON", "OFF" })
+local fpBacks = ModSetting.new("fpbacks", "BUILDING BACKS",
+  { true, false }, { "ON", "OFF" })
+local fpRock = ModSetting.new("fprock", "CAVE ROCK",
+  { true, false }, { "ON", "OFF" })
+local fpPools = ModSetting.new("fppools", "CAVE POOLS",
+  { true, false }, { "ON", "OFF" })
+local fpSconces = ModSetting.new("fpsconces", "CAVE TORCHES",
+  { true, false }, { "ON", "OFF" })
+local fpBats = ModSetting.new("fpbats", "BATS",
+  { true, false }, { "ON", "OFF" })
+local fpDark = ModSetting.new("fpdark", "CAVE DARKNESS",
+  { true, false }, { "ON", "OFF" })
+local fpThird = ModSetting.new("fpthird", "3RD CEILING",
+  { "NONE", "CUTAWAY", "FULL" }, { "NONE", "CUTAWAY", "FULL" })
+local fpBackdrop = ModSetting.new("fpbackdrop", "HORIZON",
+  { true, false }, { "ON", "OFF" })
+local fpHorizonart = ModSetting.new("fphorizonart", "HORIZON ART",
+  { "KANTO", "FUJI", "VALLEY", "CITY" }, { "KANTO", "FUJI", "VALLEY", "CITY" })
+local fpClouds = ModSetting.new("fpclouds", "CLOUDS",
+  { true, false }, { "ON", "OFF" })
+local fpStars = ModSetting.new("fpstars", "NIGHT SKY",
+  { true, false }, { "ON", "OFF" })
+local fpBirds = ModSetting.new("fpbirds", "BIRDS",
+  { true, false }, { "ON", "OFF" })
+local fpAircraft = ModSetting.new("fpaircraft", "AIRCRAFT",
+  { true, false }, { "ON", "OFF" })
+local fpRainbows = ModSetting.new("fprainbows", "RAINBOWS",
+  { true, false }, { "ON", "OFF" })
+local fpRain = ModSetting.new("fprain", "RAIN",
+  { "OFF", "SOMETIMES", "ALWAYS" }, { "OFF", "SOMETIMES", "ALWAYS" })
+local fpLightning = ModSetting.new("fplightning", "LIGHTNING",
+  { true, false }, { "ON", "OFF" })
+local fpUmbrellas = ModSetting.new("fpumbrellas", "NPC UMBRELLAS",
+  { true, false }, { "ON", "OFF" })
+local fpPuddles = ModSetting.new("fppuddles", "PUDDLES",
+  { true, false }, { "ON", "OFF" })
+local fpGrass = ModSetting.new("fpgrass", "GRASS HEIGHT",
+  { "OFF", "SUBTLE", "WILD" }, { "OFF", "SUBTLE", "WILD" })
+local fpWind = ModSetting.new("fpwind", "WIND",
+  { "OFF", "BREEZE", "GUSTY" }, { "OFF", "BREEZE", "GUSTY" })
+local fpParticles = ModSetting.new("fpparticles", "PARTICLES",
+  { true, false }, { "ON", "OFF" })
+local fpInsects = ModSetting.new("fpinsects", "INSECTS",
+  { true, false }, { "ON", "OFF" })
+local fpGroundflock = ModSetting.new("fpgroundflock", "GROUND FLOCK",
+  { true, false }, { "ON", "OFF" })
+local fpCanopy = ModSetting.new("fpcanopy", "FOREST CANOPY",
+  { true, false }, { "ON", "OFF" })
+local fpVines = ModSetting.new("fpvines", "HANGING VINES",
+  { true, false }, { "ON", "OFF" })
+local fpShafts = ModSetting.new("fpshafts", "SUN SHAFTS",
+  { true, false }, { "ON", "OFF" })
+local fpFog = ModSetting.new("fpfog", "LAVENDER FOG",
+  { true, false }, { "ON", "OFF" })
+local fpLights = ModSetting.new("fplights", "LAMPLIGHT",
+  { true, false }, { "ON", "OFF" })
+local fpJump = ModSetting.new("fpjump", "JUMP FEEL",
+  { "OFF", "SUBTLE", "BIG" }, { "OFF", "SUBTLE", "BIG" })
+local fpDoorstep = ModSetting.new("fpdoorstep", "DOORWAY STEP",
+  { true, false }, { "ON", "OFF" })
+-- Camera and movement modules for 1ST/3RD person views
+local Jump = V.require("Jump")
+local FirstPerson = V.require("FirstPerson")
+local ThirdPerson = V.require("ThirdPerson")
+local CamControl = V.require("CamControl")
+local FreeMove = V.require("FreeMove")
+-- restored from DRAMATIC_SHAPE: PCVR through OpenXR
+local VR = V.require("VR")
+-- restored: custom 3D models for the player character, built from the
+-- player's own Pokemon Stadium cartridge
+local PlayerModel = V.require("PlayerModel")
+local PlayerModelInstall = V.require("PlayerModelInstall")
+local PlayerModelPick = V.require("PlayerModelPick")
+-- restored: Stadium models for wild Pokemon in the overworld
+local StadiumWilds = V.require("StadiumWilds")
+-- restored: the mod's own settings menus -- the categories, the screens
+-- they open, and the red ink that marks this mod's one row on the
+-- engine's OPTIONS list. See "the mode's rows" section below for how it
+-- is wired back in.
+local SettingsMenu = V.require("SettingsMenu")
+-- restored: HORDE MODE, the konami code's minigame. Horde owns the state
+-- machine and every hook; the other three are the gun, the crowd/readout
+-- and the chip-synthesized sounds it fires. See lib/Horde.lua.
+local Horde = V.require("Horde")
+local HordeGun = V.require("HordeGun")
+local HordeHud = V.require("HordeHud")
+local HordeSfx = V.require("HordeSfx")
+-- restored: LET'S GO, the flick-to-throw capture mode. LetsGo owns the
+-- row, the wraps and the experience math; Pokeball the animated prop.
+local LetsGo = V.require("LetsGo")
+local Pokeball = V.require("Pokeball")
+-- Follower system (ported from VOXEL_ULTIMATE)
+local Follower = V.require("follower/init")
+-- Follower water compatibility module
+local FollowersWaterCompat = V.require("followers_water_compat")
+
+-- Follower settings rows
+local FollowerSettings = V.require("follower/settings")
+
+-- Instantiate water compat and attach to V namespace for follower system
+V.followersWater = FollowersWaterCompat.new(mod, {
+  resolveWaterSprite = function(speciesId, shiny, form, o)
+    -- Delegate to sprite resolver
+    local SpriteResolver = V.require("sprite_resolver")
+    if SpriteResolver and SpriteResolver.resolveFollowerSprite then
+      return SpriteResolver:resolveFollowerSprite({
+        species = speciesId,
+        shiny = shiny,
+        form = form,
+        surface = "surfing",
+        style = V.require("config").spriteStyle(mod),
+        role = "primary",
+      })
+    end
+    return nil
+  end,
+  resolveLandSprite = function(speciesId, shiny, form, o)
+    -- Delegate to sprite resolver
+    local SpriteResolver = V.require("sprite_resolver")
+    if SpriteResolver and SpriteResolver.resolveFollowerSprite then
+      return SpriteResolver:resolveFollowerSprite({
+        species = speciesId,
+        shiny = shiny,
+        form = form,
+        surface = "land",
+        style = V.require("config").spriteStyle(mod),
+        role = "primary",
+      })
+    end
+    return nil
+  end,
+})
+
+-- Create follower settings rows
+local ModSetting = V.require("ModSetting")
+
+-- Follow Control Mode: trainer (player controls follower) vs pokemon (you control pokemon)
+local followControlSetting = ModSetting.new(
+  "follow_control",
+  "FOLLOW CONTROL",
+  { "trainer", "pokemon" },
+  { "TRAINER", "POKÉMON" }
+)
+
+-- Trainer Trail: when controlling pokemon, does trainer follow behind?
+local trainerTrailSetting = ModSetting.new(
+  "trainer_trail",
+  "TRAINER TRAIL",
+  { false, true },
+  { "OFF", "ON" }
+)
+
+-- Follower Count: 0-6 extra party followers
+local followerCountSetting = ModSetting.new(
+  "follower_count",
+  "FOLLOWER COUNT",
+  { 0, 1, 2, 3, 4, 5, 6 },
+  { "0", "1", "2", "3", "4", "5", "6" }
+)
+
+-- Forward declaration: the voxel pipeline's update hook (registered below)
+-- calls this, and it is defined further down with the settings it drives.
+-- Declared rather than left global -- a mod writing to _G would leak into
+-- every other mod's namespace.
+local applyFull
+
+-- The last VOID FILL the terrain was meshed under; see the update hook.
+-- The scene canvas's size, in FRAMEBUFFER PIXELS.
+--
+-- `ctx.width/height` are the window measured in LOVE UNITS
+-- (love.graphics.getDimensions), but the engine composites a pipeline's
+-- returned canvas with `draw(canvas, 0, 0, 0, 1/dpiX, 1/dpiY)` -- a scale
+-- that only covers the window when the canvas is at PIXEL resolution.
+-- Sizing it in units costs the DPI scale TWICE: the canvas is that much
+-- smaller, then it is drawn that much smaller again, so the diorama lands
+-- in the top-left corner at 1/dpi of the screen.  Desktop never sees it --
+-- units and pixels are the same thing there -- but on Android the DPI scale
+-- is the display density (2.625 on a 420dpi panel), and the world came out
+-- a third of the size in each direction.
+--
+-- So ask for the pixel dimensions rather than trusting the ctx.  That is
+-- the number a fixed engine would hand over, so this keeps working either
+-- way instead of double-correcting.  It also squares the FX pass: ctx.scale
+-- is ALREADY in pixels per world pixel (Zoom.scale over Renderer:fitScale,
+-- which measures the drawable), so the closures ctx.drawFx runs were being
+-- scaled for a canvas 2.6x bigger than the one they drew into.
+local function sceneSize(ctx)
+  if love.graphics and love.graphics.getPixelDimensions then
+    local pw, ph = love.graphics.getPixelDimensions()
+    if pw and ph and pw > 0 and ph > 0 then return pw, ph end
+  end
+  return ctx.width, ctx.height
+end
+
+local voidFill = { last = nil }
+function voidFill.check()
+  local TileRenderer = require("src.render.TileRenderer")
+  local now = TileRenderer.voidFill
+  if voidFill.last ~= nil and now ~= voidFill.last then
+    ChunkMesher.invalidate()   -- no map id: every ring on every map is stale
+  end
+  voidFill.last = now
+end
+
+-- Register voxel pipeline (Gen 2 uses render.compose via GoldComposeBridge for actual rendering)
+mod.content.render_pipelines:register(PIPE_VOXEL, {
+  label = "VOXEL",
+  levels = Voxel.ANGLE_LABELS,
+  -- No hotkey here - handled by custom keypressed handler to support 1ST/3RD cycling
+  -- hotkey = KEY_VOXEL,
+  -- above tiltshift, so the two sort together in the options list with the
+  -- mode first and its post-process under it
+  priority = 20,
+
+  -- Headless runs and drivers without a depth canvas or shader support
+  -- answer false here, and the engine keeps the vanilla 2D path -- which
+  -- is why no caller ever has to guard for a missing 3D pass.
+  available = function()
+    return Voxel3D.available()
+  end,
+
+  -- the engine hands over the live level; we ease the camera toward it.
+  -- pump() advances queued mesh builds inside a few-millisecond budget,
+  -- so entering voxel mode (and streaming neighbours while walking)
+  -- costs frames nothing visible -- the old synchronous build froze the
+  -- first frame for seconds. prefetch() runs here as well as in the
+  -- draw, because update ticks even while a warp's Transition covers
+  -- the screen: the destination's meshes start building the moment the
+  -- map swaps behind the fade, and the fade-covered frames get a wider
+  -- pump slice -- so stepping out of a door lands on terrain that is
+  -- already there instead of a flat flash.
+  update = function(dt, level)
+    -- FULL is a preset, so it is applied ON THE PRESS rather than held every
+    -- frame: it SETS the other rows and then leaves them alone. Holding them
+    -- would make the zoom keys and the wheel dead while the mode was on, and
+    -- would fight anyone who changed one deliberately.
+    applyFull(level)
+    Voxel.update(dt, level)
+    -- Check for deferred follower load when Stadium models become available
+    -- (restored from DRAMATIC_SHAPE)
+    local okFollower, StadiumFollower = pcall(V.require, "StadiumFollower")
+    if okFollower and StadiumFollower then
+      StadiumFollower.checkDeferred()
+    end
+    -- the first-person head, on the same tick: its blend in and out of the
+    -- orbit, the mouse capture lifecycle, and the frame's stick-rate look.
+    -- Unconditional like Voxel.update, because the blend has to keep easing
+    -- OUT after the rung is left
+    FirstPerson.update(dt)
+    -- the atmosphere's own clock (shaft shimmer, drifting motes), on the
+    -- same tick so the beams keep breathing through a dialog box
+    -- (restored from DRAMATIC_SHAPE)
+    ForestAtmos.update(dt)
+    -- the day/night clock, on the same always-running tick: Pipelines.update
+    -- runs whatever the level, so time passes with the mode off, through
+    -- battles and menus, and a CYCLE evening falls mid-fight exactly as it
+    -- would mid-walk
+    DayNight.update(dt)
+    -- The overworld battle rides this hook rather than owning a pipeline of
+    -- its own, because it owns no pass of the FRAME: it draws under a battle
+    -- screen the engine composites, which is not a stage the registry has.
+    -- What it needs is a tick that keeps running once the overworld stops
+    -- being the top state, and this is one -- Game:update calls
+    -- Pipelines.update unconditionally, so it survives the transition wipe
+    -- and the whole battle. Ahead of the active() gate below, because a 3D
+    -- battle does not require the free-roam mode to be switched on.
+    if OverworldBattle then OverworldBattle.update(dt) end
+    -- LET'S GO rides the same always-running tick, and BEFORE the battle's
+    -- own update on purpose: the capture session poses the Poke Ball here,
+    -- and OverworldBattle.update renders the arena a moment later -- so
+    -- the ball each frame draws is the ball that frame computed. Guarded,
+    -- and loudly: a fault in the capture game must cost the capture game,
+    -- not the whole voxel pipeline. (restored from DRAMATIC_SHAPE)
+    local okLG, errLG = pcall(LetsGo.update, dt)
+    if not okLG then
+      print("ADVANCED_SHAPE: LET'S GO update failed:", errLG)
+    end
+    -- The one-time build of the Pokemon Stadium battle models out of the
+    -- player's own ROM, if there is one to build from and it has not been
+    -- done. Rides this hook for the same reason the battle does -- it is
+    -- the tick that runs whatever is on the stack -- and asks exactly
+    -- once, on the first frame the player is actually in the world.
+    -- (restored from DRAMATIC_SHAPE)
+    pcall(function() V.require("StadiumScreen").maybePush() end)
+    -- Also build Stadium 2 models if ROM is available (Gen 2 Pokemon support)
+    pcall(function() V.require("Stadium2Screen").maybePush() end)
+    -- Load the player model if one is installed (restored from DRAMATIC_SHAPE)
+    pcall(function()
+      if not PlayerModel.loaded() and PlayerModelInstall.installed() then
+        PlayerModel.loadInstalled()
+      end
+    end)
+    -- and a ROM the system file picker dropped in the save directory while
+    -- we were not the top activity (Android). (restored from DRAMATIC_SHAPE)
+    pcall(function()
+      V.require("StadiumRomPick").poll(require("src.core.Game"))
+    end)
+    -- Also poll for Stadium 2 ROM changes
+    pcall(function()
+      V.require("Stadium2RomPick").poll(require("src.core.Game"))
+    end)
+    -- The horde, on the same always-running tick and for the same reason:
+    -- it owns no pass of the frame, it is a MODE over the overworld, and
+    -- it has to keep thinking while a warp's wipe covers the screen (the
+    -- crowd follows the player through the door) and under the GAME OVER
+    -- card, which is a pushed state that stops everything below it.
+    -- (restored from DRAMATIC_SHAPE)
+    Horde.update(dt)
+    -- The wild Pokemon standing in the grass ride the same hook for one of
+    -- the same two reasons: it is the tick that keeps running whatever is on
+    -- top, which is what lets the population notice a map arriving while a
+    -- warp's transition still covers the screen. The other reason does not
+    -- apply and the module gates on it itself -- nothing may be spawned into
+    -- the world while a battle owns the cast list. Ahead of the active()
+    -- gate, because what is standing in the grass is not a question about
+    -- the camera.
+    if WildRoamers then WildRoamers.update() end
+    -- The ambient life -- butterflies, fireflies, birds, wind-blown leaves
+    -- -- keeps its clocks on the same tick, and gates itself down to the
+    -- frames where there is a diorama on screen to be alive on.
+    if AmbientLife then AmbientLife.update(dt, Voxel.active()) end
+    -- Advanced on real seconds, so a sheet drawn at 30fps lasts the wall
+    -- time it was drawn for whatever the game's frame rate is doing.
+    Vfx.update(dt)
+    -- The weather, on the same tick and AHEAD of everything that reads it.
+    -- It is not a drawing with a clock, it is a clock several other things
+    -- read: this call is what writes DayNight.overcast and Water.wet for the
+    -- frame, so the sky, the hour's tint and the pond's glint all take their
+    -- values from a shower that has already advanced rather than from the one
+    -- before it. Ahead of the active() gate too, because a shower is a fact
+    -- about Kanto and not about the camera -- it keeps building while you are
+    -- in a fight, and the 2D world darkens under it either way.
+    Weather.update(dt)
+    -- and what the weather LEAVES: the ground soaking through a shower and
+    -- drying out over the ten minutes after it, the snow settling and
+    -- melting, the footprints filling back in. Immediately behind Weather,
+    -- because it reads the number that call just wrote -- and ahead of the
+    -- active() gate for the same reason the shower itself is: how wet the
+    -- ground is is a fact about Kanto, so it keeps soaking while you are
+    -- indoors, in a fight, or playing with the camera switched off.
+    GroundFX.update(dt)
+    -- and the air itself, made visible. BEHIND Weather, because the gust
+    -- envelope it throws its fronts off is advanced by Wind.step and that
+    -- call is inside Weather's tick -- reading it ahead of that would spawn
+    -- every front one frame late and off the previous gust. Gated on the
+    -- camera unlike the two above, and honestly so: dust blowing across a
+    -- meadow is a DRAWING, not a fact about Kanto, and there is nothing for
+    -- it to blow across on the flat 2D path.
+    WindFX.update(dt, Voxel.active())
+    -- and what it sounds like out there. Also ahead of the gate, and for a
+    -- plainer reason than the weather's: a sound needs no camera, so the
+    -- crickets come out at night on the flat 2D world too.
+    if AmbientSound then AmbientSound.update(dt) end
+    -- The street Pokemon ride the same tick and gate themselves exactly
+    -- like the wild ones do -- and like them, they are real map objects,
+    -- so they walk the flat 2D world too.
+    if CityLife then CityLife.update() end
+    -- and what the town DOES about the weather: when it comes down hard the
+    -- civilians walk to the nearest door and stand in it, and the street
+    -- Pokemon go in and are gone until it passes. Immediately BEHIND
+    -- CityLife, because it drops that module's cast and sets the flag that
+    -- stops it refilling the street behind them -- and behind Weather for
+    -- the plainer reason that it reads the shower that call just advanced.
+    if Shelter then Shelter.update() end
+    -- and what the people do the rest of the time. Behind Shelter because
+    -- both write `facing` and the rain outranks a conversation: somebody
+    -- walking to a door has already been taken out of the routine's hands
+    -- (it skips anybody carrying `dsShelter`), and running them the other
+    -- way round would spend a frame with the two disagreeing.
+    if Routines then Routines.update(dt) end
+    -- and the sleeper indoors, which is a real map object for the same
+    -- reason and gates itself the same way. Its steam is a drawing and waits
+    -- for the overlay; the cat itself is standing there in both modes.
+    if Interiors then Interiors.update() end
+    -- and the quality-of-life watchers (auto-repel), same tick, same gates
+    if QoL then QoL.update() end
+    -- how much fits in the bag, kept in step with the two rows. Polled for
+    -- the same reason voidFill is: the value can move from the OPTIONS row,
+    -- the mod manager and applyOptions on a load, and none of them says so.
+    Carry.update()
+    -- what is buried on this map. Rebuilt only when the map CHANGES -- the
+    -- glints re-check `hiddenTaken` per frame in the draw, so walking over
+    -- one puts its own light out with nothing having to announce it.
+    if HiddenItems then HiddenItems.update() end
+    -- VOID FILL picks the block the border ring is made of, and in this
+    -- mode that ring is BAKED INTO THE MESH rather than drawn each frame.
+    -- So the option has to reach the cache or nothing happens on screen
+    -- until the meshes are dropped for some other reason -- which reads
+    -- exactly like the option doing nothing at all. Polled rather than
+    -- hooked because the engine changes it from three places (the options
+    -- row, applyOptions on load, TileRenderer.setVoidFill) and none of
+    -- them announces it. Ahead of the active() gate, so switching it
+    -- while voxel mode is OFF still invalidates what is cached.
+    voidFill.check()
+    if not Voxel.active() then return end
+    local Game = require("src.core.Game")
+    local ow = Game and Game.overworld
+    if ow and ow.map and ow.camera then
+      pcall(VoxelScene.prefetch, ow)
+    end
+    -- COVERED says nothing of the world is on screen to hitch, which is
+    -- worth four times the slice (see ChunkMesher's own note). Another
+    -- scene on top of the stack is one way that happens. A WARP is the
+    -- other, and it was the one missing: a door's fade is drawn BY the
+    -- overworld, so the stack is still pointing AT the overworld for
+    -- exactly the frames the fade is covering, and the test below answers
+    -- "visible" for every one of them. Which is how the fat slice written
+    -- for a door fade never once ran under a door fade. `transitioning`
+    -- is the flag the rest of the mod already reads as "stand down, the
+    -- screen is not the player's right now" (Weather, AmbientSound,
+    -- WildRoamers all gate on it), and it is the honest answer here too.
+    ChunkMesher.pump((Game and Game.stack and Game.stack:top() ~= ow)
+                     or (ow and ow.transitioning) or false)
+  end,
+
+  drawWorld = function(ctx)
+    -- Terrain and characters are geometry; the field FX stay ordinary 2D
+    -- draws composited on top, anchored through the same camera the 3D
+    -- pass used (ctx.drawFx below).  The scene renders at the window's
+    -- PIXEL resolution (see sceneSize) so the 3D pass is crisp rather than
+    -- a magnified low-res image, while the FX closures keep drawing in
+    -- world-pixel units.
+    local sw, sh = sceneSize(ctx)
+    local canvas = VoxelScene.render(ctx.state, sw, sh,
+                                     ctx.vw, ctx.vh, ctx.paletteFor)
+    if not canvas then return nil end   -- fall back to the 2D path
+    if Voxel3D.beginOverlay() then
+      ctx.drawFx(function(wx, wy) return Voxel3D.project(wx, 0, wy) end,
+                 ctx.scale)
+      -- the ambient life composites through the same overlay, anchored by
+      -- the same camera -- but with its height honest, so a bird crossing
+      -- at 40 world pixels is projected AT 40 world pixels
+      if AmbientLife then AmbientLife.draw(Voxel3D.project, ctx.scale) end
+      -- The impact sheets, immediately after the ambient life and through
+      -- the same projection. Ahead of the wind and the weather for the
+      -- reason everything in this list is ahead of what follows it: a flash
+      -- is a thing standing in the world, and rain falls in front of it.
+      Vfx.draw(Voxel3D.project, ctx.scale)
+      -- the air, through the same projection and immediately behind the
+      -- ambient life: a blown leaf and a streak of dust are the same wind
+      -- carrying two different things, and they have to be composited
+      -- together or the leaf reads as flying under its own power. Ahead of
+      -- the weather for the same reason everything else is -- rain falls in
+      -- front of what it is falling past.
+      WindFX.draw(Voxel3D.project, ctx.scale)
+      -- the steam off a mug and the Zs over a sleeping Meowth, indoors,
+      -- through the same projection for the same reason
+      if Interiors then Interiors.draw(Voxel3D.project, ctx.scale) end
+      -- the glint over a buried item, through the same projection -- and
+      -- before the weather, so rain falls in FRONT of it the way it falls in
+      -- front of everything else standing in the world
+      if HiddenItems then HiddenItems.draw(Voxel3D.project, ctx.scale) end
+      -- and the weather LAST of the three, because rain is in front of
+      -- everything by definition: its splashes are world-space and land
+      -- among the rest of this, but its streaks fall between the camera and
+      -- the whole diorama, so they have to be painted over it. The canvas
+      -- size goes with them -- the streaks are screen-space and the surface
+      -- they cross is this one, not the window (see sceneSize).
+      Weather.draw(Voxel3D.project, ctx.scale, sw, sh)
+      Voxel3D.endOverlay()
+    end
+    -- Orientation radar on the finished (upscaled) world canvas. Screen-
+    -- space corner HUD -- not inside the RES-downsampled 3D pass. When
+    -- T-SHIFT is on, worldPresent re-paints it AFTER the blur so the
+    -- radar stays sharp (see tiltshift worldPresent below).
+    MiniMap.present(canvas)
+    return canvas
+  end,
+
+  invalidate = function()
+    Voxel3D.invalidate()
+    if OverworldBattle then OverworldBattle.invalidate() end
+    ChunkMesher.invalidate()   -- no map id = every cached mesh
+    -- the ground decals are GPU objects on the same footing: meshes and two
+    -- generated strips, all rebuilt on demand
+    GroundFX.dropGPU()
+    Water.dropGPU()
+    MiniMap.invalidate()
+    -- restored from DRAMATIC_SHAPE
+    ForestAtmos.invalidate()   -- shaft/particle meshes and shader sentinels
+    VR.invalidate()            -- the mirror, and FBO ids of dead canvases
+    Pokeball.invalidate()      -- the ball's meshes and palette texture
+  end,
+})
+
+mod.content.render_pipelines:register(PIPE_TILT, {
+  label = "T-SHIFT",
+  levels = TiltShift.LABELS,
+  -- Letter key (not upstream's 6): registry + wrap handle it.
+  hotkey = KEY_TILT,
+  priority = 10,
+
+  update = function(dt, level)
+    TiltShift.update(dt, level)
+  end,
+
+  -- worldPresent, not present: the blur belongs on the diorama, not on the
+  -- dialog box in front of it.  A pass-through when the level is 0 or the
+  -- shader is unavailable, so the frame is untouched in every other case.
+  -- When the blur actually ran, re-paint the orientation radar on top so
+  -- it is not smeared with the diorama (drawWorld already painted it once).
+  worldPresent = function(canvas)
+    canvas = TiltShift.apply(canvas)
+    if (TiltShift.level or 0) > 0 then
+      canvas = MiniMap.present(canvas)
+    end
+    return canvas
+  end,
+
+  invalidate = function()
+    TiltShift.invalidate()
+  end,
+})
+
+-- ------- this mod's own settings
+--
+-- Neither of these is a pipeline: they own no pass of the frame, they
+-- PARAMETERISE the voxel one, so they have nothing to put in drawWorld or
+-- present and the registry would rightly reject them.  Plain mod settings
+-- instead -- see ModSetting for where they persist and how the two rows
+-- each ends up on stay in step.
+
+-- ------- the FULL preset
+--
+-- Everything the mode wants switched to at once. Applied when the VOXEL row
+-- ARRIVES at FULL and not again, so the player can still move the camera or
+-- the zoom afterwards -- it is a starting point, not a lock.
+--
+-- Leaving FULL deliberately does NOT undo any of it. A preset that reverted
+-- would throw away whatever the player had changed since, and "put it back
+-- how it was" is not a thing this can know.
+local fullWas = nil
+
+applyFull = function(level)
+  local isFull = Voxel.isFull(level)
+  local was = fullWas
+  fullWas = isFull
+  if not isFull or was == true or was == nil then return end
+
+  local Game = require("src.core.Game")
+  local Pipelines = require("src.render.Pipelines")
+  local Zoom = require("src.render.Zoom")
+  local opts = Game.save and Game.save.options
+  if not opts then return end
+
+  -- the miniature blur at its strongest: FULL is the diorama look, and the
+  -- tilt-shift is most of what makes it read as a model
+  Pipelines.setLevel(PIPE_TILT, Pipelines.maxLevel(PIPE_TILT))
+  Pipelines.syncOptions(opts)
+  -- the horizon flat. The curve bends the world away from a walking player,
+  -- which fights a fixed diorama framing
+  WorldCurve.setting:setIndex(1, Game)
+  -- and the view fitted to the window
+  opts.zoom = 0
+  Zoom.applyOptions(opts)
+  -- battles on the map too: FULL means the whole mode, and a fight is where
+  -- half of it is spent. Set and then LET GO of -- unlike the rows above, both
+  -- battle rows stay on the menu under FULL (see the rows hook), so this is
+  -- where the preset puts them and not where they are held.
+  if OverworldBattle then
+    OverworldBattle.setting:setIndex(1, Game)
+    -- with both mons out there on it: BACK SPRITES keeps the player's own on the
+    -- menu, which is the one part of the old screen FULL is least about. Set the
+    -- same way, and changed back on the same row a keypress later.
+    OverworldBattle.backSetting:setIndex(1, Game)
+    -- and the battle screen the staged fight is composed for. WIDE re-lays that
+    -- screen out on a 304x144 surface, which moves every anchor the arena camera
+    -- is solved against (OverworldBattle.forceOG); FULL has just switched staged
+    -- fights on, so the layout follows them.
+    OverworldBattle.forceOG(Game)
+  end
+  -- and the sky on the clock on the wall: FULL pins DAYTIME to SYNC. Unlike
+  -- the rest of the preset this one IS held, not just set -- the row is off
+  -- the menu while FULL owns it (the rows hook below), so a value changed
+  -- under it could never be seen or changed back.
+  DayNight.forceSync(Game)
+  if Game.writeOptions then pcall(Game.writeOptions, Game) end
+end
+
+-- Whether a fight can be staged on the map, as far as the OPTIONS menu is
+-- concerned: the 3D-BTL row, and nothing else.
+--
+-- It used to answer yes under FULL as well, on the grounds that FULL owned
+-- that row and switched it on. FULL no longer owns it -- the row stays on the
+-- menu under FULL and can be switched off there (see the rows hook) -- so that
+-- clause would now claim staged battles for a preset the player had just
+-- turned them off inside, pinning BATTLE LAYOUT to OG for a fight that is
+-- never staged. The row is the only thing that decides, which is what every
+-- other reader of this setting already believed: OverworldBattle.begin and
+-- wantsFront both gate on enabled() alone.
+--
+-- Deliberately NOT gated on Voxel3D.available(): the engine offers a
+-- pipeline's row whether or not the hardware can run it (Pipelines.rows), so
+-- this mode's rows say ON on a machine without a depth buffer too, and a menu
+-- that claims 3D battles are on must not also offer the layout they cannot be
+-- drawn in.
+local function stagedBattles()
+  return OverworldBattle and OverworldBattle.enabled() or false
+end
+
+local SETTINGS = {
+  -- `full` on both: FULL owns the rows that describe the LOOK, and what
+  -- this device can afford to draw is not one of them. A preset that took
+  -- the performance rows off the menu would be a preset a player on a slow
+  -- phone could not climb back out of -- FULL is the heaviest thing this
+  -- mod does, so it is exactly when these two need to be reachable.
+  { Quality.setting,
+    "How much of the panel's resolution the 3D pass renders at, before it "
+    .. "is scaled back up. Lower is squarer and much faster -- this is the "
+    .. "one that decides whether the diorama runs at all on a slow device.",
+    full = true, cat = "perf" },
+  { Quality.shadowSetting,
+    "LOW keeps real cast shadows on a smaller map with a harder edge and "
+    .. "no neighbouring maps casting. OFF drops the sun pass entirely and "
+    .. "puts the flat drop shadows back under people's feet.",
+    full = true, cat = "perf" },
+  -- ------- restored from DRAMATIC_SHAPE: what the look COSTS
+  --
+  -- All four are `full`, and all four for the same reason: FULL is a preset
+  -- for the diorama, not a licence to spend whatever the machine it happens
+  -- to be running on has got. The player decides what their hardware can
+  -- carry, from inside FULL like anywhere else.
+  --
+  -- Quality.shadowSetting above and Shadows here may be two names for the
+  -- same real-time-shadow feature -- verify against lib/Shadows.lua and
+  -- lib/Quality.lua before shipping; this merge keeps both rows rather
+  -- than silently dropping one.
+  { ForestAtmos.setting,
+    "Haze and volumetric light shafts in the deep woods, with pollen in "
+    .. "the beams by day and fireflies at night.",
+    full = true, cat = "perf" },
+  { Shadows.setting,
+    "Real cast shadows from the sun, and the first thing to switch off "
+    .. "on a phone or an old machine.",
+    full = true, cat = "perf" },
+  { AntiAlias.setting,
+    "Smooths the stair-stepped edges of the 3D world, and the most "
+    .. "expensive row in the mod.",
+    full = true, cat = "perf" },
+  { DrawDistance.setting,
+    "How many adjacent maps to render: OFF (no limit, original "
+    .. "behavior), NEAR (0 neighbors) for best performance on low-end "
+    .. "devices, MILD (2 neighbors) for balanced quality, or FAR "
+    .. "(4 neighbors) for moderate quality/performance balance.",
+    full = true, cat = "perf" },
+  { Grass3D.simpleMeshes,
+    "Simplified meshes for roads, ground and decorative grass. ON uses "
+    .. "simple quad meshes (4 vertices) instead of detailed grass meshes "
+    .. "(1,719 vertices) for much faster loading and rendering. OFF uses "
+    .. "the full detailed meshes for better visual quality.",
+    full = true, cat = "perf" },
+  -- `full = true` as well, and for a plainer reason than the two above:
+  -- FULL is the preset most people arrive at, and taking the wind off the
+  -- menu there would hide the one row that decides whether the world looks
+  -- alive.
+  { Wind.setting,
+    "Wind through the tall grass and the flowers, and the dust and spray "
+    .. "it carries across open ground. AUTO hands the row itself to the "
+    .. "climate: near-still on a calm night, breeze by day, and it reaches "
+    .. "gale on its own under a front -- so a storm feels like a storm "
+    .. "without you walking back to this menu. BREEZE and GALE are the two "
+    .. "fixed windows onto that same living air; OFF is silence. The grass "
+    .. "is geometry here: the base stays planted, the tip bends and DROPS "
+    .. "as it goes over, each tuft has its own stiffness, rain weighs it "
+    .. "down and damps it, settled snow bows it over, feet flatten it and "
+    .. "it springs back.",
+    full = true, cat = "weather" },
+  { Water.setting,
+    "The water surface as geometry rather than a scrolling picture: it "
+    .. "rises and falls on two crossing swells, cel-shaded into flat "
+    .. "dithered bands -- crests a shade lighter, troughs deeper -- with "
+    .. "a hard-ringed toon glint where a crest turns into the sun, and "
+    .. "white FOAM lapping the shoreline on the tide's own clock. FLAT "
+    .. "is the old still plane.",
+    full = true, cat = "world" },
+  { Light.setting,
+    "SKY lights the world with two lights instead of one -- the sun, warm "
+    .. "and directional, and the sky, cool and from everywhere. A shadow "
+    .. "then reads as somewhere the SKY is lighting rather than as a dimmer, "
+    .. "which is what makes it look outdoors. Indoors there is no sky, so "
+    .. "shadows stay grey. FLAT is the single tint it used to be.",
+    full = true, cat = "world" },
+  -- `full = true` for the same reason the two performance rows above have
+  -- it: this is the row that costs the most per rung, so FULL -- the
+  -- heaviest thing the mod does -- is exactly when it has to be reachable.
+  { RayFX.setting,
+    "Fake ray tracing: everything here is a ray marched across the depth "
+    .. "buffer the 3D pass already filled, so it costs fetches rather than "
+    .. "geometry. AO darkens the corners the sky cannot reach -- doorways, "
+    .. "the foot of a wall, the gap between two trees. RT adds real "
+    .. "reflections on the water: the ray leaves along the swell's own "
+    .. "normal and lands on whatever is actually standing there, so the "
+    .. "reflection travels with the crest carrying it. MAX adds light "
+    .. "shafts through the gaps, marched toward the sun's own disc.",
+    full = true, cat = "fx" },
+  -- `full = true` for the reason WATER and LIGHT have it: this is a row
+  -- about the LOOK, and FULL is the preset the look is watched from.
+  { Anime.setting,
+    "Cel animation. CEL crushes the whole of the light -- sky, sun and "
+    .. "every lamp -- into four flat steps, dithered on the pixel grid the "
+    .. "way the water already bands its swell, so a shadow arrives as a "
+    .. "painted shape with an edge instead of a gradient. FULL adds the "
+    .. "other two halves of a drawn frame: a cool rim light along every "
+    .. "silhouette, and an ink line closing every shape, both read off the "
+    .. "surface normal the RTX pass already recovers. Because they are read "
+    .. "off that pass, FULL needs RTX above OFF -- with it off, FULL draws "
+    .. "as CEL. Both rungs reach the overworld and the battle arena "
+    .. "together: they share one scene shader.",
+    full = true, cat = "fx" },
+  -- `full = true` for the reason ANIME has it: it is a row about the look.
+  { Vfx.setting,
+    "Hand-drawn impact frames -- the half of the anime look a shader cannot "
+    .. "do. Eight CC0 sprite sheets (hits, an explosion, a charge-up, an "
+    .. "electric burst, the cartoon puff of stars) composited into the world "
+    .. "through the same camera the butterflies and the rain use, added as "
+    .. "LIGHT so the black around each flash disappears and the core blows "
+    .. "out. Sheets load on first use, so OFF costs nothing and a session "
+    .. "that never fires one loads nothing. Press J in free roam to fire the "
+    .. "next sheet at your feet.",
+    full = true, cat = "fx" },
+  -- `full = true` for the same reason WIND has it: this is a row that
+  -- decides whether the world looks alive, and FULL is the preset most
+  -- people watch it from.
+  { AmbientLife and AmbientLife.setting,
+    "Ambient life: butterflies and ground birds by day (the birds startle "
+    .. "and fly off when you get close), dragonflies darting over the "
+    .. "water, fireflies blinking through the night, a flock crossing the "
+    .. "sky, leaves on the wind -- and civilian NPCs glance at you as you "
+    .. "pass, then go back to what they were doing. Trainers never turn: "
+    .. "their facing is their line of sight, and it stays theirs.",
+    full = true, cat = "wildlife" },
+  -- `full = true` for the reason AMBIENT has it: weather is not a knob on
+  -- the camera, it is what the world is doing, and FULL is the preset most
+  -- people are watching it from when it starts to rain.
+  { Weather.setting,
+    "Weather. AUTO gives the sky occasional showers -- a minute or two of "
+    .. "rain every few, arriving and clearing on their own. Rain falls in "
+    .. "two registers at once: flat cel-shaded streaks across the frame, "
+    .. "leaning on the WIND row's own bearing, and splashes that open on "
+    .. "the ground around you, standing in the world where the camera can "
+    .. "move past them. The whole sky goes over with it -- the bands lose "
+    .. "their blue to a flat stratus, the light drops and goes cool on the "
+    .. "diorama AND on the flat 2D world, a sunset behind the front loses "
+    .. "its gold, and the water loses its glint and gains chop, because "
+    .. "rain breaks every crest that was catching the sun. The heaviest of "
+    .. "it brings lightning, and the thunder arrives after the flash by "
+    .. "however far away the strike was. SNOW drifts instead, in the "
+    .. "diorama rather than across the lens, and AUTO chooses it on its own "
+    .. "through the winter of the same clock the DAYTIME row's SYNC rung "
+    .. "follows.",
+    full = true, cat = "weather" },
+  -- `full = true` like WEATHER: clouds are what the sky is doing, not a
+  -- camera filter, and FULL is where people watch a storm roll in.
+  { Sky.cloudSetting,
+    "Volumetric clouds, painted into the sky pass itself rather than drawn "
+    .. "as a flat layer. ON keeps a few fair-weather puffs drifting even "
+    .. "under a clear hour, thickening on their own as WEATHER builds a "
+    .. "front. THICK forces a heavier deck at every hour, clear or not, for "
+    .. "screenshots or a showcase run. OFF leaves the sky the bands alone.",
+    full = true, cat = "weather" },
+  -- `full = true` like WEATHER, and for the same reason: what the ground is
+  -- doing after a shower is what the world is doing, not a knob on the
+  -- camera. Offered only while the WEATHER row can produce something to
+  -- leave behind -- with the sky pinned OFF there is never a puddle to draw,
+  -- and a row that decides nothing is worse than no row.
+  { GroundFX.setting,
+    "What the weather LEAVES on the ground. Puddles gather through a shower "
+    .. "and are still there for the ten minutes after it, hashed off the "
+    .. "cell so the same low corner of the same yard holds water every time "
+    .. "-- and they wear the SKY's own colour, because a puddle is a piece of "
+    .. "the sky lying on the ground and one that stayed grey through a sunset "
+    .. "would be the only thing on screen not taking part in the evening. "
+    .. "Snow settles in drifts that thicken as it falls, and everybody "
+    .. "walking on it -- you, the NPCs, the wild Pokemon in the grass -- "
+    .. "leaves a trail of prints behind them that fills back in over half a "
+    .. "minute, faster while it is still coming down. All of it is drawn as "
+    .. "geometry BETWEEN the ground and the people standing on it, so it "
+    .. "takes the hour's light and the sun's shadows and never paints over "
+    .. "anybody's feet -- which is also why it wants the VOXEL camera on, "
+    .. "like the steam off a mug.",
+    when = function() return Weather.enabled() end, full = true, cat = "weather" },
+  -- `full = true` because it is not a knob on the look at all: it is what
+  -- the place sounds like, and a preset that owns the camera has no business
+  -- taking the crickets away.
+  { AmbientSound and AmbientSound.setting,
+    "The sound of the place: crickets after dark, birdsong through the "
+    .. "morning and the day, water moving whenever there is water within a "
+    .. "few cells of you, rain when it rains and thunder after the flash. "
+    .. "They are BEDS rather than beeps -- crossfaded by what the world is "
+    .. "doing, so nightfall brings the crickets up instead of switching "
+    .. "them on, and walking away from a river takes the river down. Rain "
+    .. "keeps playing indoors, quieter and pitched down, because that is "
+    .. "what a roof is for. CC0 recordings, with the Game Boy's own "
+    .. "channels underneath as the fallback if a file is missing. Sits "
+    .. "under the map's own music and obeys the SFX volume row. Works with "
+    .. "the diorama off: a sound needs no camera.",
+    full = true, cat = "weather" },
+  -- `full = true` like TOWN, and for the same reason: these are things
+  -- standing in rooms, not a setting on the pass that draws them.
+  { Interiors and Interiors.setting,
+    "Houses that somebody lives in. About two in five have a Pokemon "
+    .. "asleep on the floor -- usually the family Meowth, wearing its own "
+    .. "art, curled against a wall and out of the doorway. Press A and it "
+    .. "stirs, yawns its own cry and goes back to sleep; it never wanders "
+    .. "and never wants a fight. Which house has one is decided by the "
+    .. "house's own name, so it is always the same Pokemon asleep in the "
+    .. "same corner rather than a different one each time you walk in. And "
+    .. "mugs left on the tables, still steaming -- found through the mod's "
+    .. "own shape profile, so a table it has never been told about gets one "
+    .. "as soon as somebody pins it. The sleeper stands in the room in both "
+    .. "modes; the steam and the Zs are drawn into the diorama, so those two "
+    .. "want the VOXEL camera on.",
+    full = true, cat = "town" },
+  -- `full = true` like WILD, and for the same reason: this is what the
+  -- streets are made of, not a knob on the camera.
+  { CityLife and CityLife.setting,
+    "Pokemon in the streets: trainers' companions and strays out in the "
+    .. "towns, wearing their own art, wandering like anybody else. Most "
+    .. "are just out for a stroll -- press A to hear them. About one in "
+    .. "three STARES you down as you pass: that one wants to battle, at "
+    .. "your own lead's level, and pressing A lets you accept or walk on.",
+    full = true, cat = "town" },
+  -- `full = true` for the same reason CityLife's is: this is what the streets
+  -- are made of. Both rows are people rather than pixels.
+  { Shelter and Shelter.setting,
+    "Everybody goes in out of the rain. When a shower comes down hard the "
+    .. "town's wandering civilians walk to the nearest door and stand in "
+    .. "it until it passes, and the street Pokemon go inside and are gone "
+    .. "until the sky clears. Trainers, shopkeepers and anybody a script "
+    .. "is talking to stay exactly where the map put them.",
+    when = function() return Weather.enabled() end, full = true, cat = "town" },
+  -- `full = true` like the other rows that are not about the look at all:
+  -- this is what fits in the bag, and a camera preset has no business
+  -- shrinking a player's carrying capacity.
+  { Carry.setting,
+    "How many DIFFERENT items the bag holds. Gen 1 allows twenty, which is "
+    .. "most of the way gone on the HMs, the TMs and the key items before a "
+    .. "single Potion goes in. MAX is 999 against a game that ships about a "
+    .. "hundred and ten items -- you cannot fill it. Set 20 for the "
+    .. "original.",
+    full = true, cat = "qol" },
+  { Carry.stackSetting,
+    "How many of ONE item the bag holds. Gen 1 stops at ninety-nine. Note "
+    .. "that a single purchase is still capped at ninety-nine by the shop's "
+    .. "own quantity box -- what this lifts is the size of the PILE, so you "
+    .. "can go back and buy more. Set 99 for the original.",
+    full = true, cat = "qol" },
+  { Routines and Routines.setting,
+    "The people have something to do. Civilians look around, turn toward "
+    .. "the sign or the door they are standing beside, and stand in pairs "
+    .. "facing each other having a conversation -- then go back to the way "
+    .. "the map drew them. Nobody moves off their cell: this is where they "
+    .. "are LOOKING, so no script, no gate guard and no shop counter "
+    .. "changes. Trainers are never touched.",
+    full = true, cat = "town" },
+  -- `full = true` because this row is not about the look at all -- it is a
+  -- bot, and a preset that owns the camera has no business taking it away.
+  { AutoFarm and AutoFarm.setting,
+    "Auto-farm: pick a party slot and a bot trains that Pokemon -- walks "
+    .. "the grass, starts fights, always picks the strongest move against "
+    .. "what it is facing, runs from a fight it is losing, and answers "
+    .. "the learn-a-move prompt by VALUE, so a good move is never thrown "
+    .. "away for a useless one. The chosen Pokemon leads the party while "
+    .. "it runs, and below half health the bot drinks potions from the "
+    .. "bag, weakest first. Stops on its own -- and sets itself OFF -- "
+    .. "only when PP runs out or HP is critical with an empty bag.",
+    full = true, cat = "qol" },
+  -- `full = true` like the battle rows: none of this is a knob on the
+  -- diorama, and a preset that owns the look has no business taking a
+  -- player's conveniences away.
+  { QoL and QoL.setting,
+    "Quality of life, seven mercies in one switch. HIDDEN ITEMS GLINT on "
+    .. "the ground -- the eighty-odd items Gen 1 buries with no way to find "
+    .. "them but pressing A on every tile. It does not name them and does "
+    .. "not take them: you still have to notice, walk there and press A. "
+    .. "HOLD B TO RUN on the "
+    .. "overworld -- ten frames a step against sixteen, and it stands down "
+    .. "on the bike, which is still faster. FIELD POISON STOPS AT 1 HP "
+    .. "instead of killing: it still needs an Antidote, it just cannot walk "
+    .. "a Pokemon into a black-out. TRADE EVOLUTIONS happen at level 37 "
+    .. "without a second machine, so Alakazam, Machamp, Golem and Gengar "
+    .. "exist in a solo game -- a real trade still evolves them instantly. "
+    .. "Plus effectiveness markers "
+    .. "on the battle move menu (+ super effective, - resisted, x immune, "
+    .. "against the Pokemon actually in front of you); a fresh REPEL used "
+    .. "from the bag the moment one wears off; and HMs on the A button -- "
+    .. "A at a tree CUTs it, A facing water SURFs, A at a boulder wakes "
+    .. "STRENGTH, all behind the same badges and party checks the menu "
+    .. "applies. Plus three more: a BAG SORTED INTO POCKETS -- balls, "
+    .. "medicine, TMs and HMs, key items -- that wraps top to bottom and "
+    .. "takes a held direction, instead of twenty slots in pickup order; the "
+    .. "PC following a catch into whichever BOX it landed in, and rolling a "
+    .. "full box forward instead of refusing the deposit; and RENAME on the "
+    .. "party menu beside STATS and SWITCH, because Kanto has no NAME RATER "
+    .. "and a nickname typed in a hurry at level 5 is otherwise forever. "
+    .. "OFF is the full 1996 friction.",
+    full = true, cat = "qol" },
+  -- Its own row rather than a tenth mercy on QOL, and the difference is real:
+  -- everything on that row removes friction without touching the game's
+  -- numbers, and this one changes the difficulty curve. A player who wants
+  -- the conveniences and the original's pace can have both.
+  { ExpShare.setting,
+    "Experience for the whole team. Gen 1 pays only the Pokemon that "
+    .. "fought, which is why a Gen 1 party is one Pokemon and five "
+    .. "passengers -- the only way to bring a second one up is to send it "
+    .. "out, let it take a hit and switch back, every battle, for the whole "
+    .. "game. TEAM gives every Pokemon still standing what the fighters got, "
+    .. "the way the series itself has worked since Gen 6. SPLIT divides that "
+    .. "same total among them instead, so the party still moves together but "
+    .. "the pace is the one the game was balanced on. Only the Pokemon that "
+    .. "actually fought gets the text box, so a six-strong party does not "
+    .. "cost six presses after every fight. OFF is the original's rule. "
+    .. "Fainted Pokemon are paid nothing at every rung.",
+    full = true, cat = "qol" },
+  { VoxelGrid.setting, "One-pixel wireframe along every voxel edge.", cat = "world" },
+  { WorldCurve.setting,
+    "Bend the world down over the horizon, Animal Crossing style.", cat = "world" },
+  { Aerial.setting,
+    "Distance haze: far ground fades into the hour's own sky colour, so "
+    .. "the map edge reads as far away instead of as a wall.", cat = "world" },
+  { Skyline.setting,
+    "The rest of Kanto on the horizon: every connected map out to the "
+    .. "chosen distance, drawn as a bare silhouette in the hour's haze. "
+    .. "Scenery only -- nothing out there can be walked on.", cat = "world" },
+  -- restored from DRAMATIC_SHAPE: how far out the camera bothers to draw,
+  -- which only changes the picture above about 63 degrees where the
+  -- horizon comes into view -- FULL is the model-on-a-table read and the
+  -- sides are most of what makes it one.
+  { ViewBox.setting,
+    "How far out the camera bothers to draw, which only changes the "
+    .. "picture above about 63 degrees where the horizon comes into "
+    .. "view.",
+    full = true, cat = "world" },
+  -- `full` marks a row FULL does not take away. FULL owns the diorama's own
+  -- knobs; what a battle is drawn over, and how it is framed, are not that.
+  -- Hidden entirely under VR (restored from DRAMATIC_SHAPE): the headset
+  -- replaces this camera outright, and a row that no longer decides
+  -- anything is worse than no row.
+  -- `full` like the battle rows: this is a GAMEPLAY mode, not a knob on
+  -- the diorama, so the FULL preset neither sets it nor takes it away.
+  -- (restored from DRAMATIC_SHAPE)
+  { LetsGo.setting,
+    "Pokemon GO-style catching -- flick to throw the ball, with FULL "
+    .. "adding half-price balls and party experience (needs 3D-BTL).",
+    full = true, cat = "battles" },
+  -- ------- StadiumBattleFX settings
+  --
+  -- These control the Pokemon Stadium-style battle effects presentation
+  { stadiumFxEnabled,
+    "Enables Pokemon Stadium-style battle effects, including attack animations, "
+    .. "camera movements, and presentation enhancements.",
+    cat = "battles" },
+  { stadiumTrainerPortraits,
+    "Shows Stadium-style trainer portraits during battles. Requires Stadium 1 ROM for Gen 1 trainers.",
+    cat = "battles" },
+  { stadiumFxAttackCamera,
+    "Enables dynamic camera movements during attack animations for a more cinematic presentation.",
+    cat = "battles" },
+  { stadiumFxAttackSpeed,
+    "Adjusts the speed of attack animations. Higher values make attacks faster.",
+    cat = "battles" },
+  { stadiumAnnouncer,
+    "Enables the Stadium announcer voice during battles. Requires Stadium 1 ROM for voice data.",
+    cat = "battles" },
+  { stadiumAnnouncerScope,
+    "Controls when the announcer speaks: gym leader battles only, trainer battles, or all battles including wild encounters.",
+    cat = "battles" },
+  { stadiumFxCinematicZoom,
+    "Controls the intensity of camera zoom effects during powerful attacks.",
+    cat = "battles" },
+  { stadiumBossArenas,
+    "Enables special gym leader and Elite Four arena backgrounds during important battles.",
+    cat = "battles" },
+  { stadiumFxScreenEffects,
+    "Enables screen-wide effects like flashes, shakes, and color tints during attacks.",
+    cat = "battles" },
+  { stadiumFxHitReactions,
+    "Enables Pokemon flinch and recoil animations when taking damage.",
+    cat = "battles" },
+  { stadiumFxFaintAnimations,
+    "Enables special Pokemon fainting animations when HP reaches zero.",
+    cat = "battles" },
+  { stadiumFxNativeScheduler,
+    "Uses the game's native animation timing for Stadium effects.",
+    cat = "battles" },
+  { stadiumFxNativeSync,
+    "Syncs Stadium model animations with the game's battle timing.",
+    cat = "battles" },
+  { stadiumFxFallbackNotice,
+    "Shows a notification when Stadium effects fall back to generic animations.",
+    cat = "battles" },
+  { stadiumFx2DLayer,
+    "Controls which 2D battle effects are shown: authentic Stadium effects, all effects, or none.",
+    cat = "battles" },
+  -- ------- Follower system settings (ported from VOXEL_ULTIMATE)
+  --
+  -- These control how the party follower behaves: who controls it,
+  -- whether the trainer trails behind when controlling pokemon, and
+  -- how many extra party members follow in a pack.
+  { followControlSetting,
+    "Who controls the follower: TRAINER (you walk, the Pokemon follows) "
+    .. "or POKÉMON (you control the Pokemon directly). POKÉMON mode can "
+    .. "also show the trainer trailing behind with TRAINER TRAIL.",
+    cat = "followers" },
+  { trainerTrailSetting,
+    "When controlling the Pokémon directly, the trainer trails behind. "
+    .. "OFF keeps the trainer at the camera; ON adds the trainer sprite "
+    .. "following the controlled Pokémon.",
+    cat = "followers" },
+  { followerCountSetting,
+    "How many extra party members follow in a pack (0–6). 0 is just the "
+    .. "primary follower; higher values add more party members in a line. "
+    .. "Only applies in POKÉMON control mode without TRAINER TRAIL.",
+    cat = "followers" },
+  -- `full = true` for the reason WILD has it: this is not a knob on the
+  -- diorama, it is what is out there. Offered whatever WILD is set to,
+  -- because it reaches the blind roll as well as the visible Pokemon --
+  -- the engine's own encounter.species seam is where the dice get it.
+  { Ecology.setting,
+    "Who is out RIGHT NOW. Gen 2 gave every route a morning, a day and a "
+    .. "night table and it is most of what made Johto feel like a place; "
+    .. "this is that, built out of Gen 1's one table. Nothing is added to a "
+    .. "route and nothing is taken away -- what moves is the ODDS: the "
+    .. "nocturnal half of the dex (Zubat, Gastly, Oddish, Meowth, Drowzee "
+    .. "and the rest of Gen 2's own night list) comes up after dark and "
+    .. "thins out by noon, and the birds and the caterpillars do the "
+    .. "opposite, on the same clock the DAYTIME row sets. Never to zero: a "
+    .. "Zubat at noon is the least likely thing on Route 4, not an absent "
+    .. "one, because a dex you are halfway through should not become a "
+    .. "waiting game. ON adds the sky to it -- while it rains the water "
+    .. "types come up and the fire types go in, and near open water "
+    .. "something from the map's OWN water roster may come ashore at the "
+    .. "route's own levels. TIME is the hour alone. Indoors none of it "
+    .. "applies, for the reason a cave at midnight is exactly as dark as a "
+    .. "cave at noon.",
+    full = true, cat = "wildlife" },
+  { DayNight.setting,
+    "What time it is outdoors: pin the sky to DAY, NIGHT, DUSK or DAWN, "
+    .. "let CYCLE run it -- ten minutes of sun, ten of moon, with the "
+    .. "shadows, the sky and the light following -- or SYNC it to the "
+    .. "clock on the wall, so Kanto's evening falls when yours does.", cat = "world" },
+  -- Night depth and street lamps travel together in the options list: DEEP
+  -- only reads as a city night when something is lit on the street, and
+  -- LAMPS only matter once the sky is dark enough to need them.
+  { DayNight.darkSetting,
+    "How dark night is. DEEP takes a large step down from the soft blue "
+    .. "night so a town reads as lit windows and street lamps in real "
+    .. "darkness -- the sky and the world's tint both drop. SOFT is the "
+    .. "older, more readable blue night. Windows and street-lamp heads "
+    .. "are exempt either way: they burn after the hour's multiply.",
+    full = true, cat = "world" },
+  { StreetLamps and StreetLamps.setting,
+    "Street lamps in towns and cities. ON plants three models of post "
+    .. "(classic, twin-head, globe) on sidewalk cells next to buildings, "
+    .. "deterministic per map so the same corner always has the same "
+    .. "lamp. After dusk the heads burn in the hour's lamp colour so a "
+    .. "DEEP night still has light on the street. Routes and forests get "
+    .. "none -- only outdoor maps without a grass encounter table.",
+    full = true, cat = "world" },
+  -- Orientation radar. Always-on by default at the cheap rung; FULL adds a
+  -- local 4-colour cell grid. Not the classic Town Map item -- that stays
+  -- untouched. full = true so a phone on FULL RES can still hide it.
+  { MiniMap.setting,
+    "Corner orientation radar on free-roam. ON is player + facing + "
+    .. "Center/Gym/Gate icons from the map's own warps; FULL also paints a "
+    .. "4-colour walkability grid of the current map (regenerated only on "
+    .. "map change). OFF is nothing. Drops detail on low RES. Purely HUD -- "
+    .. "nothing here writes collision, flags or scripts.",
+    full = true, cat = "world" },
+  -- ------- VR -- the headset, and the one comfort knob that is only its
+  -- (restored from DRAMATIC_SHAPE)
+  --
+  -- `full` for the same reason as AA: not a knob on the look, a question
+  -- about the hardware on the desk.
+  { VR.setting,
+    "PCVR through OpenXR on Windows, either following the VOXEL ladder "
+    .. "or as a DIORAMA you carry and turn with the grips.",
+    -- on Windows the row stays even when a runtime is missing (the console
+    -- says why); off Windows -- mobile above all -- there is no VR to have
+    -- and the row does not exist
+    when = function() return VR.supported() end, full = true, cat = "vr" },
+  -- Under the VR row and only while it is ON: a comfort setting for a
+  -- device that is not plugged in decides nothing, and this one is read
+  -- exclusively by the headset's right stick.
+  { VR.smoothTurn,
+    "Turns smoothly with the right stick instead of snapping 45 degrees, "
+    .. "if you have your sea legs for it.",
+    -- and only under STANDARD: the stick turns a HEAD, and neither diorama
+    -- mode has the player standing in the world to be turned
+    when = function() return VR.enabled() and not VR.dioramaMode() end,
+    cat = "vr" },
+  -- ------- the top-level menu -- settings that are about the GAME
+  -- (restored from DRAMATIC_SHAPE)
+  --
+  -- SettingsMenu.ROOT as a `cat` puts a row on the mod's own screen itself
+  -- rather than inside one of the categories, which is right here: how
+  -- often a shiny appears is a rule of the game, not a knob on the
+  -- diorama, the fights, the hardware or the headset.
+  --
+  -- `full` for the battle rows' reason: FULL is a preset for the LOOK, and
+  -- an encounter rate is a rule of the game. A player inside FULL must be
+  -- able to reach it, and FULL must never set it.
+  { Shiny.setting,
+    "How often a wild Pokemon turns up shiny. 1:8192 is the games' own "
+    .. "rate, and every rung below it is twice as often as the one above.",
+    cat = SettingsMenu.ROOT, full = true },
+  -- Stadium 2 models support (Gen 2 Pokemon) - only added if module loaded
+  okS2 and Stadium2Setting and { Stadium2Setting.setting,
+    "Enable Pokemon Stadium 2 models for Gen 2 Pokemon (152-251). "
+    .. "Requires a Pokemon Stadium 2 (US) ROM. When ON, Gen 2 Pokemon use "
+    .. "Stadium 2 models instead of sprites. When OFF, all Pokemon use sprites "
+    .. "or Stadium 1 models (Gen 1 only).",
+    full = true, cat = "battles" },
+  -- ------- ds_fp_ceiling integrated settings
+  -- Interior ceiling and walls
+  { Ceiling.setting,
+    "Interior ceilings and walls in first-person mode. Rooms get walls, "
+    .. "ceilings with configurable headroom, and proper doors. The diorama "
+    .. "rungs use a Sims-style cutaway view.",
+    cat = "world" },
+  { Ceiling.headroom,
+    "Ceiling height: AIRY (32px), MID (24px), or SNUG (16px).",
+    cat = "world" },
+  { Ceiling.cutaway,
+    "Sims-style cutaway in diorama view: near walls melt away so you can "
+    .. "see into rooms from outside.",
+    cat = "world" },
+  -- Interior details
+  { fpShadows, "Contact shadows under furniture and props.", cat = "world" },
+  { fpRails, "Rail and skirting boards along walls.", cat = "world" },
+  { fpSpill, "Light spilling from doorways into dark rooms.", cat = "world" },
+  { fpFittings, "Ceiling lamps and light fixtures.", cat = "world" },
+  { fpBacks, "Building backs - rear walls on exterior buildings.", cat = "world" },
+  -- Cave features
+  { fpRock, "Rock formations in caves.", cat = "world" },
+  { fpPools, "Water pools in cave floors.", cat = "world" },
+  { fpSconces, "Wall torches in caves.", cat = "world" },
+  { fpBats, "Flying bats in caves.", cat = "world" },
+  { fpDark, "Cave darkness effect in unlit areas.", cat = "world" },
+  -- Third person ceiling
+  { fpThird, "Ceiling visibility in third-person mode: NONE, CUTAWAY, or FULL.", cat = "world" },
+  -- Horizon backdrop
+  { fpBackdrop, "Distant horizon backdrop for outdoor maps.", cat = "world" },
+  { fpHorizonart, "Horizon art style: KANTO, FUJI, VALLEY, or CITY.", cat = "world" },
+  -- Sky features
+  { fpClouds, "Clouds drifting across the sky.", cat = "world" },
+  { fpStars, "Stars and nebula at night.", cat = "world" },
+  { fpBirds, "Birds flying in the sky.", cat = "world" },
+  { fpAircraft, "Rare aircraft (planes and blimps) in the sky.", cat = "world" },
+  { fpRainbows, "Rainbows after rain showers.", cat = "world" },
+  -- Weather effects
+  { fpRain, "Rain frequency: OFF, SOMETIMES, or ALWAYS.", cat = "world" },
+  { fpLightning, "Lightning during storms.", cat = "world" },
+  { fpUmbrellas, "NPCs open umbrellas during rain.", cat = "world" },
+  { fpPuddles, "Puddles form on the ground during rain.", cat = "world" },
+  -- Ground detail
+  { fpGrass, "Grass height: OFF, SUBTLE, or WILD.", cat = "world" },
+  { fpWind, "Wind effect on grass: OFF, BREEZE, or GUSTY.", cat = "world" },
+  { fpParticles, "Particle effects (seeds, drips, fireflies, etc.).", cat = "world" },
+  { fpInsects, "Insects buzzing around.", cat = "world" },
+  { fpGroundflock, "Ground flocks of birds that flush when approached.", cat = "world" },
+  -- Forest features
+  { fpCanopy, "Forest canopy overhead.", cat = "world" },
+  { fpVines, "Hanging vines in forests.", cat = "world" },
+  { fpShafts, "Sun shafts through forest canopy.", cat = "world" },
+  -- Town features
+  { fpFog, "Lavender Town fog effect.", cat = "world" },
+  { fpLights, "Street lamps and town lighting.", cat = "world" },
+  -- Movement
+  { fpJump, "Jump feel: OFF, SUBTLE, or BIG.", cat = "world" },
+  { fpDoorstep, "Step up/down when passing through doorways.", cat = "world" },
+  -- Gen 1-only settings
+  { OverworldBattle and OverworldBattle.setting,
+    "Fight on the map: the battle draws over the nearest clear ground, "
+    .. "shot over the shoulder with a slow parallax drift.",
+    when = function() return not VR.enabled() end,
+    full = true, cat = "battles" },
+  { OverworldBattle and OverworldBattle.backSetting,
+    "Keep your own Pokemon on the battle menu, seen from behind in its "
+    .. "original slot, instead of standing it on the map facing the foe. "
+    .. "The foe is still out there on its own tile.",
+    when = function() return stagedBattles() and not VR.enabled() end,
+    full = true, cat = "battles" },
+  { WildRoamers and WildRoamers.setting,
+    "Wild Pokemon you can see: the map's own encounter table decides who is "
+    .. "standing in the grass right now, wearing their own art and wandering "
+    .. "their own patch, and the fight starts when you walk into one. ROAM "
+    .. "switches the blind roll off, so what you fight is what you walked "
+    .. "into; MIX leaves it on as well; OFF is the dice alone.",
+    full = true, cat = "wildlife" },
+  { WildRoamers and WildRoamers.countSetting,
+    "How many wild Pokemon stand within reach at once. Each is one more "
+    .. "sprite card in the frame, so FEW is the setting for a slow device.",
+    when = function() return WildRoamers.enabled() end, full = true, cat = "wildlife" },
+}
+
+-- Drop any row whose setting reference came back nil above
+do
+  local filtered = {}
+  for _, row in ipairs(SETTINGS) do
+    if row[1] ~= nil then filtered[#filtered + 1] = row end
+  end
+  SETTINGS = filtered
+end
+
+-- Custom key binding system for jump key (must be defined before SettingsMenu hook)
+_G.keyBindingState = {
+  active = false,
+  justActivated = false,
+  bindingType = nil -- "keyboard" or "gamepad"
+}
+
+-- The engine's own input:wasPressed(name) only recognizes its fixed set of
+-- logical actions (up/down/left/right/a/b/start/select and so on). It has
+-- no idea what "f1" or "leftshoulder" mean, so routing a custom binding
+-- through it silently does nothing for anything outside that set -- and
+-- for names the action table happens to share with a raw key or pad
+-- button (like "a" or "b") it fires for EITHER the keyboard action or the
+-- pad press interchangeably, which is what made keyboard and gamepad
+-- bindings read as swapped. These two helpers poll LÖVE directly instead,
+-- edge-detected so a held key or button fires once per press rather than
+-- every frame it stays down.
+local rawKeyDown, rawPadDown = {}, {}
+
+local function rawKeyboardPressed(key)
+  if not (key and love and love.keyboard and love.keyboard.isDown) then return false end
+  local ok, down = pcall(love.keyboard.isDown, key)
+  down = ok and down or false
+  local was = rawKeyDown[key]
+  rawKeyDown[key] = down
+  return down and not was
+end
+
+local function rawGamepadPressed(button)
+  if not (button and love and love.joystick and love.joystick.getJoysticks) then return false end
+  local down = false
+  local ok, sticks = pcall(love.joystick.getJoysticks)
+  if ok and sticks then
+    for _, js in ipairs(sticks) do
+      local okPad, isPad = pcall(js.isGamepad, js)
+      if okPad and isPad then
+        local okDown, isDown = pcall(js.isGamepadDown, js, button)
+        if okDown and isDown then
+          down = true
+          break
+        end
+      end
+    end
+  end
+  local was = rawPadDown[button]
+  rawPadDown[button] = down
+  return down and not was
+end
+
+local function getJumpKey()
+  local mod = V.mod
+  if mod and mod.options then
+    local ok, value = pcall(mod.options.get, mod.options, "jumpKey")
+    if ok and value then return value end
+  end
+  return "keyboard:space"
+end
+
+local function setJumpKey(key)
+  local mod = V.mod
+  if mod and mod.world and mod.world.game then
+    local game = mod.world.game
+    local opts = game and game.save and game.save.options
+    if opts then
+      opts.modOptions = opts.modOptions or {}
+      opts.modOptions[mod.id] = opts.modOptions[mod.id] or {}
+      opts.modOptions[mod.id]["jumpKey"] = key
+    end
+    local loader = game and game.mods
+    if loader then
+      loader.modOptions = loader.modOptions or {}
+      loader.modOptions[mod.id] = loader.modOptions[mod.id] or {}
+      loader.modOptions[mod.id]["jumpKey"] = key
+    end
+    if game and game.writeOptions then pcall(game.writeOptions, game) end
+  end
+end
+
+local function parseJumpKey(binding)
+  -- Parse "keyboard:key" or "gamepad:button" format
+  local bindingType, key = binding:match("^(.-):(.+)$")
+  if bindingType and key then
+    return bindingType, key
+  end
+  -- Fallback for old format
+  return "keyboard", binding
+end
+
+-- Hook into SettingsMenu to add jump key option and help
+local SettingsMenu = V.require("SettingsMenu")
+local originalRows = SettingsMenu.rows
+SettingsMenu.rows = function(catId, game)
+  local out = originalRows(catId, game)
+  if type(out) ~= "table" then return out end
+  
+  -- Add jump key row to the "world" category
+  if catId == "world" then
+    local jumpRow = {
+      id = "DRAMATIC_SHAPE:jumpKey",
+      label = "JUMP KEY",
+      value = function()
+        -- Use _G.keyBindingState to ensure we access the global
+        local state = _G.keyBindingState or { active = false }
+        if state.active then
+          return "PRESS BUTTON..."
+        end
+        local binding = getJumpKey()
+        local bindingType, key = parseJumpKey(binding)
+        return (bindingType:upper() .. ":" .. key:upper())
+      end,
+      activate = function(game)
+        if _G.keyBindingState then
+          _G.keyBindingState.active = true
+          _G.keyBindingState.justActivated = true
+          _G.keyBindingState.bindingType = nil
+        end
+      end,
+    }
+    table.insert(out, jumpRow)
+  end
+  return out
+end
+
+-- Add help text for jump key
+local originalHelpFor = SettingsMenu.helpFor
+SettingsMenu.helpFor = function(id)
+  if id == "DRAMATIC_SHAPE:jumpKey" then
+    return "Press A to bind any keyboard key or gamepad button to the jump action. The jump allows you to hop over ledges in the overworld."
+  end
+  return originalHelpFor(id)
+end
+
+-- Hook into SettingsMenu.update to capture key presses when in binding mode
+local originalUpdate = SettingsMenu.update
+SettingsMenu.update = function(self)
+  -- If in binding mode, capture key presses
+  if _G.keyBindingState and _G.keyBindingState.active then
+    local input = self.game and self.game.input
+    if input then
+      -- Skip the activation key
+      if _G.keyBindingState.justActivated then
+        _G.keyBindingState.justActivated = false
+        return
+      end
+      
+      -- Check for escape to cancel. These three stay routed through the
+      -- engine's own action system on purpose (unlike a jump binding, menu
+      -- cancel is meant to answer to whatever the player already has
+      -- escape/B/start mapped to, keyboard or pad alike).
+      if input:wasPressed("escape") or input:wasPressed("b") or input:wasPressed("start") then
+        _G.keyBindingState.active = false
+        return
+      end
+
+      -- The actual key/button capture happens in the raw Game.keypressed
+      -- and Game.gamepadpressed hooks below, which see LÖVE's real key and
+      -- button names directly instead of the engine's abstracted actions.
+      -- Polling input:wasPressed() here for every possible key/button name
+      -- was the bug: it only ever fires for the handful of names the
+      -- engine treats as logical actions, and keyboard letters overlap
+      -- gamepad button names ("a", "b", ...) in that table, so a press on
+      -- either device could bind as the other.
+    end
+    return
+  end
+  
+  -- Normal update when not in binding mode
+  return originalUpdate(self)
+end
+
+-- Handle key capture for jump binding
+mod.hooks:wrap("Game.keypressed", function(next, game, key)
+  if _G.keyBindingState and _G.keyBindingState.active then
+    if _G.keyBindingState.justActivated then
+      _G.keyBindingState.justActivated = false
+      return true -- Consume the activation key
+    end
+    
+    -- Don't bind menu navigation keys
+    local menuKeys = {
+      "escape", "return", "tab", "up", "down", "left", "right",
+      "w", "a", "s", "d", "z", "x", "c", "v", "b", "n", "m"
+    }
+    local isMenuKey = false
+    for _, mk in ipairs(menuKeys) do
+      if key == mk then
+        isMenuKey = true
+        break
+      end
+    end
+    
+    if not isMenuKey then
+      setJumpKey("keyboard:" .. key)
+      _G.keyBindingState.active = false
+      return true
+    elseif key == "escape" then
+      _G.keyBindingState.active = false
+      return true
+    end
+    return next(game, key)
+  end
+  return next(game, key)
+end)
+
+-- Handle gamepad button capture for jump binding. Mirrors the keypressed
+-- hook above but for a real pad press (button names here are LÖVE's own
+-- gamepad button constants -- "a", "leftshoulder", "dpup", and so on --
+-- the same vocabulary the binding is stored and later polled with).
+do
+  local Game = require("src.core.Game")
+  local inner = Game.gamepadpressed
+  function Game:gamepadpressed(joystick, button, ...)
+    if _G.keyBindingState and _G.keyBindingState.active then
+      if _G.keyBindingState.justActivated then
+        _G.keyBindingState.justActivated = false
+        return
+      end
+      if button == "back" or button == "start" then
+        _G.keyBindingState.active = false
+        return
+      end
+      setJumpKey("gamepad:" .. button)
+      _G.keyBindingState.active = false
+      return
+    end
+    if inner then return inner(self, joystick, button, ...) end
+  end
+end
+
+local schema = {}
+for i, entry in ipairs(SETTINGS) do
+  -- Only generate schema for ModSetting objects (which have :schema method)
+  if type(entry[1]) == "table" and type(entry[1].schema) == "function" then
+    schema[#schema + 1] = entry[1]:schema(entry[2])
+  end
+end
+mod.options:define(schema)
+
+-- Hand the same table to the mod's own in-game menu (restored from
+-- DRAMATIC_SHAPE): SETTINGS stays declared once, here, and SettingsMenu.lua
+-- reads it back for PRESENTATION -- the categories, the screens, the help
+-- text -- rather than owning a second copy that could drift from this one.
+SettingsMenu.define(SETTINGS)
+
+-- ------- ds_fp_ceiling config bridge
+--
+-- The Ceiling, Backdrop, SkyLayer, and Flora modules expect a companion
+-- mod (ds_fp_ceiling) to publish configuration via _G.__ds_ceiling_config.
+-- Since we've integrated those modules directly, we provide this bridge
+-- so they can read from our own options instead.
+local HEADROOM = { AIRY = 32, MID = 24, SNUG = 16 }
+_G.__ds_ceiling_config = function()
+  -- Use the actual setting objects where available
+  local ceilingOn = true
+  local headroomVal = 32
+  local cutawayOn = true
+  if Ceiling and Ceiling.setting then
+    local ok, v = pcall(function() return Ceiling.setting:get() end)
+    if ok then ceilingOn = (v ~= false) end
+  end
+  if Ceiling and Ceiling.headroom then
+    local ok, v = pcall(function() return Ceiling.headroom:get() end)
+    if ok and v then headroomVal = HEADROOM[v] or 32 end
+  end
+  if Ceiling and Ceiling.cutaway then
+    local ok, v = pcall(function() return Ceiling.cutaway:get() end)
+    if ok then cutawayOn = (v ~= false) end
+  end
+  
+  -- Helper to get setting value with fallback
+  local function getSetting(settingObj, default)
+    if settingObj then
+      local ok, v = pcall(function() return settingObj:get() end)
+      if ok then return v end
+    end
+    return default
+  end
+  
+  -- Map horizonart choice to backdrop file
+  local horizonArt = getSetting(fpHorizonart, "VALLEY")
+  local backdropMap = { KANTO = "backdrop.png", FUJI = "backdrop2.png", VALLEY = "backdrop3.png", CITY = "backdrop4.png" }
+  local backdropFile = backdropMap[horizonArt] or "backdrop.png"
+  _G.__ds_backdrop_path = mod.path .. "/lib/" .. backdropFile
+  
+  return {
+    ceiling = ceilingOn,
+    headroom = headroomVal,
+    cutaway = cutawayOn,
+    shadows = getSetting(fpShadows, true) ~= false,
+    rails = getSetting(fpRails, true) ~= false,
+    spill = getSetting(fpSpill, true) ~= false,
+    fittings = getSetting(fpFittings, true) ~= false,
+    rock = getSetting(fpRock, true) ~= false,
+    backs = getSetting(fpBacks, true) ~= false,
+    pools = getSetting(fpPools, true) ~= false,
+    sconces = getSetting(fpSconces, true) ~= false,
+    bats = getSetting(fpBats, true) ~= false,
+    third = getSetting(fpThird, "CUTAWAY"),
+    backdrop = getSetting(fpBackdrop, true) ~= false,
+    horizonart = horizonArt,
+    jump = getSetting(fpJump, "SUBTLE"),
+    -- Grass disabled by default as requested
+    grass = getSetting(fpGrass, "OFF"),
+    particles = getSetting(fpParticles, true) ~= false,
+    dark = getSetting(fpDark, true) ~= false,
+    rain = getSetting(fpRain, "SOMETIMES"),
+    umbrellas = getSetting(fpUmbrellas, true) ~= false,
+    puddles = getSetting(fpPuddles, true) ~= false,
+    lightning = getSetting(fpLightning, true) ~= false,
+    lights = getSetting(fpLights, true) ~= false,
+    shafts = getSetting(fpShafts, true) ~= false,
+    canopy = getSetting(fpCanopy, true) ~= false,
+    vines = getSetting(fpVines, true) ~= false,
+    fog = getSetting(fpFog, true) ~= false,
+    doorstep = getSetting(fpDoorstep, true) ~= false,
+    clouds = getSetting(fpClouds, true) ~= false,
+    stars = getSetting(fpStars, true) ~= false,
+    birds = getSetting(fpBirds, true) ~= false,
+    aircraft = getSetting(fpAircraft, true) ~= false,
+    rainbows = getSetting(fpRainbows, true) ~= false,
+    insects = getSetting(fpInsects, true) ~= false,
+    groundflock = getSetting(fpGroundflock, true) ~= false,
+    wind = getSetting(fpWind, "BREEZE"),
+  }
+end
+_G.__ds_posters_dir = mod.path .. "/"
+
+-- ------- this mod's hotkeys
+--
+--   v  VOXEL    cycle the camera ladder      (skips FULL)
+--   g  V-GRID   toggle the wireframe
+--   t  T-SHIFT  cycle the blur ladder
+--   c  V-CURVE  cycle the horizon bend
+--   b  3D-BTL   toggle overworld battles
+--   n  WILD     cycle ROAM / MIX / OFF
+--   p  MAP      minimap ON / FULL / OFF
+--
+-- Upstream DRAMATIC_SHAPE still uses 3/5/6/7/8/9. These letter keys are the
+-- independence surface: both mods can load and neither steals the other's
+-- presses. Engine keys 2 COLORS / 3 TILT / 4 ZOOM / 5 GBC FX stay free of our
+-- HOTKEYS table; pinEngineFx still holds TILT and GBC FX at off while we are
+-- installed (they fight the diorama), and the registry still drops TILT when
+-- a world pipeline owns the pass.
+--
+-- Game:keypressed still has to be wrapped: settings without a pipeline have
+-- no registry hotkey route, and the VOXEL key walks a custom ladder that
+-- skips FULL. Polling in update() would fire alongside the engine instead
+-- of instead of it.
+--
+-- Everything the engine does around a pipeline hotkey has to happen here
+-- too, so the work is DELEGATED rather than reimplemented: Pipelines.hotkey
+-- applies its own gate and ladder, and the lines after it are the engine's
+-- own (syncOptions, the tilt exclusion, writeOptions).
+
+-- The named step VOXEL, SELECT and the VR stick click all make: advance
+-- the angle ladder one rung, skip over FULL (Voxel.nextHotkeyLevel), and
+-- do the engine housekeeping a pipeline hotkey does (syncOptions, the
+-- tilt/gbcfx exclusion, writeOptions). Factored out so the three callers
+-- share one implementation instead of drifting apart.
+local function cycleVoxel(game)
+  local Pipelines = require("src.render.Pipelines")
+  local top = game.stack and game.stack:top()
+  if Horde.viewLocked() then return false end
+  if not Pipelines.canToggle(PIPE_VOXEL, top, game.overworld) then return false end
+  Pipelines.setLevel(PIPE_VOXEL, Voxel.nextHotkeyLevel(Pipelines.level(PIPE_VOXEL)))
+  Pipelines.syncOptions(game.save.options)
+  game.save.options.tilt = 0
+  game.save.options.gbcfx = 0
+  optionalGBCFX().setLevel(0)
+  optionalTilt().setLevel(game.save.options.tilt or 0)
+  game:writeOptions()
+  return true
+end
+
+-- The same, to a NAMED rung rather than one step on: what a diorama mode
+-- holds the ladder with, since 2D and both free-roam rungs are things it
+-- cannot present (see VR.setVoxelLevel).
+local function setVoxelLevel(game, level)
+  local Pipelines = require("src.render.Pipelines")
+  if Horde.viewLocked() then return false end
+  if Pipelines.level(PIPE_VOXEL) == level then return false end
+  Pipelines.setLevel(PIPE_VOXEL, level)
+  Pipelines.syncOptions(game.save.options)
+  game.save.options.tilt = 0
+  game.save.options.gbcfx = 0
+  optionalGBCFX().setLevel(0)
+  optionalTilt().setLevel(game.save.options.tilt or 0)
+  game:writeOptions()
+  return true
+end
+
+-- The VR stick click makes this same step (VR.stepView): the function is
+-- a local of this file, so the handoff is explicit rather than a
+-- reimplementation drifting out of date in lib/VR.lua. (restored from
+-- DRAMATIC_SHAPE)
+VR.cycleVoxel = cycleVoxel
+VR.setVoxelLevel = setVoxelLevel
+
+local HOTKEYS = {
+  [KEY_VOXEL]  = "pipeline",
+  [KEY_TILT]   = "pipeline",
+  [KEY_GRID]   = VoxelGrid.setting,
+  [KEY_CURVE]  = WorldCurve.setting,
+  [KEY_HAZE]   = Aerial.setting,
+  [KEY_SKYLINE] = Skyline.setting,
+  [KEY_BATTLE] = OverworldBattle and OverworldBattle.setting or nil,
+  [KEY_WILD]   = WildRoamers and WildRoamers.setting or nil,
+  [KEY_MAP]    = MiniMap.setting,
+  [KEY_FX]     = "vfxdemo",
+}
+
+-- Which sheet the demo key fires next. Kept here rather than in Vfx because
+-- it is a property of the KEY, not of the effect player -- nothing else in
+-- the mod should care that a human is walking the list one press at a time.
+local vfxDemoIndex = 0
+
+-- ------- Manual jump helpers (ported from red_3d_player)
+--
+-- Helper to get setting value with fallback (shared with config bridge)
+local function getSettingValue(setting, default)
+  if not setting then return default end
+  if type(setting.get) == "function" then
+    local ok, value = pcall(setting.get, setting)
+    if ok and value ~= nil then return value end
+  end
+  return default
+end
+
+-- Check if manual jump is enabled via the jump setting
+local function manualJumpEnabled()
+  local jumpSetting = getSettingValue(fpJump, "SUBTLE")
+  return jumpSetting ~= "OFF"
+end
+
+-- Simple jump trigger without setting check for testing
+local function canJump(player)
+  if not player then return false end
+  if player.inputLocked then return false end
+  if player.fishing then return false end
+  if player.surfing then return false end
+  if player.onBike then return false end
+  if player.hopFrames and player.hopFrames > 0 then return false end
+  if player.red3dManualJumpFrames and player.red3dManualJumpFrames > 0 then return false end
+  return true
+end
+
+-- Simple ledge hop trigger - just call the engine's function
+local function tryLedgeHop(top, player)
+  if not top or not player then return false end
+  if type(top.checkLedgeHop) == "function" then
+    local ok, result = pcall(top.checkLedgeHop, top, player.facing)
+    if ok and result == true then return true end
+  end
+  -- Fallback: try to manually trigger hop by setting hopFrames
+  -- This simulates what the engine does for ledge hops
+  local dx, dy = 0, 0
+  if player.facing == "left" then dx = -1
+  elseif player.facing == "right" then dx = 1
+  elseif player.facing == "up" then dy = -1
+  elseif player.facing == "down" then dy = 1
+  else return false end
+  local targetX = (player.cellX or 0) + dx * 2
+  local targetY = (player.cellY or 0) + dy * 2
+  if top.map and top.map:inBounds(targetX, targetY) then
+    player.targetX = targetX
+    player.targetY = targetY
+    player.moving = true
+    player.hopFrames = 32
+    return true
+  end
+  return false
+end
+
+-- Try to jump over a one-cell border/fence (Dramatic Shape fences)
+local function tryBorderJump(top, player, facing)
+  if not top or not top.map or not player then return false end
+  local map = top.map
+  local okCollision, Collision = pcall(require, "src.world.Collision")
+  if not okCollision or not Collision then return false end
+
+  local dx, dy = 0, 0
+  if facing == "left" then dx = -1
+  elseif facing == "right" then dx = 1
+  elseif facing == "up" then dy = -1
+  elseif facing == "down" then dy = 1
+  else return false end
+
+  -- Check the cell in front (the blocked border)
+  local bx = (player.cellX or 0) + dx
+  local by = (player.cellY or 0) + dy
+  if not map:inBounds(bx, by) then return false end
+
+  -- Check the landing cell (two cells ahead)
+  local lx = (player.cellX or 0) + dx * 2
+  local ly = (player.cellY or 0) + dy * 2
+  if not map:inBounds(lx, ly) then return false end
+
+  -- The border cell must be blocked (not walkable)
+  if map:isWalkableCell(bx, by) then return false end
+
+  -- The landing cell must be walkable and not occupied
+  if not map:isWalkableCell(lx, ly) then return false end
+  if Collision.occupied(top.entities, lx, ly, player) then return false end
+
+  -- Check if we can move to the border cell (collision check)
+  if not Collision.canMove(map, top.entities, player, facing) then return false end
+
+  -- Perform the jump
+  player.facing = facing
+  player.turnArmed = false
+  player.turnTimer = 0
+  player.bumpFrames = nil
+  player.targetX, player.targetY = lx, ly
+  player.moving = true
+  player.progress = 0
+  player.hopFrames = 32
+  return true
+end
+
+
+do
+  local Game = require("src.core.Game")
+  local Pipelines = require("src.render.Pipelines")
+  local inner = Game.keypressed
+
+  function Game:keypressed(key)
+    -- Handle jump on space key directly, before HOTKEYS table
+    -- This ensures jump works regardless of voxel mode or other conditions
+    if key == KEY_JUMP then
+      local top = self.stack and self.stack:top()
+      local player = top and top.isOverworld and top.player
+      -- Try the engine's real ledge crossing without canJump check
+      if player then
+        if tryLedgeHop(top, player) then
+          return
+        end
+      end
+    end
+    -- HORDE MODE owns the keyboard's spare keys while it runs (restored
+    -- from DRAMATIC_SHAPE): R reloads, and every mode key below is
+    -- swallowed rather than left to change the rung or the post-
+    -- processing out from under a locked camera.
+    if Horde.active then
+      if key == "r" then
+        HordeGun.reload()
+        return
+      end
+      if HOTKEYS[key] then return end
+    end
+    -- Q and E work whichever camera is in front of the player -- the
+    -- battle's lens, the third-person boom, or the engine's own survey
+    -- zoom on an orbit rung. CamControl answers which, and answers "none"
+    -- for 1ST and for every screen with no camera of ours behind it, in
+    -- which case the key falls through untouched. Ahead of the hotkey
+    -- table because unlike those it is NOT free-roam only: a staged
+    -- battle is exactly where the zoom is most wanted. (restored from
+    -- DRAMATIC_SHAPE)
+    local topEarly = self.stack and self.stack:top()
+    if (key == "q" or key == "e")
+       and not (topEarly and topEarly.onKeyPressed) then
+      if CamControl.zoomBy(key == "q" and 1 or -1) then return end
+    end
+    local claim = HOTKEYS[key]
+    local top = self.stack and self.stack:top()
+    -- A screen with its own key handler gets the key first, exactly as the
+    -- engine's first branch does: typing a nickname must not toggle a
+    -- render mode. Only free-roam presses are ours to take.
+    if claim and not (top and top.onKeyPressed) then
+      if claim == "pipeline" then
+        -- VOXEL key walks the ANGLE rungs and steps over FULL (Voxel.HOTKEY_ORDER),
+        -- so the registry's plain "advance one and wrap" is not what it
+        -- wants; T-SHIFT still is. The gate is the registry's own either way.
+        local stepped = false
+        if key == KEY_VOXEL then
+          if Pipelines.canToggle(PIPE_VOXEL, top, self.overworld)
+             and not Horde.viewLocked() then
+            Pipelines.setLevel(PIPE_VOXEL,
+              Voxel.nextHotkeyLevel(Pipelines.level(PIPE_VOXEL)))
+            stepped = true
+          end
+        else
+          stepped = Pipelines.hotkey(key, top, self.overworld) and true
+        end
+        if stepped then
+          Pipelines.syncOptions(self.save.options)
+          -- VOXEL press still clears TILT/GBC FX so a pre-mod save cannot leave
+          -- either fighting the diorama with no path back to off.
+          -- A player who left either running before enabling the mod would
+          -- otherwise have no way back to off, and both fight the diorama:
+          -- TILT is the flat fake of what this mode does for real, and GBC
+          -- FX is a full-screen present pass over the top of it. So the
+          -- VOXEL key clears them on EVERY press, not just the press that
+          -- switches the mode on -- cycling back round to OFF leaves them
+          -- off too, which is the state the key is now the only route to.
+          if key == KEY_VOXEL then
+            self.save.options.tilt = 0
+            self.save.options.gbcfx = 0
+            optionalGBCFX().setLevel(0)
+          end
+          optionalTilt().setLevel(self.save.options.tilt or 0)
+          self:writeOptions()
+          return
+        end
+      elseif claim == "vfxdemo" then
+        -- Behind the voxel pass's own free-roam gate like every key below:
+        -- these draw through Voxel3D.project, so firing one with no camera
+        -- would be a press that quietly did nothing.
+        if Pipelines.canToggle(PIPE_VOXEL, top, self.overworld) then
+          local ow = self.overworld
+          local p = ow and ow.player
+          local keys = Vfx.keys()
+          if p and #keys > 0 then
+            vfxDemoIndex = (vfxDemoIndex % #keys) + 1
+            -- Cell centres, in the world pixels the projection takes:
+            -- sixteen to a cell, and half of one to land on the middle of
+            -- the tile the player is standing on rather than its corner.
+            Vfx.play(keys[vfxDemoIndex],
+                     p.cellX * 16 + 8, 0, p.cellY * 16 + 8)
+          end
+        end
+        return
+      elseif claim == "jump" then
+        -- Manual jump: keyboard space or controller X button
+        -- When a real ledge is directly in front, call the overworld's
+        -- checkLedgeHop() so landing validation, NPC collision, SFX and
+        -- the two-cell movement all stay owned by the engine.
+        -- Everywhere else the button remains a visual jump in place.
+        local ow = self.overworld
+        local p = ow and ow.player
+        if canJump(p) then
+          -- First try the engine's real ledge crossing
+          local crossed = false
+          if top and type(top.checkLedgeHop) == "function" then
+            local ok, result = pcall(top.checkLedgeHop, top, p.facing)
+            crossed = ok and result == true
+          end
+          if not crossed then
+            -- Try border jump (one cell fence hop)
+            crossed = tryBorderJump(top, p, p.facing)
+          end
+          if crossed then
+            -- Real ledge/border crossing owns the 32-frame hop
+            p.red3dManualJumpFrames = nil
+            p.red3dManualJumpTotal = nil
+          else
+            -- Cosmetic jump in place
+            local jumpFrames = 32
+            p.red3dManualJumpTotal = jumpFrames
+            p.red3dManualJumpFrames = jumpFrames
+          end
+          -- Invalidate cached skin keys so takeoff appears immediately
+          local renderer = rawget(_G, "red3dPlayerRenderer")
+          if renderer then
+            renderer.skinKey = nil
+            renderer.voxelUploadedKey = nil
+          end
+        end
+        return
+      elseif Pipelines.canToggle(PIPE_VOXEL, top, self.overworld) then
+        -- All four answer to the voxel pass's own free-roam gate --
+        -- borrowed from the registry rather than restated, so a press
+        -- mid-warp or mid-cutscene is refused for the wireframe exactly when
+        -- it would be for the mode itself. Two of them parameterise that
+        -- pass; 3D-BTL decides what a battle is drawn over, and wants the
+        -- same gate for a different reason: the answer is read when the fight
+        -- starts, so flipping it from inside one would be a switch that
+        -- appeared to do nothing. WILD wants it for a third: it adds and
+        -- removes map objects, which is nothing to be doing while a script
+        -- is walking the cast around.
+        claim:cycle(self)
+        -- 3D-BTL is one of the two ways staged battles get switched on, and they
+        -- pin BATTLE LAYOUT to OG (see the rows hook). The other two keys
+        -- parameterise the pass and leave the layout alone; the guard answers
+        -- for all three, so nothing here has to know which key it was.
+        if stagedBattles() and OverworldBattle then OverworldBattle.forceOG(self) end
+        return
+      end
+    end
+    return inner(self, key)
+  end
+end
+
+-- ------- the mode's rows, kept together
+--
+-- Now there is ONE row, and it leads the list. What it opens -- the
+-- categories, the screens, and why the split falls where it does -- is
+-- lib/SettingsMenu.lua. VOXEL and T-SHIFT go with it: they are this mod's
+-- display modes, the engine only spliced them beside TILT because it had
+-- nowhere better, and TILT is not on the menu any more anyway (see below).
+-- (restored from DRAMATIC_SHAPE)
+--
+-- Two things it takes to move a pipeline row: the engine's descriptor is
+-- captured on the way past and handed to SettingsMenu VERBATIM -- it
+-- persists through its own step function into save.options.pipelines, and
+-- rebuilding it here would be a second implementation of something the
+-- engine already got right -- and the row is then dropped from the
+-- top-level list so it is not in two places at once.
+local function captureRow(out, id)
+  for _, row in ipairs(out) do
+    if type(row) == "table" and row.id == id then return row end
+  end
+  return nil
+end
+
+-- FULL owns the settings that describe the LOOK, so while it is selected those
+-- are taken off the menu rather than left to be changed under it -- including
+-- T-SHIFT, which is a pipeline row the engine put there. A row that no longer
+-- decides anything is worse than no row.
+--
+-- The battle rows are the exception and they stay; see the rows hook.
+local function dropRow(out, id)
+  for i = #out, 1, -1 do
+    if type(out[i]) == "table" and out[i].id == id then table.remove(out, i) end
+  end
+  return out
+end
+
+-- ------- TILT and GBC FX are gone while this mod is installed
+--
+-- Both fight the diorama, and both were already half-taken: the mode's own key
+-- (3) forces them off on every press, and the registry switches TILT off
+-- whenever a world pipeline takes the pass. What was left was two rows the
+-- player could set and watch get reverted -- TILT is the flat fake of what
+-- this mode does for real, and GBC FX is a full-screen present pass over the
+-- top of the whole thing.
+--
+-- So they come OFF the menu, and are HELD at zero rather than merely dropped.
+-- Hiding a live setting is a trap: a save written before the mod was installed
+-- can carry TILT 3, and a row that is not there is a row that cannot turn it
+-- back off. Pinned wherever the value could have arrived from -- the menu
+-- opening, a save being loaded or begun -- so there is no route by which one
+-- of them is on and unreachable.
+--
+-- Everything they did is still reachable: uninstall the mod and both rows are
+-- back, at whatever they were last set to.
+local function pinEngineFx(game)
+  game = game or require("src.core.Game")
+  local opts = game and game.save and game.save.options
+  -- Host compatibility: Tilt and GBCFX may not exist in all builds
+  local okTilt, Tilt = pcall(require, "src.render.Tilt")
+  local okGBCFX, GBCFX = pcall(require, "src.render.GBCFX")
+  local changed = false
+  if opts then
+    changed = (opts.tilt or 0) ~= 0 or (opts.gbcfx or 0) ~= 0
+                or (opts.battleBg or "white") ~= "white"
+    opts.tilt, opts.gbcfx = 0, 0
+    -- restored from DRAMATIC_SHAPE: a staged fight fills the whole window
+    -- with the map, so BATTLE BG's WHITE/BLACK/WORLD choice has no voids
+    -- left to be about; pinned at WHITE, the one the mode was composed
+    -- against.
+    opts.battleBg = "white"
+  end
+  pcall(Tilt.setLevel, 0)
+  pcall(GBCFX.setLevel, 0)
+  if changed and game.writeOptions then pcall(game.writeOptions, game) end
+end
+
+-- The two things that follow other things: 3D-BTL holds BATTLE LAYOUT at
+-- OG while a fight can be staged on the map, and FULL holds DAYTIME at
+-- SYNC while it owns that row. Both used to happen because every step on
+-- the OPTIONS menu reran this hook, which did the pinning on its way
+-- past. SettingsMenu's own screen does not rerun this hook, so the pin is
+-- handed to it directly. (restored from DRAMATIC_SHAPE)
+local function pinDependents(game)
+  if stagedBattles() and OverworldBattle then OverworldBattle.forceOG(game) end
+  local Pipelines = require("src.render.Pipelines")
+  if Voxel.isFull(Pipelines.level(PIPE_VOXEL)) then DayNight.forceSync(game) end
+end
+
+SettingsMenu.setOnChanged(pinDependents)
+
+-- call next() first and decorate what comes back, so every other mod's
+-- rows survive this one
+mod.hooks:wrap("ui.options.rows", function(next, game, rows)
+  local out = next(game, rows)
+  if type(out) ~= "table" then return out end
+  local Pipelines = require("src.render.Pipelines")
+  -- ahead of every branch below, including FULL's early return: these two are
+  -- off the menu whatever else this mod is or is not doing
+  pinEngineFx(game)
+  dropRow(out, "tilt")
+  dropRow(out, "gbcfx")
+  -- and BATTLE BG with them (restored from DRAMATIC_SHAPE): this mode fills
+  -- the window with the map, so the row's whole question -- what to put in
+  -- the voids around the battle -- no longer has voids to be about (see
+  -- pinEngineFx)
+  dropRow(out, "battleBg")
+  -- BATTLE LAYOUT is the ENGINE's row, and this is the one place the mod takes
+  -- one away. While a fight can be staged on the map, OG is the only layout it
+  -- can be composed in (OverworldBattle.forceOG), so the value is pinned there
+  -- and the row comes off the list on the same reasoning as the rows FULL owns:
+  -- a row that no longer decides anything is worse than no row. Nothing is
+  -- lost by switching 3D-BTL off -- the row is back, WIDE and all, on the same
+  -- keypress.
+  if stagedBattles() and OverworldBattle then
+    OverworldBattle.forceOG(game)
+    dropRow(out, "battleLayout")
+  end
+  local full = Voxel.isFull(Pipelines.level(PIPE_VOXEL))
+  if full then
+    -- FULL owns the rows that PARAMETERISE the diorama -- the wireframe, the
+    -- horizon bend, the blur, the hour -- so DAYTIME is held at SYNC while its
+    -- row is unreachable. The rows themselves come off inside SettingsMenu,
+    -- which is where they live now (restored from DRAMATIC_SHAPE): T-SHIFT
+    -- with the wireframe and the bend, and each of them by the same `full`
+    -- rule rather than by name.
+    DayNight.forceSync(game)
+    dropRow(out, "pipeline:" .. PIPE_TILT)
+  end
+  -- The two pipeline rows move INTO the mod's own root menu (restored from
+  -- DRAMATIC_SHAPE): captured as the engine built them, then dropped from
+  -- here so they are not in two places.
+  local captured, voxelRow = {}, nil
+  local pipelineIds = { "pipeline:" .. PIPE_VOXEL, "pipeline:" .. PIPE_TILT }
+  for _, id in ipairs(pipelineIds) do
+    local row = captureRow(out, id)
+    -- a pipeline the registry refused is simply not there, and the menu says
+    -- so by not offering it rather than by offering a hole
+    if row then captured[#captured + 1] = row end
+    if id == "pipeline:" .. PIPE_VOXEL then
+      voxelRow = row
+    end
+    dropRow(out, id)
+  end
+  SettingsMenu.setPipelineRows(captured)
+
+  -- ------- one row, and it leads the list (restored from DRAMATIC_SHAPE)
+  --
+  -- At the TOP rather than spliced in beside the display modes it used to sit
+  -- with. This is a mod that replaces the whole look of the game, and a player
+  -- who installed it and went looking for its settings should not have to
+  -- scroll to find out where they went -- least of all past the engine rows it
+  -- has quietly taken away.
+  --
+  -- Inserted after next() has run, so it leads every OTHER mod's rows too. The
+  -- second line is VOXEL's own value function, which makes the row say what
+  -- the mode is currently doing without opening it -- and reuses the engine's
+  -- label ladder rather than restating it.
+  table.insert(out, 1, {
+    id = SettingsMenu.id(SettingsMenu.ROOT),
+    label = SettingsMenu.ROOT_LABEL,
+    value = voxelRow and voxelRow.value or nil,
+    -- `activate` and not `step`: the engine fires activate on A alone, and a
+    -- row that OPENS something should not also answer Left and Right
+    -- (src/ui/OptionsMenu.update).
+    activate = function(g)
+      g.stack:push(SettingsMenu.new(g, SettingsMenu.ROOT))
+    end,
+  })
+
+  -- The three rows below live on the ENGINE's own list rather than tucked
+  -- one level down inside the mod's settings screen: each is a piece of
+  -- one-time SETUP (point the mod at a cartridge, pick a model) rather than
+  -- a knob you come back to, so it stays where it is first noticed instead
+  -- of behind a "..." a player has no reason yet to open. Every one of
+  -- these three modules is optional, so each is reached through pcall: a
+  -- fault in "is there a Stadium ROM" must not cost the rest of this hook.
+  -- (restored from DRAMATIC_SHAPE)
+  local okPick, importRow = pcall(function()
+    return V.require("StadiumRomPick").row()
+  end)
+  if okPick and importRow then table.insert(out, importRow) end
+
+  local okPick2, importRow2 = pcall(function()
+    return V.require("Stadium2RomPick").row()
+  end)
+  if okPick2 and importRow2 then table.insert(out, importRow2) end
+
+  local okMewtwo, mewtwoRow = pcall(function()
+    local StadiumInstall = V.require("StadiumInstall")
+    local Stadium2Install = V.require("Stadium2Install")
+    if StadiumInstall.available() or Stadium2Install.available() then
+      return V.require("PlayerModelPick").mewtwoRow()
+    end
+    return nil
+  end)
+  if okMewtwo and mewtwoRow then table.insert(out, mewtwoRow) end
+
+  local okFollower, followerRow = pcall(function()
+    local StadiumInstall = V.require("StadiumInstall")
+    local Stadium2Install = V.require("Stadium2Install")
+    if StadiumInstall.available() or Stadium2Install.available() then
+      return V.require("PlayerModelPick").followerRow()
+    end
+    return nil
+  end)
+  if okFollower and followerRow then table.insert(out, followerRow) end
+
+  local okWilds, wildsRow = pcall(function()
+    local StadiumInstall = V.require("StadiumInstall")
+    local Stadium2Install = V.require("Stadium2Install")
+    if StadiumInstall.available() or Stadium2Install.available() then
+      return V.require("PlayerModelPick").wildsRow()
+    end
+    return nil
+  end)
+  if okWilds and wildsRow then table.insert(out, wildsRow) end
+
+  return out
+end)
+
+-- The mod manager writes and persists on its own, so the only thing left
+-- to do is move our cached index and pick the new value up.
+mod.events:on("mod.options_changed", function(payload)
+  if not (payload and payload.mod == mod.id) then return end
+  for _, entry in ipairs(SETTINGS) do
+    if payload.key == entry[1].key then entry[1]:sync(payload.value) end
+  end
+  -- 3D-BTL switched on from the manager's page pins BATTLE LAYOUT exactly as
+  -- the OPTIONS row does. The manager persists its own value; this is the one
+  -- that has to follow it.
+  if stagedBattles() then OverworldBattle.forceOG() end
+  -- and DAYTIME changed from the manager's page while FULL owns it snaps
+  -- straight back to SYNC -- the OPTIONS row is hidden, but the manager's is
+  -- not, and FULL's pin must hold against both
+  local Pipelines = require("src.render.Pipelines")
+  if Voxel.isFull(Pipelines.level(PIPE_VOXEL)) then DayNight.forceSync() end
+end)
+
+-- ------- keeping the geometry in step with the world
+--
+-- Terrain meshes are derived from a map's block layer, so anything that
+-- rewrites a block (a cut tree, a smashed rock, a script's replaceBlock)
+-- has to drop that map's cached mesh or the 3D world keeps showing the
+-- tree that is no longer there.  The 2D tile renderer invalidates its own
+-- caches off the same edit.
+
+-- refresh, not invalidate: the stale mesh keeps drawing while the
+-- replacement builds in the background, so a one-block edit (Cut, a
+-- door stamp, the tree regrowing on re-entry) repopulates in place
+-- instead of blinking the whole scene down to the flat 2D path
+mod.events:on("world.block_replaced", function(payload)
+  local mapId = payload and (payload.mapId or (payload.map and payload.map.id))
+  if mapId then ChunkMesher.refresh(mapId) end
+  -- and the ground decals with it: a Cut tree is a new cell to stand on,
+  -- and therefore a new cell that could hold a puddle
+  GroundFX.invalidate()
+end)
+
+-- The event above is the ANNOUNCED edit -- OverworldState:replaceBlock
+-- emits it, which is the path Victory Road's barriers and a script's
+-- replaceBlock take. Several edits do not go through it:
+--
+--   Cut          swaps the tree block and rebuilds the 2D renderer
+--   the regrowth restores those blocks when the map is re-entered
+--   card-key doors are stamped closed on floor load
+--
+-- all of them writing the block layer directly. Meshes derived from that
+-- layer went stale with no announcement -- the cut tree stayed standing,
+-- and after a round trip through a door the stump stayed cut because this
+-- map's mesh survives in the cache (that is what prevLive is for).
+--
+-- The engine could announce each of those, and an earlier cut of this
+-- work changed it to. That is the wrong place: it edits the game for one
+-- mod's benefit, and every future path that writes a block has to
+-- remember to do the same. They all funnel through ONE choke point --
+-- Map:setBlock -- so wrap that from here instead. Map is a plain
+-- metatable shared by every map instance, so this covers all of them,
+-- including paths written after this mod.
+--
+-- Read back rather than trust the argument: setBlock silently ignores an
+-- out-of-bounds write, and a stamp that rewrites a block with the value
+-- it already held (the door code guards for this, the regrowth does not)
+-- is not a change and must not throw the mesh away.
+do
+  local Map = require("src.world.Map")
+  if not Map.dramaticShapeBlockHook then
+    local setBlock = Map.setBlock
+    Map.setBlock = function(self, bx, by, block)
+      local before = self:blockAt(bx, by)
+      setBlock(self, bx, by, block)
+      if self.id and self:blockAt(bx, by) ~= before then
+        ChunkMesher.refresh(self.id)
+        GroundFX.invalidate()
+      end
+    end
+    Map.dramaticShapeBlockHook = true
+  end
+end
+
+-- A reloaded map is rebuilt from scratch (warps that re-enter the same map,
+-- hot reload), so its mesh is stale for the same reason -- with one
+-- exception, and it is the common one.
+--
+-- A palette switch reloads the map ONLY to rebuild its atlas
+-- (PaletteFX.setMode -> reloadMap(id, "colors")). The geometry that comes
+-- back is identical: this mesher reads block layout and tile ids and never
+-- reads colour, and the palette lives entirely in the texture TerrainAtlas
+-- hands back per frame -- which is keyed BY palette, so the new colours are
+-- already built by the time the next frame draws.
+--
+-- Dropping the mesh anyway cost a visible flash of the flat 2D world on
+-- every palette toggle. Mesh builds are asynchronous, so the frames between
+-- the drop and the first finished mesh have no terrain to draw, and
+-- drawWorld returning nil IS the 2D fallback. Keeping the geometry lets the
+-- new colours land on the diorama already on screen, in one frame, which is
+-- what a palette toggle should look like from inside voxel mode.
+mod.events:on("map.reloaded", function(payload)
+  if payload and payload.reason == "colors" then return end
+  local mapId = payload and (payload.mapId or (payload.map and payload.map.id))
+  if mapId then ChunkMesher.invalidate(mapId) end
+end)
+
+-- ------- rows come and go, so the menu has to notice
+--
+-- OptionsMenu builds its row list ONCE, when it is opened, and then reads
+-- that list every frame. So stepping the VOXEL row onto or off FULL changed
+-- which rows the hook would return but not which rows were on screen -- the
+-- settings FULL owns stayed visible until the menu was closed and reopened,
+-- and a player who stepped off FULL could not see the rows come back.
+--
+-- Rebuilt in place, and only on a step that changes the LIST: crossing FULL,
+-- toggling 3D-BTL, which is the other row that owns one (BATTLE LAYOUT), or
+-- WILD arriving at or leaving OFF, which takes W-COUNT with it.
+-- Every other rung returns the same list, and rebuilding on all of them would
+-- rerun every mod's ui.options.rows hook once per keypress. The cursor is
+-- clamped rather than reset, so it stays on the row it was just used on
+-- instead of jumping to the top when the list below it shortens.
+do
+  -- Host compatibility: OptionsMenu may not exist or may fail to load in Gen 2
+  local okOptionsMenu, OptionsMenu = pcall(require, "src.ui.OptionsMenu")
+  if not okOptionsMenu or type(OptionsMenu) ~= "table" or OptionsMenu.dramaticShapeFullHook then
+    mod.log:warn("OptionsMenu hook skipped: " .. (okOptionsMenu and
+                 (type(OptionsMenu) ~= "table" and "not a table on this game" or "already hooked")
+                 or "not available"))
+  else
+    local Pipelines = require("src.render.Pipelines")
+    -- Host compatibility: OptionRows may not exist in Gen 2, use mod's own copy
+    local OptionRows
+    local okOptionRows, engineOptionRows = pcall(require, "src.ui.OptionRows")
+    if okOptionRows and type(engineOptionRows) == "table" then
+      OptionRows = engineOptionRows
+    else
+      OptionRows = V.require("OptionRows")
+    end
+    local inner = OptionsMenu.update
+    -- restored from DRAMATIC_SHAPE, so SettingsMenu's red-ink row survives
+    local innerPalettes = OptionsMenu.sgbPalettes
+
+    local function idAt(menu, index)
+      local row = menu.rows and menu.rows[index or 1]
+      return type(row) == "table" and row.id or nil
+    end
+
+    function OptionsMenu:update(dt)
+      local before = Pipelines.level(PIPE_VOXEL)
+      local hadBattles = OverworldBattle and OverworldBattle.enabled() or false
+      local hadWild = WildRoamers and WildRoamers.enabled() or false
+      local hadWeather = Weather.enabled()
+      -- restored from DRAMATIC_SHAPE: VR gives and takes the VR category
+      -- (and hides both battle rows while it is on -- see the battle
+      -- rows' `when` below), so the top list has to notice it too
+      local hadVR = VR.enabled()
+      local wasOn = idAt(self, self.index)
+      inner(self, dt)
+      local after = Pipelines.level(PIPE_VOXEL)
+      local crossedFull = after ~= before
+                          and (Voxel.isFull(before) or Voxel.isFull(after))
+      if crossedFull or (OverworldBattle and OverworldBattle.enabled() ~= hadBattles)
+         or (WildRoamers and WildRoamers.enabled() ~= hadWild)
+         -- WEATHER arriving at or leaving OFF takes GROUND with it, for the
+         -- same reason WILD takes W-COUNT: with no sky there is never a
+         -- puddle for that row to decide anything about
+         or Weather.enabled() ~= hadWeather
+         or VR.enabled() ~= hadVR then
+        local rebuilt = OptionsMenu.new(self.game)
+        self.rows = rebuilt.rows
+        -- Follow the row the cursor was ON rather than the slot it was in:
+        -- 3D-BTL takes BATTLE LAYOUT off the list ABOVE itself, which would
+        -- otherwise slide the cursor onto the row under the one just used.
+        for i = 1, #self.rows do
+          if wasOn and idAt(self, i) == wasOn then self.index = i; break end
+        end
+        local cancel = #self.rows + 1
+        if (self.index or 1) > cancel then self.index = cancel end
+      end
+    end
+
+    -- ------- and the mod's own row is red (restored from DRAMATIC_SHAPE)
+    --
+    -- Why this is a palette zone and not love.graphics.setColor is written
+    -- out in lib/SettingsMenu.lua next to the code that builds the palette.
+    -- Addressed by SLOT, because the row scrolls -- it leads the list, so
+    -- it is normally the top box, but a player who scrolls past it must
+    -- not leave a red band behind on whatever takes its place. Searched by
+    -- id rather than assumed to be row 1, in case another mod's hook runs
+    -- after ours and puts something above it.
+    function OptionsMenu:sgbPalettes(game)
+      local zones = innerPalettes and innerPalettes(self, game) or nil
+      local scroll = self.scroll or 0
+      for slot = 1, OptionRows.VISIBLE do
+        local row = self.rows and self.rows[scroll + slot]
+        if type(row) == "table"
+            and row.id == SettingsMenu.id(SettingsMenu.ROOT) then
+          local zone = SettingsMenu.rowZone(game and game.data, slot)
+          if zone then
+            zones = zones or {}
+            zones[#zones + 1] = zone
+          end
+          break
+        end
+      end
+      return zones
+    end
+
+    OptionsMenu.dramaticShapeFullHook = true
+  end
+end
+
+-- ------- battles on the map
+--
+-- The wraps this needs -- OverworldState:pushBattle, BattleState:draw and
+-- BattleState:drawHUDs -- all live in lib/OverworldBattle.lua, which is
+-- where the reasoning for each one is written down. Installed once, here,
+-- so this file keeps naming every engine seam the mod touches.
+if OverworldBattle then OverworldBattle.install() end
+
+-- ------- shiny Pokemon (restored from DRAMATIC_SHAPE)
+--
+-- ON, always, with no row to switch it off: shininess is a property of the
+-- Pokemon rather than a display mode, and a Pokemon that is shiny in one
+-- player's save and not another's is not a Pokemon, it is a setting.
+--
+-- Rests on a fact the engine already ships: Gen 1 has no shininess of its
+-- own, but it has the four DVs Gen 2 reads to decide it, and the engine's
+-- own Stats.lua carries that reading -- "the RBY virtual shiny", there for
+-- indicator mods. So nothing new is stored on a Pokemon and nothing has to
+-- migrate: every save ever made already contains the answer.
+--
+--   ShinyBattle  wraps Pokemon.new, which is where every wild, gift,
+--                starter and traded mon is built, so the roll lands before
+--                the sprite is baked
+--   ShinyUI      the battle pics' tint and the status page's mark
+ShinyBattle.install()
+ShinyUI.install()
+
+-- A save opened for the first time under this mod has shiny Pokemon in it
+-- already -- they always did -- so refresh the cached flag across the
+-- party rather than leaving it absent until each mon next changes.
+mod.events:on("save.loaded", function() ShinyBattle.markParty() end)
+mod.events:on("save.created", function() ShinyBattle.markParty() end)
+
+-- ------- wild Pokemon standing in the grass
+--
+-- The two seams this needs -- Player:tryMove, which is where walking into
+-- one is refused, and OverworldState:talkTo, which is where pressing A at
+-- one lands -- live in lib/WildRoamers.lua with the reasoning for each.
+--
+-- Nothing here reaches the encounter TABLES: which species and how likely
+-- each is are still the ROM's, read through the same records the roll reads.
+-- What changes is that the roll happens in the open, some distance away,
+-- and you can see its answer standing in the grass before you decide
+-- whether to walk into it.
+if WildRoamers then WildRoamers.install() end
+
+-- ------- Pokemon in the streets
+--
+-- One seam -- OverworldState:talkTo, chained behind WildRoamers' wrap of
+-- the same method -- where pressing A at a street Pokemon becomes a cry
+-- and a line of flavour text, or a challenge. lib/CityLife.lua holds the
+-- reasoning.
+if CityLife then CityLife.install() end
+
+-- ------- and asleep on the floor indoors
+--
+-- The same seam again, chained behind both of the wraps above -- each checks
+-- its own mark and passes everything else along -- where pressing A at a
+-- sleeping house pet is a slowed cry and a line, and never a battle.
+if Interiors then Interiors.install() end
+
+-- ------- what the world sounds like
+--
+-- Registered rather than merely built: every one of these is a Game Boy
+-- channel program assembled by the engine's own authoring path
+-- (src.audio.ChipAsm, one of the three src modules the loader names as a
+-- supported require) and handed to the engine's own sfx registry -- so they
+-- are real entries under real ids, and a sound pack can override
+-- DS_AMB_CRICKET with a file of its own and be played instead. Nothing here
+-- ships an audio asset; the crickets, the birds, the water, the rain and the
+-- thunder are all synthesized from about two hundred bytes of note table
+-- each. See lib/AmbientSound.lua for what every program is.
+--
+-- At load time on purpose: assembly touches no love.* at all, so it works on
+-- a headless boot and in the manager's dry load, and the registry has the
+-- entries before anything can ask to play one.
+if AmbientSound then AmbientSound.register(mod) end
+
+-- ------- quality of life
+--
+-- Three seams, each wrapped in lib/QoL.lua with the reasoning beside it:
+-- OverworldState:interact (A at a tree or the water runs the field move
+-- the party menu would have), OverworldState:talkTo (A at a boulder wakes
+-- STRENGTH), and BattleState:drawTextArea (effectiveness markers on the
+-- move menu, from the same TypeChart the damage formula reads).
+if QoL then QoL.install() end
+Carry.install()
+-- Walk-on-ice when frozen, gated on Surf (Soul Badge + party knows SURF).
+if Water.installWalk then pcall(Water.installWalk) end
+
+-- ------- three more mercies on the same row
+--
+-- The box that fills up (the PC follows the catch, and a full box rolls
+-- forward instead of refusing a deposit), the bag sorted into pockets, and
+-- RENAME on the party submenu. Every one of them rides a hook or an event
+-- the engine already put there -- pokemon.caught, ui.list_menu,
+-- ui.party.submenu -- plus two constructor wraps for the two menus that
+-- have no hook of their own. lib/Comforts.lua holds the reasoning.
+Comforts.install(mod)
+
+-- ------- and experience for the whole team
+--
+-- battle.exp_award, whose own comment in the engine names this exact case.
+-- Nothing here computes experience: the engine hands over the helper it
+-- uses itself, and this only decides who it is called for.
+ExpShare.install(mod)
+
+-- Two more of its mercies ride engine HOOKS rather than wraps, because the
+-- engine put hooks exactly where they were needed.
+--
+-- `movement.speed` exists, in the engine's own words, for "running shoes,
+-- dash, etc." -- so holding B to jog goes through the front door. next()
+-- first, so a mod loaded before this one that already changed the pace keeps
+-- its answer and this only ever takes the faster of the two.
+mod.hooks:wrap("movement.speed", function(next, frames, ctx)
+  if not QoL then return next(frames, ctx) end
+  return QoL.runSpeed(next(frames, ctx), ctx)
+end)
+
+-- And `evolution.check` is the seam for cancelling or forcing any evolution,
+-- which is what a trade evolution on a single machine needs: Kadabra,
+-- Machoke, Graveler and Haunter evolve by trade and by nothing else, so four
+-- species are simply absent from a solo game. next() FIRST and its yes is
+-- final -- a real link trade still evolves them the instant it completes, and
+-- this only ever adds a second way in.
+mod.hooks:wrap("evolution.check", function(next, game, mon, evo, trigger)
+  if not QoL then return next(game, mon, evo, trigger) end
+  return QoL.tradeEvolution(next(game, mon, evo, trigger),
+                            game, mon, evo, trigger)
+end)
+
+-- ------- the auto-farm bot
+--
+-- One seam of its own -- MoveLearnMenu:enter, where the forget-a-move
+-- prompt would otherwise wait for a player who is not driving -- wrapped in
+-- lib/AutoFarm.lua with the reasoning beside it. Everything else the bot
+-- does goes through the engine's own front door: synthetic presses on the
+-- same Input queue the tests and drivers write, which is why every menu,
+-- message and battle behaves exactly as if a very fast player were at the
+-- keys.
+if AutoFarm then AutoFarm.install() end
+
+-- The bot's tick rides `input.step`, the boundary Game:step runs for
+-- exactly this class of mod -- "before Input:step promotes queued edges so
+-- a button chosen here is visible to this logic tick". next() first, so an
+-- accessibility driver or another autoplay mod loaded before this one
+-- still gets its buttons in ahead of ours.
+mod.hooks:wrap("input.step", function(next, game, dt)
+  local out = next(game, dt)
+  if AutoFarm then AutoFarm.update() end
+  return out
+end)
+
+-- The blind roll, switched off exactly where this feature has replaced it.
+--
+-- encounter.roll is the engine's own seam for it (OverworldState:rollEncounter
+-- offers every wild pick to this chain and takes nil for "nothing this
+-- step"), so no encounter code is touched -- and next() is not called at all
+-- on the terrain we cover, which leaves the vanilla RNG draws unspent rather
+-- than rolling and discarding.
+--
+-- Answered per TERRAIN, not per map: `covers` is only true for ground this
+-- feature has actually stood something on, so a map with no encounter table,
+-- no room, or art that would not bake keeps the dice it has always had. The
+-- one thing worse than a blind encounter is no encounter.
+mod.hooks:wrap("encounter.roll", function(next, encDef, ctx)
+  if WildRoamers.covers(ctx and ctx.terrain) then return nil end
+  return next(encDef, ctx)
+end)
+
+-- And the hour and the sky on whatever that roll came back with.
+--
+-- encounter.species is the engine's own second seam, run on a non-nil roll
+-- and BEFORE the repel filter, which is exactly the right place: what
+-- changes here is which Pokemon it is, and everything downstream -- repel,
+-- the ghost rule, the Safari menu, the battle itself -- goes on reading the
+-- answer rather than the question.
+--
+-- This is the path for MIX and for OFF, the two rungs where the dice are
+-- still being thrown, so a player who never switched the visible Pokemon on
+-- gets the same world. Under ROAM the roll above already returned nil on
+-- the terrain this mod covers, so this is never reached there -- the tilt
+-- happened when the roamer was placed, in the open, which is the whole
+-- point of that row.
+--
+-- next() first and only then decorated, so a mod that replaces the species
+-- outright still has the last word on WHICH creature; this only ever moves
+-- the odds inside the map's own table.
+mod.hooks:wrap("encounter.species", function(next, enc, ctx)
+  local out = next(enc, ctx)
+  if not Ecology.enabled() then return out end
+  local ok, tuned = pcall(Ecology.substitute, out, ctx)
+  return (ok and tuned) or out
+end)
+
+-- The overworld's own pushBattle is the choke point for a wild encounter or
+-- a trainer, and it is wrapped. A battle that arrives some other way -- a
+-- link battle, a script pushing a BattleState directly -- reaches this
+-- instead, which stages the arena from wherever the player is standing.
+-- Nothing visible is lost by being late: the cull only has to beat the
+-- battle screen, and the wipe those battles skip is where it would have
+-- shown.
+mod.events:on("battle.started", function(payload)
+  OverworldBattle.ensure(payload and payload.battle)
+end)
+
+-- Both mons face the camera, so the player's side wants its FRONT pic where
+-- the battle screen would have used the back one. The engine's own
+-- pokemon.sprite hook is the seam for exactly this: it is asked for every
+-- battle pic with the side it is resolving, so swapping one side's answer
+-- needs no battle code at all -- and every path that builds a battler goes
+-- through it, including a Transform mid-fight.
+--
+-- next() first, so a sprite-replacing mod loaded before this one still gets
+-- the last word on WHICH art is used; this only changes which SIDE is asked
+-- for.
+mod.hooks:wrap("pokemon.sprite", function(next, path, ctx)
+  local out = next(path, ctx)
+  if not (ctx and ctx.kind == "battle" and ctx.side == "back") then
+    return out
+  end
+  if not OverworldBattle.wantsFront() then return out end
+  local def = ctx.data and ctx.data.pokemon and ctx.data.pokemon[ctx.species]
+  return (def and def.spriteFront) or out
+end)
+
+-- Every ending path emits this, including a battle skipped before it drew,
+-- so this is where the map's cast comes back.
+mod.events:on("battle.ended", function()
+  OverworldBattle.finish()
+end)
+
+-- ------- and the way back out
+--
+-- The engine wipes INTO a battle with one of the original's eight transitions
+-- and cuts straight OUT of it. That cut is between two very different cameras
+-- in this mode, so while voxel mode is on the battle fades out, closes behind
+-- the black, and the map fades up. The two seams it needs -- BattleState:finish
+-- and Renderer:endFrame -- and the reasoning for each live in lib/BattleExit.lua.
+--
+-- Declared as a transitions record rather than a constant in that file, so the
+-- fade is retunable in data exactly like the eight wipes it answers, and a total
+-- conversion can make it as long or as short as its own pacing wants.
+if BattleExit then
+  mod.content.transitions:register(BattleExit.ID, {
+    frames = BattleExit.FRAMES,
+  })
+  BattleExit.install()
+end
+
+-- ------- and the hour on the flat world
+--
+-- The clock reaches the diorama through the voxel shader's own tint uniform,
+-- which the 2D tile path never runs -- so with the mode off, the same evening
+-- that fell on the diorama left the flat world at permanent noon. One clock,
+-- two worlds, one of them ignoring it. DayTint paints the same multiply over
+-- the composited flat world, between the world blit and the UI blit; the
+-- reasoning for that exact instant is in the file.
+DayTint.install()
+
+-- ------- SELECT key handler for gamepad
+--
+-- Allow SELECT button to cycle voxel angles on gamepad
+do
+  local OverworldState = require("src.world.OverworldController")
+  if not OverworldState.terrariumSelectHook then
+    local inner = OverworldState.handleInput
+    function OverworldState:handleInput(...)
+      local Game = require("src.core.Game")
+      local input = Game.input
+      if input and input.wasPressed and input:wasPressed("select") then
+        if cycleVoxel(Game) then return end
+      end
+      return inner(self, ...)
+    end
+    OverworldState.terrariumSelectHook = true
+  end
+end
+
+-- ------- Jump via input.step hook
+--
+-- Use the custom key binding to trigger jump
+mod.hooks:wrap("input.step", function(next, game, dt)
+  local out = next(game, dt)
+  local top = game.stack and game.stack:top()
+  local player = top and top.isOverworld and top.player
+  local jumpKey = getJumpKey()
+  local bindingType, key = parseJumpKey(jumpKey)
+
+  if player then
+    -- Poll LÖVE directly rather than the engine's input:wasPressed(),
+    -- which only recognizes its own fixed action names. A raw keyboard
+    -- key (e.g. "f1") or a raw gamepad button (e.g. "leftshoulder")
+    -- bound here would otherwise just never fire, since the engine has
+    -- no such action -- and both branches used to call the very same
+    -- input:wasPressed(key), so a gamepad binding was really being
+    -- checked as a keyboard action and vice versa.
+    local pressed = false
+    if bindingType == "keyboard" then
+      pressed = rawKeyboardPressed(key)
+    elseif bindingType == "gamepad" then
+      pressed = rawGamepadPressed(key)
+    end
+
+    if pressed then
+      if tryLedgeHop(top, player) then
+        -- Jump succeeded
+      end
+    end
+  end
+  return out
+end)
+
+
+-- ------- 1ST and 3RD person camera and movement
+--
+-- FirstPerson.install claims the LOOK inputs the engine ignores: the right
+-- stick's axes, relative mouse motion, and touch gestures for camera control.
+-- FreeMove.install wraps OverworldState:handleInput to enable continuous
+-- camera-relative walking while in 1ST or 3RD mode.
+-- CamControl.install claims zoom controls (wheel, Q/E, pinch) for whichever
+-- camera is active -- the third-person boom or the engine's survey zoom.
+FirstPerson.install()
+FreeMove.install()
+CamControl.install()
+
+-- ------- the konami code, and everything it turns on (restored from
+-- DRAMATIC_SHAPE)
+--
+-- Installed after the camera and SELECT seams above so its handleInput
+-- reasoning sits outside all of theirs. The detector itself does not live
+-- on handleInput at all -- it reads the fixed step's own press queue,
+-- which is where keyboard, pad, touch and the VR controllers have all
+-- already become the same eight buttons. See lib/Horde.lua.
+Horde.install()
+
+-- ------- LET'S GO capture mode (restored from DRAMATIC_SHAPE)
+--
+-- Installed last of all: while a throw is being aimed the capture's mouse
+-- and touch wraps must be the OUTERMOST, so the flick is read before
+-- anything else can claim the pointer -- and outside the aim they forward
+-- every byte untouched. The battle-side wraps (throwBall, safariAction)
+-- and the experience hooks install here too.
+-- Gen 1 only feature - skip on Gen 2: BattleState.throwBall/safariAction
+-- have no Gen 2 backing (turn resolution moves to src/battle/gen2/Battle.lua
+-- over a mon rather than a Gen 1 battler wrapper), so wrapping them here is
+-- both pointless and, on some engine builds, an index into a facade that
+-- was never a table to begin with.
+if not IS_GEN2 then LetsGo.install() end
+
+-- ------- Follower system (ported from VOXEL_ULTIMATE)
+--
+-- Unified follower system with selection, persistence, control modes,
+-- trailers, talk interaction, and sprite refresh. Compatible with
+-- Followers EX and PokéPC through migration.
+local followerInstance = Follower.new(mod, {
+  logic = V,
+  render = V,
+})
+
+-- Register follower sprites during load phase
+mod.events:on("content.loaded", function()
+  pcall(function() followerInstance:registerContent() end)
+end)
+
+-- Install follower system after mods are loaded
+mod.events:on("mods.loaded", function()
+  local Game = require("src.core.Game")
+  pcall(function()
+    followerInstance:reassertAfterModsLoaded(Game)
+  end)
+end)
+
+-- Event handlers for follower lifecycle
+mod.events:on("save.loaded", function()
+  pcall(function() followerInstance:onSaveLoaded() end)
+end)
+
+mod.events:on("map.entered", function(ev)
+  pcall(function() followerInstance:onMapEntered(ev) end)
+end)
+
+mod.events:on("mod.options_changed", function(payload)
+  if payload and payload.mod == mod.id then
+    pcall(function() followerInstance:onOptionsChanged(payload) end)
+  end
+end)
+
+-- Export follower API for companion mods
+mod.exports.follower = followerInstance
+
+-- ------- what time it is
+--
+-- The cycle's clock rides the SAVE SLOT (save.modData, via mod.save): what
+-- time it is in Kanto is a fact about that journey, like where the player is
+-- standing. Written on the engine's save.writing event -- the moment before
+-- the bytes hit disk -- and read back whenever a save is opened or begun. A
+-- save with no clock in it starts at day; that is DayNight.restore's
+-- fallback, and also the DAYTIME row's own default.
+mod.events:on("save.writing", function()
+  DayNight.store()
+end)
+
+mod.events:on("save.loaded", function()
+  DayNight.restore()
+  -- a save written before this mod was installed can carry TILT or GBC FX
+  -- switched on, and their rows are not there to switch them back off (see
+  -- pinEngineFx). Answered here rather than only when the menu opens, so a
+  -- player who never opens it is not left playing under one.
+  pinEngineFx()
+end)
+
+mod.events:on("save.created", function()
+  DayNight.restore()
+  pinEngineFx()
+end)
+
+-- The engine's own time-of-day seam. OverworldState:timeOfDay() is an
+-- eternal "DAY" until a mod answers here; answering it hands the period to
+-- the map.palette hook (ctx.tod) and music.select, so a palette or music
+-- pack keyed to night works with this mod's clock for free. next() first: a
+-- mod loaded before this one that already moved the time keeps its answer.
+mod.hooks:wrap("world.tod", function(next, tod, ctx)
+  local out = next(tod, ctx)
+  if out ~= tod then return out end
+  return DayNight.tod()
+end)
+
+-- ------- OverworldStadium integration (from STADIUM_OVERWORLD_MODELS)
+-- Enables animated 3D Pokemon for roamers in both Gen1 and Gen2
+local function loadLocal(rel, arg)
+  local source, readErr = mod:read(rel)
+  if not source then return nil, ("missing %s: %s"):format(rel, tostring(readErr)) end
+  local chunk, err = load(source, "@" .. mod.path .. "/" .. rel)
+  if not chunk then return nil, ("%s did not compile: %s"):format(rel, tostring(err)) end
+  return chunk(arg)
+end
+
+local function installOverworldStadium()
+  local Config, configErr = loadLocal("lib/OverworldStadiumConfig.lua", V)
+  if not Config then
+    mod.log:warn("OverworldStadiumConfig not loaded: %s", tostring(configErr))
+    return false
+  end
+
+  local PokemonHeights, heightsErr = loadLocal("lib/PokemonHeights.lua", V)
+  if not PokemonHeights then
+    mod.log:warn("PokemonHeights not loaded: %s", tostring(heightsErr))
+    return false
+  end
+
+  local PokemonLocomotion, locoErr = loadLocal("lib/PokemonLocomotion.lua", V)
+  if not PokemonLocomotion then
+    mod.log:warn("PokemonLocomotion not loaded: %s", tostring(locoErr))
+    return false
+  end
+
+  local StadiumRomMenu, menuErr = loadLocal("lib/StadiumRomMenu.lua", V)
+  if not StadiumRomMenu then
+    mod.log:warn("StadiumRomMenu not loaded: %s", tostring(menuErr))
+    return false
+  end
+
+  -- Install ROM menu options
+  local managerOptionsInstalled = StadiumRomMenu.installModManagerOptions(mod)
+  if not managerOptionsInstalled then
+    StadiumRomMenu.installOptionsHook(mod)
+  end
+
+  -- Create namespace for OverworldStadium
+  local OverworldV = {
+    mod = mod,
+    path = mod.path,
+  }
+  setmetatable(OverworldV, { __index = V })
+  function OverworldV.require(name)
+    if name == "OverworldStadiumConfig" then return Config end
+    if name == "PokemonHeights" then return PokemonHeights end
+    if name == "PokemonLocomotion" then return PokemonLocomotion end
+    return V.require(name)
+  end
+
+  local OverworldStadium, stadiumErr = loadLocal("lib/OverworldStadium.lua", OverworldV)
+  if not OverworldStadium then
+    mod.log:warn("OverworldStadium not loaded: %s", tostring(stadiumErr))
+    return false
+  end
+  V.OverworldStadium = OverworldStadium
+
+  -- Install VoxelScenePatch for overworld rendering
+  local VoxelScenePatch, patchErr = loadLocal("lib/VoxelScenePatch.lua", OverworldV)
+  if VoxelScenePatch then
+    local rendererInstalled, rendererErr = VoxelScenePatch.install(mod, V, OverworldV, OverworldStadium)
+    if rendererInstalled then
+      mod.log:info("Pokemon Stadium overworld renderer installed")
+    else
+      mod.log:warn("Stadium overworld renderer not installed: %s", tostring(rendererErr))
+    end
+  else
+    mod.log:warn("VoxelScenePatch not loaded: %s", tostring(patchErr))
+  end
+
+  -- Install battle animations
+  local BattleStadiumAnimations, animErr = loadLocal("lib/BattleStadiumAnimations.lua", OverworldV)
+  if BattleStadiumAnimations then
+    local battleAnimationsInstalled, battleAnimationsErr = BattleStadiumAnimations.install()
+    if battleAnimationsInstalled then
+      mod.log:info("Pokemon Stadium Stage 1 battle performances enabled")
+    else
+      mod.log:warn("Pokemon Stadium Stage 1 battle performances not installed: %s", tostring(battleAnimationsErr))
+    end
+  else
+    mod.log:warn("BattleStadiumAnimations not loaded: %s", tostring(animErr))
+  end
+
+  -- Install battle effects
+  local BattleStadiumEffects, effectsErr = loadLocal("lib/BattleStadiumEffects.lua", OverworldV)
+  if BattleStadiumEffects then
+    local battleEffectsInstalled, battleEffectsErr = BattleStadiumEffects.install()
+    if battleEffectsInstalled then
+      mod.log:info("Pokemon Stadium Phase 2 + Phase 3 + Phase 4 battle presentation enabled")
+    else
+      mod.log:warn("Pokemon Stadium Phase 2 + Phase 3 + Phase 4 battle presentation not installed: %s", tostring(battleEffectsErr))
+    end
+  else
+    mod.log:warn("BattleStadiumEffects not loaded: %s", tostring(effectsErr))
+  end
+
+  -- Install 3D battle effects
+  local BattleStadium3DFx, fxErr = loadLocal("lib/BattleStadium3DFx.lua", OverworldV)
+  if BattleStadium3DFx then
+    local battle3DInstalled, battle3DErr = BattleStadium3DFx.install()
+    if battle3DInstalled then
+      mod.log:info("Pokemon Stadium Phase 5 world-space battle effects enabled")
+    else
+      mod.log:warn("Pokemon Stadium Phase 5 world-space effects not installed: %s", tostring(battle3DErr))
+    end
+  else
+    mod.log:warn("BattleStadium3DFx not loaded: %s", tostring(fxErr))
+  end
+
+  -- StadiumBattleFX 2.1.7: authentic move FX, boss arenas, announcer, portraits.
+  -- The source tree lives under lib/StadiumBattleFX217/; this port adapts it to
+  -- Gold's live overworld battle compositor.  Without install() the Lua files
+  -- load but none of the battle hooks or ROM-derived caches ever start.
+  local StadiumBattleFXPort, portErr = loadLocal("lib/StadiumBattleFXPort.lua", OverworldV)
+  if StadiumBattleFXPort then
+    OverworldV.StadiumBattleFXPort = StadiumBattleFXPort
+    local portInstalled, portInstallErr = pcall(StadiumBattleFXPort.install)
+    if portInstalled and portInstallErr ~= false then
+      mod.log:info("StadiumBattleFX 2.1.7 Gold presentation layer installed")
+    else
+      mod.log:warn("StadiumBattleFX port not installed: %s", tostring(portInstallErr))
+    end
+
+    -- StadiumRomMenu.lua (loaded above with plain V, not OverworldV) reads
+    -- V.importStadium1 to decide whether an imported Pokemon Stadium (USA)
+    -- ROM should feed the FX/camera/arena asset caches below, or fall through
+    -- to the ordinary model-only importer. OverworldV inherits from V by
+    -- metatable for READS only, so setting OverworldV.StadiumBattleFXPort
+    -- above never becomes visible to StadiumRomMenu's closure over plain V.
+    -- Without this line, every Stadium 1 import silently skips
+    -- StadiumAssets / StadiumArenaAssets / StadiumTrainerPortraits / the
+    -- native camera+attachment cache -- it still builds .dsm models via
+    -- StadiumInstall, so nothing *looks* broken, it just never starts the
+    -- move FX, boss arenas, portraits or attack camera jobs.
+    V.importStadium1 = function(bytes, source)
+      return StadiumBattleFXPort.importStadium1(bytes)
+    end
+  else
+    mod.log:warn("StadiumBattleFXPort not loaded: %s", tostring(portErr))
+  end
+
+  -- Exports for companion mods
+  mod.exports.overworld = OverworldStadium
+  mod.exports.romMenu = StadiumRomMenu
+  mod.exports.tag = function(entity, speciesOrDex)
+    return OverworldStadium.tag(entity, speciesOrDex)
+  end
+  mod.exports.untag = function(entity)
+    return OverworldStadium.untag(entity)
+  end
+
+  return true
+end
+
+-- Patch engine's OptionRows to handle string values (fix for older engines)
+local okOptionRows, OptionRows = pcall(require, "src.ui.OptionRows")
+if okOptionRows and type(OptionRows) == "table" and OptionRows.draw then
+  local originalDraw = OptionRows.draw
+  OptionRows.draw = function(game, rows, index, scroll, bottomLabel, bottomRow)
+    -- Call original but intercept row.value handling
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.rectangle("fill", 0, 0, 160, 144)
+    local Font = require("src.render.Font")
+    local Theme = require("src.ui.Theme")
+    for slot = 1, OptionRows.VISIBLE do
+      local i = scroll + slot
+      local row = rows[i]
+      if not row then break end
+      Font.drawBox(0, (slot - 1) * 4, 20, 4)
+      love.graphics.setColor(0, 0, 0, 1)
+      Font.draw(row.label, 16, ((slot - 1) * 4 + 1) * 8)
+      -- FIX: Check if row.value is a function before calling it
+      local displayValue = ""
+      if row.value then
+        if type(row.value) == "function" then
+          displayValue = row.value(game)
+        else
+          displayValue = tostring(row.value)
+        end
+      end
+      Font.draw(displayValue, 24, ((slot - 1) * 4 + 2) * 8)
+      if i == index then
+        Font.drawCode(Theme.cursor, 8, ((slot - 1) * 4 + 1) * 8)
+      end
+    end
+    if scroll + OptionRows.VISIBLE < #rows then
+      Font.drawCode(Theme.moreArrow, 144, 128)
+    end
+    if bottomLabel then
+      love.graphics.setColor(0, 0, 0, 1)
+      Font.draw(bottomLabel, 16, 136)
+      if bottomRow and index == bottomRow then
+        Font.drawCode(Theme.cursor, 8, 136)
+      end
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+  end
+end
+
+pcall(installOverworldStadium)
+
+mod.exports.version = "1.15.0-mobile.snow.1"
+-- exposed so a companion mod can pin its own tiles' shapes or read the
+-- camera without reaching into this mod's file layout
+mod.exports.lib = V
+mod.exports.pipelines = { voxel = PIPE_VOXEL, tiltshift = PIPE_TILT }
+mod.exports.keys = V.KEYS
+
+-- Mark this mod as providing Dramatic Shape compatibility for mod.find()
+-- This allows gen1_true_3d_characters and other mods to find us via mod.find("DRAMATIC_SHAPE")
+mod.exports._dramaticShapeCompat = true
+
+-- Compatibility layer for gen1_true_3d_characters and other Dramatic Shape-dependent mods
+-- Ensure VoxelScene and related modules are properly exported for compatibility
+if VoxelScene then
+  V.VoxelScene = VoxelScene
+end
+if Voxel3D then
+  V.Voxel3D = Voxel3D
+end
+if Mat4 then
+  V.Mat4 = Mat4
+end
+if ShadowMap then
+  V.ShadowMap = ShadowMap
+end
+if SpriteBillboards then
+  V.SpriteBillboards = SpriteBillboards
+end
+
+-- Ensure the library modules are accessible through V.require for compatibility
+-- This allows mods like gen1_true_3d_characters to find the modules they expect
+local originalRequire = V.require
+V.require = function(name)
+  -- First try the original require
+  local result = originalRequire(name)
+  if result then return result end
+  
+  -- Fallback compatibility mappings for common Dramatic Shape module names
+  local compatMap = {
+    VoxelScene = VoxelScene,
+    Voxel3D = Voxel3D,
+    Mat4 = Mat4,
+    ShadowMap = ShadowMap,
+    SpriteBillboards = SpriteBillboards,
+  }
+  
+  if compatMap[name] then
+    return compatMap[name]
+  end
+  
+  return nil
+end

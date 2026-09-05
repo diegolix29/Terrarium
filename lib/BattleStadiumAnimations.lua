@@ -68,6 +68,17 @@ local function findUpvalue(fn, wanted)
 end
 
 local function installSessionGetter(Stadium)
+  -- Prefer the direct accessor (see lib/Stadium.lua's Stadium.session) --
+  -- it works regardless of whether debug.getupvalue is available in this
+  -- sandbox. Fall back to the upvalue-introspection trick only for older
+  -- Stadium.lua builds that predate the accessor.
+  if type(Stadium.session) == "function" then
+    local ok, probe = pcall(Stadium.session)
+    if ok then
+      return function() return Stadium.session() end
+    end
+  end
+
   -- Stadium.update is the best candidate on current Dramatic Shape.  Fall back
   -- to any public function known to close over the same local session.
   for _, fn in ipairs({ Stadium.update, Stadium.animOf, Stadium.showing,
@@ -334,7 +345,7 @@ function M.install()
           end
         end
       end
-      return table.unpack(out)
+      return unpack(out)
     end
     Stadium._stage1GoldUpdateWrapped = true
   end
@@ -351,14 +362,14 @@ function M.install()
       local innerMove = BattleState.performMove
       BattleState.performMove = function(self, user, target, moveInst, isCalled)
         local out = { innerMove(self, user, target, moveInst, isCalled) }
-        if not animationsEnabled() then return table.unpack(out) end
+        if not animationsEnabled() then return unpack(out) end
         local session = getSession()
         local side = sideOf(self, user)
         local mon = session and side and session[side]
         if mon and mon.rig and mon.state ~= "attack" and mon.state ~= "faint" then
           requestAttack(mon, moveIndex(self, moveInst))
         end
-        return table.unpack(out)
+        return unpack(out)
       end
       BattleState._stadiumStage1Move = true
     end
@@ -411,7 +422,7 @@ function M.install()
             end
           end
         end
-        return table.unpack(out)
+        return unpack(out)
       end
       Stadium._stage1UpdateWrapped = true
     end

@@ -456,7 +456,8 @@ local function wildFloor(ow)
   if not (encDef and encDef.grass and (encDef.grass.rate or 0) > 0) then
     return nil
   end
-  local indoor = Game.data.field.indoorEncounters
+  local field = Game.data and Game.data.field
+  local indoor = field and field.indoorEncounters
   local isIndoor = indoor and map.def.index and indoor.firstIndoorMap
                    and map.def.index >= indoor.firstIndoorMap
                    and map.def.tileset ~= indoor.excludedTileset

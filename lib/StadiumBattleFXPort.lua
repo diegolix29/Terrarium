@@ -545,6 +545,27 @@ function M.importStadium1(bytes)
   return true
 end
 
+function M.importStadium2(bytes)
+  -- StadiumBattleFXPort is primarily designed for Stadium 1 effects integration
+  -- into the Stadium 2 battle system. For Stadium 2 ROM imports, we primarily
+  -- need to ensure the FX caches are aware of the Stadium 2 data and can
+  -- reference it for enhanced effects where applicable.
+  
+  -- Validate that we have Stadium 2 data
+  if not bytes or #bytes < 0x1000 then
+    return false, "Invalid Stadium 2 ROM data"
+  end
+
+  -- Stadium 2 uses the existing Stadium2Install for model building, so this
+  -- function serves as a hook to ensure FX layer compatibility when Stadium 2
+  -- is imported through the picker. Rebuild caches to ensure FX system is aware
+  -- of the new Stadium 2 data.
+  M.rebuildCaches()
+
+  log("info", "StadiumBattleFXPort notified of Stadium 2 ROM import")
+  return true
+end
+
 function M.announcerImportStatus()
   if Announcer and type(Announcer.cacheStatus) == "function" then
     local ok, value = pcall(Announcer.cacheStatus)

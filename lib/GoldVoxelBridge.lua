@@ -55,41 +55,71 @@ local Bridge = {
   lastTickTime = nil,
 }
 
--- Minimal Dramatic-Shape module namespace.  Deliberately does not execute the
--- Gen-1 pipeline/input installer from the original Dramaless package.
-local V = { mod = mod, path = mod.path }
-local modules, dataFiles = {}, {}
-
-local function chunkFor(rel)
-  local source, readErr = mod:read(rel)
-  if type(source) ~= "string" then
-    error(("STADIUM2_OVERWORLD_MODELS: missing %s: %s")
-      :format(rel, tostring(readErr)), 0)
-  end
-  if source:sub(1, 3) == "\239\187\191" then source = source:sub(4) end
-  local loadcode = loadstring or load
-  local chunk, err = loadcode(source, "@" .. mod.path .. "/" .. rel)
-  if not chunk then
-    error(("STADIUM2_OVERWORLD_MODELS: %s did not compile: %s")
-      :format(rel, tostring(err)), 0)
-  end
-  return chunk
+-- Minimal Dramatic-Shape module namespace.
+--
+-- CRITICAL: `mod` above is whatever this chunk was called with. When this
+-- file is loaded the normal way -- gen2/main.lua's V.require("GoldVoxelBridge")
+-- -- that argument is not the raw engine mod object, it is the mod's
+-- shared V namespace (main.lua names its own copy "V"; every sibling file
+-- receives it as its sole `...` argument, sometimes locally called "mod"
+-- by convention). That shared V already has a working, cache-backed
+-- `require`/`data`, and -- crucially -- it is the SAME namespace
+-- gen2/main.lua used to load and .install() FirstPerson, FreeMove and
+-- CamControl.
+--
+-- Building a brand-new `{ mod = mod, path = mod.path }` table here (the
+-- old behaviour) forked that namespace: this bridge would load its own
+-- private VoxelState/FirstPerson/CamControl instances and drive THOSE
+-- every frame (Voxel.setLevel, Voxel.update, FirstPerson.update below),
+-- while the instances gen2/main.lua wired real input into sat untouched.
+-- That is why free-look and free-move silently did nothing in Gen 2:
+-- the camera state the renderer read was never the camera state the
+-- mouse/stick/touch handlers were writing to.
+--
+-- Reuse the shared namespace when we were handed one; only fall back to
+-- a private namespace (with the real mod object) when loaded standalone.
+local V
+if type(mod) == "table" and type(mod.require) == "function" then
+  V = mod
+  mod = V.mod
+else
+  V = { mod = mod, path = mod.path }
 end
 
-function V.require(name)
-  local hit = modules[name]
-  if hit ~= nil then return hit end
-  local value = chunkFor("lib/" .. name .. ".lua")(V)
-  modules[name] = value
-  return value
-end
+if type(V.require) ~= "function" then
+  local modules, dataFiles = {}, {}
 
-function V.data(name)
-  local hit = dataFiles[name]
-  if hit ~= nil then return hit end
-  local value = chunkFor("data/" .. name .. ".lua")(V)
-  dataFiles[name] = value
-  return value
+  local function chunkFor(rel)
+    local source, readErr = mod:read(rel)
+    if type(source) ~= "string" then
+      error(("STADIUM2_OVERWORLD_MODELS: missing %s: %s")
+        :format(rel, tostring(readErr)), 0)
+    end
+    if source:sub(1, 3) == "\239\187\191" then source = source:sub(4) end
+    local loadcode = loadstring or load
+    local chunk, err = loadcode(source, "@" .. mod.path .. "/" .. rel)
+    if not chunk then
+      error(("STADIUM2_OVERWORLD_MODELS: %s did not compile: %s")
+        :format(rel, tostring(err)), 0)
+    end
+    return chunk
+  end
+
+  function V.require(name)
+    local hit = modules[name]
+    if hit ~= nil then return hit end
+    local value = chunkFor("lib/" .. name .. ".lua")(V)
+    modules[name] = value
+    return value
+  end
+
+  function V.data(name)
+    local hit = dataFiles[name]
+    if hit ~= nil then return hit end
+    local value = chunkFor("data/" .. name .. ".lua")(V)
+    dataFiles[name] = value
+    return value
+  end
 end
 
 Bridge.lib = V

@@ -27,10 +27,24 @@ local function world3DEnabled()
     local ok, enabled = pcall(VoxelBridge.voxelModeEnabled)
     if ok then return enabled == true end
   end
+  -- Check actual pipeline level instead of mod option
+  local okPipelines, Pipelines = pcall(require, "src.render.Pipelines")
+  if okPipelines and Pipelines and type(Pipelines.level) == "function" then
+    local level = Pipelines.level("stadium2_gold_voxel")
+    if level ~= nil then
+      local enabled = tonumber(level) > 0
+      return enabled
+    end
+  end
+  -- Fallback to mod option
   local options = mod and mod.options
   if options and type(options.get) == "function" then
     local ok, value = pcall(options.get, options, "voxel3d")
-    if ok and value ~= nil then return value ~= false end
+    if ok and value ~= nil then
+      local numValue = tonumber(value)
+      if numValue ~= nil then return numValue > 0 end
+      return value ~= false
+    end
   end
   return true
 end
@@ -401,6 +415,52 @@ local function drawGoldBattleFrame(shot, ctx, game)
   return true
 end
 
+-- Draw-local native-2D guard. Gen1Recomp permits one active drawWorld pipeline,
+-- and optional companion mods (notably Character Selector / voxel providers)
+-- may still have theirs enabled even when THIS mod's 3D VOXEL WORLD switch is
+-- OFF. World:draw() would otherwise invoke that external pipeline and the user
+-- would still see 3D. Temporarily zero every active world pipeline only for the
+-- native redraw, then restore the exact live levels without syncing options.
+-- This never rewrites another mod's saved preference.
+local function withNativeWorldPipelinesSuspended(body)
+  local okP, Pipelines = pcall(require, "src.render.Pipelines")
+  if not (okP and type(Pipelines) == "table"
+      and type(Pipelines.list) == "function"
+      and type(Pipelines.level) == "function"
+      and type(Pipelines.setLevel) == "function") then
+    return pcall(body)
+  end
+
+  local saved = {}
+  local okList, entries = pcall(Pipelines.list)
+  if okList and type(entries) == "table" then
+    for _, entry in ipairs(entries) do
+      local id = entry and entry.id
+      local def = entry and entry.def
+      if id and type(def) == "table" and type(def.drawWorld) == "function" then
+        local okLevel, level = pcall(Pipelines.level, id)
+        level = okLevel and tonumber(level) or 0
+        if level and level > 0 then
+          saved[#saved + 1] = { id = id, level = level }
+          pcall(Pipelines.setLevel, id, 0)
+        end
+      end
+    end
+  end
+
+  local okBody, a, b, c = pcall(body)
+  -- Restore after the body even if drawing throws. There can only be one live
+  -- world pipeline under the engine contract, but iterate in reverse so this
+  -- remains correct if an older host allowed more than one level to linger.
+  for i = #saved, 1, -1 do
+    pcall(Pipelines.setLevel, saved[i].id, saved[i].level)
+  end
+  if #saved > 0 then
+    Bridge.native2DPipelineSuppressions = (Bridge.native2DPipelineSuppressions or 0) + 1
+  end
+  return okBody, a, b, c
+end
+
 local function composeCore(nextFn, host, ctx)
   Bridge.frames = Bridge.frames + 1
 
@@ -430,6 +490,27 @@ local function composeCore(nextFn, host, ctx)
       end
       Bridge.battleFallbackFrames = Bridge.battleFallbackFrames + 1
     end
+  end
+
+  -- Battle (or any other non-world top state) with no staged 3D shot:
+  -- hand off to Gold's own native draw completely, and touch nothing
+  -- else in this function. The code below this point (world3DEnabled,
+  -- PipelineBridge.consumeRenderedFrame, resolveWorld+renderFrame) was
+  -- written to keep the 3D voxel OVERWORLD compositing even while
+  -- worldActive is false, on the theory that a battle wants the live
+  -- world visible behind it -- but with no staged shot to actually draw
+  -- (see OverworldBattle.begin's renderer guard above this file), that
+  -- compositing draws the raw, un-letterboxed voxel/native canvas at
+  -- the overworld's own size and position instead of the battle's,
+  -- which is the "small square in the corner" bug: the real battle
+  -- frame drawn tiny and unscaled, with an unrelated 3D attempt
+  -- clobbering the rest of the screen. `pauseBackdrop` already folds
+  -- into worldActive above for the one case that legitimately wants the
+  -- live world behind a Gold page, so this only short-circuits real
+  -- battles/menus/other non-world states.
+  if not worldActive then
+    Bridge.passthroughFrames = Bridge.passthroughFrames + 1
+    return nextFn(host, ctx)
   end
 
   -- v0.4.16: native 2D is a first-class presentation mode, not "voxel
@@ -477,6 +558,7 @@ local function composeCore(nextFn, host, ctx)
   end
 
 
+
   -- Current desktop Gold renders the voxel world earlier through the official
   -- render_pipelines drawWorld seam. In that case sceneCanvas already contains
   -- the 3D world plus Gold's normal overlay stack; rendering VoxelScene again
@@ -499,7 +581,21 @@ local function composeCore(nextFn, host, ctx)
 
   -- Game2 marks only its live overworld branch worldActive=true.  Opaque/full-
   -- screen Gold pages are already excluded by Game2 before this hook runs.
-  if not worldActive then
+  -- For Gen 2, we skip the worldActive check when voxel rendering is enabled
+  -- so that voxels continue to render even in the options menu.
+  local isGold = tonumber(ctx.generation) == 2
+  local pipelineLevel = 0
+  local okPipelines, Pipelines = pcall(require, "src.render.Pipelines")
+  if okPipelines and Pipelines and type(Pipelines.level) == "function" then
+    local ok, level = pcall(Pipelines.level, "stadium2_gold_voxel")
+    if ok and level ~= nil then
+      pipelineLevel = tonumber(level) or 0
+    end
+  end
+
+
+  -- Only skip if not Gen 2 OR if voxel rendering is disabled
+  if not worldActive and (not isGold or pipelineLevel == 0) then
     Bridge.passthroughFrames = Bridge.passthroughFrames + 1
     return nextFn(host, ctx)
   end
@@ -644,7 +740,10 @@ local function compose(nextFn, host, ctx)
   return composeCore(nextFn, host, ctx)
 end
 
-function Bridge.install()
+function Bridge.install(modArg, voxelBridgeArg, pipelineBridgeArg)
+  mod = modArg or mod
+  VoxelBridge = voxelBridgeArg or VoxelBridge
+  PipelineBridge = pipelineBridgeArg or PipelineBridge
   if Bridge.installed then return true end
   if not (mod.hooks and type(mod.hooks.wrap) == "function") then
     return false, "mod.hooks:wrap is unavailable"

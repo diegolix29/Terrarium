@@ -240,6 +240,19 @@ function StadiumRomPick.import(game)
 
   local ok, beginErr = StadiumInstall.beginFrom(bytes, path)
   if not ok then return fail(tostring(beginErr)) end
+
+  -- This row only ever builds the Gen-1/151-species pack (see header: "the
+  -- same 151 files"), so a successful build here IS a Stadium 1 (US) import.
+  -- StadiumInstall only feeds the 3D player models; it never told
+  -- StadiumBattleFXPort about the ROM, so move FX, boss arenas, trainer
+  -- portraits and the attack camera stayed off even after a clean import.
+  -- Desktop has no equivalent of StadiumRomMenu's Android SAF hookup, so it
+  -- has to happen here.
+  local okPort, StadiumBattleFXPort = pcall(V.require, "StadiumBattleFXPort")
+  if okPort and StadiumBattleFXPort and type(StadiumBattleFXPort.importStadium1) == "function" then
+    pcall(StadiumBattleFXPort.importStadium1, bytes)
+  end
+
   if game and game.stack then
     game.stack:push(StadiumScreen.new(game, true))
   end
@@ -313,6 +326,11 @@ function StadiumRomPick.poll(game)
   elseif not started then
     StadiumInstall.status.state = "failed"
     StadiumInstall.status.error = tostring(err)
+  else
+    local okPort, StadiumBattleFXPort = pcall(V.require, "StadiumBattleFXPort")
+    if okPort and StadiumBattleFXPort and type(StadiumBattleFXPort.importStadium1) == "function" then
+      pcall(StadiumBattleFXPort.importStadium1, bytes)
+    end
   end
   if okScreen and StadiumScreen and game and game.stack
       and type(StadiumScreen.new) == "function" then

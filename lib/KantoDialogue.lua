@@ -413,6 +413,8 @@ function Session:patchEnvironment()
   -- deliberately small command surface: dialogue/control/clone-only flag
   -- operations use the engine implementation; everything else becomes a
   -- harmless no-op so a text_asm cannot move/warp/battle/award the real game.
+  -- Gen 2 compatibility: use script.command hook instead of Commands.resolve
+  -- since Gen 2 uses bytecode VM instead of Lua command lists
   local okCommands, Commands = pcall(require, "src.script.Commands")
   if okCommands and type(Commands) == "table" and type(Commands.resolve) == "function" then
     local originalResolve = Commands.resolve
@@ -432,6 +434,23 @@ function Session:patchEnvironment()
       return function() M.suppressedCommands = M.suppressedCommands + 1; return nil end,
         { foreground = false }
     end, saved)
+  else
+    -- Gen 2: use script.command hook for command suppression
+    local okScript, Script = pcall(require, "src.script.Script")
+    if okScript and Script and Script.hooks then
+      Script.hooks:wrap("command", function(next, ctx, command, args)
+        local cmdName = tostring(command)
+        if SAFE_COMMAND[cmdName] or cmdName:match("^check_") or cmdName:match("^jump") then
+          return next(ctx, command, args)
+        end
+        if HALT_COMMAND[cmdName] then
+          M.suppressedCommands = M.suppressedCommands + 1
+          return nil -- veto the command
+        end
+        M.suppressedCommands = M.suppressedCommands + 1
+        return nil -- suppress the command
+      end)
+    end
   end
 
   return saved

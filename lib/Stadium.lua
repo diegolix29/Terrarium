@@ -331,6 +331,20 @@ end
 
 Stadium._onField = onField
 
+-- Gen 2 visibility check - Gold's battle structure is different from Gen 1
+local function gen2SideVisible(screen, side, battler)
+  if not (screen and battler) then return false end
+  local hidden = screen.picHidden
+  if type(hidden) == "table" and hidden[side] then return false end
+  if side == "player" then
+    -- The opening still belongs to Gold's trainer back-pic.  The model takes
+    -- over when SendOutPlayerMon has actually put the party mon on the field.
+    if screen.showPlayerTrainer then return false end
+    if screen.tutorial then return false end
+  end
+  return true
+end
+
 -- Whether the 3D model is standing in for this side's pic this frame. The
 -- one question OverworldBattle asks, and the answer that decides whether a
 -- billboard texture gets rendered for that side at all.
@@ -392,11 +406,25 @@ function Stadium.update(dt, battle, groundY)
   session.groundY = groundY or session.groundY or 0
   if not battle then return end
 
+  local mod = V and V.mod
+  if mod and mod.log then
+    mod.log:info("Stadium.update: battle has player=%s, enemy=%s",
+      tostring(battle.player ~= nil), tostring(battle.enemy ~= nil))
+  end
+
   local arena = session.arena
   for _, side in ipairs({ "enemy", "player" }) do
     local mon = session[side]
     local battler = side == "player" and battle.player or battle.enemy
     local dex = nil
+
+    if mod and mod.log then
+      mod.log:info("Stadium.update: side=%s, battler.mon=%s, battler.sprite=%s, battler.mon.species=%s",
+        side,
+        tostring(battler and battler.mon ~= nil),
+        tostring(battler and battler.sprite ~= nil),
+        battler and battler.mon and tostring(battler.mon.species) or "nil")
+    end
     if battler and not showingTrainer(battle, side) then
       -- For player side during intro, use the player's selected Stadium model
       if side == "player" and battle.phase == "intro" then
@@ -589,6 +617,67 @@ function Stadium.update(dt, battle, groundY)
         end
       else
         mon.model_matrix = nil
+      end
+    end
+  end
+  Stadium.debug(dt)
+end
+
+-- Gen 2-specific update function for Gold/Crystal battles
+-- Current Gold's battle screen is src.ui.gen2.BattleState, whose `battle`
+-- field is the Gen-2 Battle object itself.  That object exposes the active
+-- party mons directly (`battle.player` / `battle.enemy`) rather than the
+-- Gen-1 BattleState battler wrappers this module historically follows.
+function Stadium.updateGen2(dt, screen, groundY)
+  if not session then return end
+  session.groundY = groundY or session.groundY or 0
+  local battle = screen and screen.battle
+  if not battle then return end
+
+  local mod = V and V.mod
+  if mod and mod.log then
+    mod.log:info("Stadium.updateGen2: battle has player=%s, enemy=%s",
+      tostring(battle.player ~= nil), tostring(battle.enemy ~= nil))
+  end
+
+  local arena = session.arena
+  for _, side in ipairs({ "enemy", "player" }) do
+    local mon = session[side]
+    local battler = battle[side]  -- Gen 2: direct access to battle.player / battle.enemy
+    local dex = dexOf(battler and battler.species)
+
+    if mod and mod.log then
+      mod.log:info("Stadium.updateGen2: side=%s, battler=%s, battler.species=%s, dex=%s",
+        side,
+        tostring(battler ~= nil),
+        battler and tostring(battler.species) or "nil",
+        tostring(dex))
+    end
+
+    if session.at[side] ~= battler then
+      session.at[side] = battler
+      if mon then mon.grow, mon.grewOwn = nil, nil end
+      if mon and mon.rig and mon.state == "faint" then mon:play("idle") end
+    end
+
+    mon:setSpecies(dex, true)
+    if mon.species then StadiumPack.keep(mon.species) end
+
+    mon.visible = (mon.rig ~= nil) and gen2SideVisible(screen, side, battler)
+    mon.model_matrix = nil
+    if mon.rig then
+      mon:update(dt or 0)
+      if mon.visible and arena then
+        local cell = arena[side]
+        local other = arena[side == "player" and "enemy" or "player"]
+        if cell and other then
+          Stadium.guard(side, mon, "gen2-build", function()
+            mon.model_matrix = mon:matrix(cell[1], session.groundY, cell[2],
+                                          other[1] - cell[1],
+                                          other[2] - cell[2])
+            mon:build()
+          end)
+        end
       end
     end
   end
@@ -906,6 +995,21 @@ function Stadium.invalidate()
   -- the discs are a mesh and a texture like anything else, and a graphics
   -- context that went away took them with it
   pcall(function() V.require("StadiumStage").invalidate() end)
+end
+
+-- Direct accessor for the live staged-fight session, or nil when none is
+-- running. lib/BattleStadiumAnimations.lua previously had no legitimate
+-- way to read this private local other than debug.getupvalue introspection
+-- into Stadium.update/animOf/etc (see installSessionGetter there) -- which
+-- silently returns nothing wherever debug.getupvalue itself is unavailable
+-- or restricted (this mod's own sandbox already strips other stdlib
+-- pieces such as os.getenv and love.filesystem.read, so debug access being
+-- similarly unavailable is a real possibility, not a hypothetical one).
+-- That silent failure is exactly what "Stadium Stage 1 battle performances
+-- not installed: could not access live Dramatic Shape Stadium session"
+-- reports. A plain accessor sidesteps the introspection question entirely.
+function Stadium.session()
+  return session
 end
 
 return Stadium

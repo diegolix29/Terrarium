@@ -13,13 +13,10 @@ if second == nil and type(first) == "table" and first.mod then
 else
   mod, VoxelBridge = first, second
 end
-
 local Bridge = {
   id = "stadium2_gold_voxel",
-  registered = false,
-  runtimeInstalled = false,
+  installed = false,
   runtimeActive = false,
-  game = nil,
   frames = 0,
   renderedFrames = 0,
   fallbackFrames = 0,
@@ -30,16 +27,36 @@ local Bridge = {
   selectorDetected = false,
 }
 
+local function pipelineModule()
+  local ok, Pipelines = pcall(require, "src.render.Pipelines")
+  if ok and type(Pipelines) == "table" then return Pipelines end
+  return nil
+end
+
 local function optionOn()
   if VoxelBridge and type(VoxelBridge.voxelModeEnabled) == "function" then
     local ok, yes = pcall(VoxelBridge.voxelModeEnabled)
     if ok then return yes and true or false end
   end
+  -- Check actual pipeline level instead of mod option
+  local Pipelines = pipelineModule()
+  if Pipelines and type(Pipelines.get) == "function" then
+    local def = Pipelines.get(Bridge.id)
+    if def and def.level ~= nil then
+      return def.level > 0
+    end
+  end
+  -- Fallback to mod option
   local opts = mod and mod.options
   if not (opts and type(opts.get) == "function") then return true end
   local ok, value = pcall(opts.get, opts, "voxel3d")
   if not ok or value == nil then return true end
-  return not (value == false or value == 0 or value == "0"
+  -- For 8-level system, OFF (0) is off, everything else is on
+  local numValue = tonumber(value)
+  if numValue ~= nil then
+    return numValue > 0
+  end
+  return not (value == false or value == "0"
     or value == "false" or value == "off")
 end
 
@@ -108,15 +125,42 @@ local function available()
   -- Keep this gate intentionally cheap.  GoldVoxelBridge performs the actual
   -- depth/shader capability check and returns nil on unsupported hardware, at
   -- which point Pipelines falls back to native 2D for that frame.
-  return optionOn()
+  local result = optionOn()
+  if Bridge.frames == 0 and mod and mod.log then
+    mod.log:info("GoldPipelineBridge: available() called, returning %s", tostring(result))
+  end
+  return result
 end
 
 local function drawWorld(ctx)
   Bridge.frames = Bridge.frames + 1
   Bridge.renderedForCompose = false
+  
+  -- Log pipeline level check
+  local Pipelines = pipelineModule()
+  local currentLevel = 0
+  if Pipelines and Pipelines.get then
+    local def = Pipelines.get(Bridge.id)
+    if def then currentLevel = def.level or 0 end
+  end
+  
+  if Bridge.frames == 1 then
+    local mod = VoxelBridge and VoxelBridge.lib and VoxelBridge.lib.mod
+    if mod and mod.log then
+      mod.log:info("GoldPipelineBridge: drawWorld called, pipeline level=%d, optionOn=%s", currentLevel, tostring(optionOn()))
+    end
+  end
+  
   if not optionOn() then
     Bridge.lastStatus = "disabled"
     Bridge.fallbackFrames = Bridge.fallbackFrames + 1
+    -- Log first disabled frame
+    if Bridge.fallbackFrames == 1 then
+      local mod = VoxelBridge and VoxelBridge.lib and VoxelBridge.lib.mod
+      if mod and mod.log then
+        mod.log:info("GoldPipelineBridge: Voxel disabled (optionOn=false, level=%d)", currentLevel)
+      end
+    end
     return nil
   end
   if not (VoxelBridge and type(VoxelBridge.renderFrame) == "function") then
@@ -160,13 +204,14 @@ local function drawWorld(ctx)
   -- a second time; on older Gold the callback never runs and the compose bridge
   -- remains fully active.
   Bridge.renderedForCompose = true
+  -- Log first successful render
+  if Bridge.renderedFrames == 1 then
+    local mod = VoxelBridge and VoxelBridge.lib and VoxelBridge.lib.mod
+    if mod and mod.log then
+      mod.log:info("GoldPipelineBridge: First successful voxel render")
+    end
+  end
   return canvas
-end
-
-local function pipelineModule()
-  local ok, Pipelines = pcall(require, "src.render.Pipelines")
-  if ok and type(Pipelines) == "table" then return Pipelines end
-  return nil
 end
 
 local function selectorNeedsCompose(Pipelines)
@@ -220,7 +265,48 @@ function Bridge.sync(gameOrEvent)
   end
   Bridge.selectorComposeFallback = false
 
-  local wanted = optionOn() and 1 or 0
+  -- Get current pipeline level first to preserve user's choice
+  local currentLevel = 0
+  local okRead, current = pcall(Pipelines.level, Bridge.id)
+  if okRead and current ~= nil then
+    currentLevel = tonumber(current) or 0
+  end
+
+  -- For Gen 2, if the level is already set (non-zero), never reset it
+  -- The manual pipeline rows control the level directly, so we preserve it
+  -- This prevents sync() from resetting the level when options are opened
+  if currentLevel > 0 then
+    if mod and mod.log then
+      mod.log:info("GoldPipelineBridge.sync: preserving current level %d (Gen 2)", currentLevel)
+    end
+    Bridge.runtimeActive = true
+    Bridge.lastError = nil
+    return true, true
+  end
+
+  -- Only read from mod options if current level is 0 (for Gen 1 compatibility)
+  local wanted = currentLevel
+  if wanted == 0 then
+    local opts = mod and mod.options
+    if opts and type(opts.get) == "function" then
+      local ok, value = pcall(opts.get, opts, "voxel3d")
+      if ok and value ~= nil then
+        local numValue = tonumber(value)
+        if numValue ~= nil then
+          wanted = numValue
+        elseif value == false or value == "0" or value == "false" or value == "off" then
+          wanted = 0
+        else
+          wanted = 1
+        end
+      else
+        wanted = optionOn() and 1 or 0
+      end
+    else
+      wanted = optionOn() and 1 or 0
+    end
+  end
+
   local ok, level = pcall(Pipelines.setLevel, Bridge.id, wanted)
   if not ok then
     Bridge.runtimeActive = false
@@ -237,6 +323,79 @@ function Bridge.consumeRenderedFrame()
   return rendered
 end
 
+-- love.timer.getFrameCount is not part of every LOVE build this mod runs
+-- under (some hosts omit it entirely, which crashed every throttled log
+-- line below with "attempt to call field 'getFrameCount' (a nil value)"
+-- and took the whole pipeline down for the session). Fall back to a
+-- private counter incremented once per Bridge.update call when the real
+-- API is unavailable.
+local _frameCounter = 0
+local function frameTick()
+  if love and love.timer and type(love.timer.getFrameCount) == "function" then
+    local ok, n = pcall(love.timer.getFrameCount)
+    if ok and type(n) == "number" then return n end
+  end
+  _frameCounter = _frameCounter + 1
+  return _frameCounter
+end
+
+-- Update function called by the engine every frame
+-- This is where FirstPerson.update and FreeMove should be called for Gen 2
+function Bridge.update(dt, level)
+  -- Only update if voxel mode is active (level > 0)
+  if not level or level == 0 then return end
+
+  local mod = VoxelBridge and VoxelBridge.lib and VoxelBridge.lib.mod
+  local tick = frameTick()
+  if mod and mod.log and tick % 30 == 0 then
+    mod.log:info("GoldPipelineBridge.update: called, level=%d, dt=%.3f", level, dt)
+  end
+
+  if VoxelBridge and VoxelBridge.lib then
+    local FirstPerson = VoxelBridge.lib.require and VoxelBridge.lib.require("FirstPerson")
+    if FirstPerson and type(FirstPerson.update) == "function" then
+      local ok, err = pcall(FirstPerson.update, dt)
+      if mod and mod.log and tick % 30 == 0 then
+        mod.log:info("GoldPipelineBridge.update: FirstPerson.update called, ok=%s", tostring(ok))
+        if not ok then mod.log:warn("FirstPerson.update error: %s", tostring(err)) end
+      end
+    end
+
+    -- Call FreeMove.tick for free movement (Gen 2 doesn't use handleInput wrap)
+    local FreeMove = VoxelBridge.lib.require and VoxelBridge.lib.require("FreeMove")
+    if FreeMove and type(FreeMove.tick) == "function" then
+      -- Get the overworld state for FreeMove.tick
+      local okState, state = pcall(function()
+        local okG2, Game2 = pcall(require, "src.core.Game2")
+        if okG2 and Game2 then return Game2.overworld end
+        local Game = require("src.core.Game")
+        return Game.overworld
+      end)
+      if okState and state then
+        local okTick, errTick = pcall(FreeMove.tick, state)
+        if mod and mod.log and tick % 30 == 0 then
+          mod.log:info("GoldPipelineBridge.update: FreeMove.tick called, okState=%s, okTick=%s", tostring(okState), tostring(okTick))
+          if not okTick then mod.log:warn("FreeMove.tick error: %s", tostring(errTick)) end
+        end
+      else
+        if mod and mod.log and tick % 30 == 0 then
+          mod.log:warn("GoldPipelineBridge.update: Failed to get overworld state: %s", tostring(state))
+        end
+      end
+    else
+      if mod and mod.log and tick % 30 == 0 then
+        mod.log:warn("GoldPipelineBridge.update: FreeMove not available or tick not a function")
+      end
+    end
+
+    -- Step Stadium 2 ROM build (for Gen 2 Pokemon models)
+    local Stadium2Install = VoxelBridge.lib.require and VoxelBridge.lib.require("Stadium2Install")
+    if Stadium2Install and type(Stadium2Install.step) == "function" then
+      pcall(Stadium2Install.step)
+    end
+  end
+end
+
 function Bridge.install()
   if Bridge.registered then return true end
   local content = mod and mod.content
@@ -249,13 +408,24 @@ function Bridge.install()
 
   local ok, err = pcall(registry.register, registry, Bridge.id, {
     label = "STADIUM 2 VOXEL WORLD",
-    levels = { "OFF", "ON" },
+    levels = { "OFF", "FULL", "15", "35", "50", "75", "1ST", "3RD" },
     priority = 1100,
     available = available,
     drawWorld = drawWorld,
+    update = Bridge.update,
   })
   if not ok then return false, tostring(err) end
   Bridge.registered = true
+  if mod and mod.log then
+    mod.log:info("GoldPipelineBridge: Pipeline %s registered with 8 levels", Bridge.id)
+    -- Verify it's actually in the registry
+    local verifyOk, verifyDef = pcall(registry.get, registry, Bridge.id)
+    if verifyOk and verifyDef then
+      mod.log:info("GoldPipelineBridge: Verified pipeline in registry, levels=%d", #verifyDef.levels)
+    else
+      mod.log:warn("GoldPipelineBridge: Pipeline not found in registry after registration")
+    end
+  end
 
   if mod.events and type(mod.events.on) == "function" then
     pcall(mod.events.on, mod.events, "game.ready", function(ev)

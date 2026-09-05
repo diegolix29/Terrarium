@@ -1,10 +1,13 @@
 -- STADIUM 2 battles: finding the ROM, and building the models out of it once.
 --
 -- Similar to StadiumInstall but for Pokemon Stadium 2 (251 Pokemon)
+--
+-- Uses EngineCompat for sandbox-safe file access (same as VOXEL_ULTIMATE)
 
 local V = ...
 
 local Stadium2Install = {}
+local Compat = V.require("EngineCompat")
 
 -- Where a ROM is looked for, and where the built packs are kept.
 Stadium2Install.ROM_DIR = "baseroms"
@@ -39,7 +42,7 @@ local NAMED = {
 }
 
 local function fs()
-  return love and love.filesystem
+  return Compat.fs()
 end
 
 local function isFile(path)
@@ -88,6 +91,10 @@ function Stadium2Install.romHint()
   return base .. "/" .. Stadium2Install.ROM_DIR
 end
 
+function Stadium2Install.forget()
+  readyCache = nil
+end
+
 function Stadium2Install.romHintFile()
   return Stadium2Install.romHint() .. "/stadium2.z64"
 end
@@ -117,82 +124,54 @@ end
 
 function Stadium2Install.available()
   if Stadium2Install.ready() then return true end
-  return Stadium2Install.romPresent() and Stadium2Install.ready()
+  return Stadium2Install.romPresent()
 end
 
 -- Whether there is work to do: a ROM to build from, and no CURRENT set.
 function Stadium2Install.pending()
-  if not Stadium2Install.romPresent() then return false end
-  return not Stadium2Install.ready()
-end
-
--- Dummy step function for compatibility with StadiumScreen pattern
--- Stadium 2 builds all at once in beginFrom, so this always returns false
-function Stadium2Install.step()
-  return false
-end
-
--- Build Stadium 2 models
-function Stadium2Install.build(progressCallback)
-  local romPath = Stadium2Install.romPath()
-  if not romPath then
-    return false, "No Stadium 2 ROM found"
-  end
-
-  local f = fs()
-  if not f then return false, "Filesystem not available" end
-
-  -- Read ROM
-  local ok, romBytes = pcall(f.read, romPath)
-  if not ok or not romBytes then
-    return false, "Failed to read ROM file"
-  end
-
-  return Stadium2Install.beginFrom(romBytes, romPath, progressCallback)
+  if Stadium2Install.available() then return false end
+  return Stadium2Install.romPresent()
 end
 
 -- Begin build from ROM bytes (called by ROM picker)
-function Stadium2Install.beginFrom(bytes, label, progressCallback)
+function Stadium2Install.beginFrom(bytes, label)
   local f = fs()
   if not f then return false, "no filesystem" end
   if type(bytes) ~= "string" or #bytes == 0 then return false, "empty file" end
 
-  -- Lazy load dependencies
-  local StadiumRom2 = V.require("StadiumRom2")
   local StadiumBuild = V.require("StadiumBuild")
-  local StadiumFragment = V.require("StadiumFragment")
-  local Stadium2Palette = V.require("Stadium2Palette")
+  local StadiumRom2 = V.require("StadiumRom2")
 
   local rom, err = StadiumRom2.open(bytes)
-  if not rom then return false, tostring(err) end
-
-  -- Validate ROM has enough models
-  local models = rom:modelCount()
-  if not (models and models >= Stadium2Install.COUNT) then
-    return false, ("needs Pokemon Stadium 2 (US) - found %d models, need %d"):format(models or 0, Stadium2Install.COUNT)
+  if not rom then
+    return false, "Gold/Silver/Crystal needs a Pokemon Stadium 2 ROM: " .. tostring(err)
   end
 
-  -- Ensure cache directory exists
+  if not rom:isExpectedUS() then
+    V.mod.log:warn("stadium2: %s is md5 %s -- canonical Pokemon Stadium 2 US "
+                   .. "is md5 %s. The archive layout will still be validated "
+                   .. "before a build is started.",
+                   tostring(label or "the ROM"), tostring(rom:md5()),
+                   tostring(StadiumRom2.US_MD5))
+  end
+
+  local models = rom:modelCount()
+  if not (models and models >= Stadium2Install.COUNT) then
+    return false, "needs Pokemon Stadium 2 with the full 251-Pokemon model archive"
+  end
+
   pcall(f.createDirectory, Stadium2Install.DIR)
 
-  -- Create write callback for StadiumBuild.job
-  local function writePack(species, bytes, shinyBytes)
+  local function writePack(species, bytes)
     local packPath = ("%s/%03d.dsm"):format(Stadium2Install.DIR, species)
     local ok, err = f.write(packPath, bytes)
     if not ok then return false, tostring(err) end
-    if shinyBytes then
-      local shinyPath = ("%s/%03d_shiny.dsm"):format(Stadium2Install.DIR, species)
-      local okShiny, errShiny = f.write(shinyPath, shinyBytes)
-      if not okShiny then return false, tostring(errShiny) end
-    end
     return true
   end
 
-  -- Create job using StadiumBuild.job
   job = StadiumBuild.job(rom, writePack, Stadium2Install.COUNT)
   job.md5 = rom:md5()
-  job.rom = rom -- Keep rom reference for marker writing
-  
+  job.sourceGame = "Pokemon Stadium 2"
   status.state = "building"
   status.done = 0
   status.total = job.total
@@ -204,9 +183,7 @@ end
 
 -- One species. Returns true while there is more to do.
 function Stadium2Install.step()
-  if not job then
-    return false
-  end
+  if not job then return false end
   local more = job:step()
   status.done = job.done
   status.species = job.species
@@ -218,6 +195,11 @@ function Stadium2Install.step()
   end
   if not more then
     local f = fs()
+    -- `job.total > 0` as well as "nothing failed", because a job with nothing
+    -- IN it satisfies the second on its own -- and the marker this writes is
+    -- what makes a set count as installed, so it must never be written for a
+    -- build that did not happen. beginFrom refuses such a ROM outright; this
+    -- is the same rule stated where the consequence is.
     local wrote = #job.failed == 0 and job.total > 0
     if wrote and f then
       pcall(f.write, Stadium2Install.MARKER,
@@ -228,17 +210,30 @@ function Stadium2Install.step()
     end
     if not wrote then
       status.state = "failed"
+      -- EVERY species failing is not a bad build, it is the wrong file: the
+      -- offsets the reader walks are Pokemon Stadium's, so a different game
+      -- -- or the Game Boy cartridge the player already imported once, which
+      -- is the mistake a file picker invites -- misses on all 251 rather than
+      -- on a few. Worth telling apart, because "0 of 251 models were built"
+      -- reads as a broken mod and this reads as a wrong click.
       if #job.failed >= job.total then
-        status.error = "needs Pokemon Stadium 2 (US)"
+        status.error = "needs a compatible Pokemon Stadium 2 ROM / GS model+animation archives"
       else
-        status.error = string.format("%d of %d models could not be built", #job.failed, job.total)
+        status.error = ("%d of %d models could not be built")
+                       :format(#job.failed, job.total)
       end
     else
       status.state = "done"
     end
     job = nil
+    return false
   end
-  return more
+  return true
+end
+
+function Stadium2Install.cancel()
+  job = nil
+  status.state = "idle"
 end
 
 return Stadium2Install

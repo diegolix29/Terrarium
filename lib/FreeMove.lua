@@ -375,8 +375,19 @@ function FreeMove.install()
   if OverworldState.dramaticShapeFreeMoveHook then return end
   local inner = OverworldState.handleInput
 
+  local mod = rawget(_G, "mod")
+  if mod and mod.log then
+    mod.log:info("FreeMove.install: wrapping OverworldState:handleInput")
+  end
+
   function OverworldState:handleInput()
-    if not FirstPerson.driving() then
+    local driving = FirstPerson.driving()
+    local mod = rawget(_G, "mod")
+    if mod and mod.log and love.timer.getFrameCount() % 30 == 0 then
+      mod.log:info("FreeMove.handleInput: driving=%s", tostring(driving))
+    end
+
+    if not driving then
       if pos then
         -- stepping off the rung: back onto the grid, on the cell the
         -- free walk stood in
@@ -390,6 +401,9 @@ function FreeMove.install()
   end
 
   OverworldState.dramaticShapeFreeMoveHook = true
+  if mod and mod.log then
+    mod.log:info("FreeMove.install: hook installed")
+  end
 end
 
 return FreeMove

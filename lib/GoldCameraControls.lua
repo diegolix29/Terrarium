@@ -395,6 +395,11 @@ local function freeTick(world)
     p.stepFlip = not p.stepFlip
   end
 
+  -- Set bumpFrames for camera step animation (Gen 1 equivalent)
+  if world._stadiumFreeVisualMoving then
+    p.bumpFrames = 2
+  end
+
   p.px, p.py = world._stadiumFreeX - 8, world._stadiumFreeZ - 8
   Controls.freeFrames = Controls.freeFrames + 1
   Controls.lastWorldX, Controls.lastWorldZ = wx, wz
@@ -481,6 +486,11 @@ function Controls.install()
       return nil
     end
 
+    -- Clear heldDir before vanilla pollInput to prevent grid movement during free move
+    if world3DEnabled() and FirstPerson.driving() and freeInputEligible(self) then
+      self.heldDir = nil
+    end
+
     local out = vanillaPollInput(self, input)
 
     if not world3DEnabled() or not FirstPerson.driving() then
@@ -499,7 +509,7 @@ function Controls.install()
       -- stepBody wrapper below consumes this unquantised vector after vanilla
       -- has run all of its normal script/NPC/forced-tile logic.
       self._stadiumFreeIntentX, self._stadiumFreeIntentZ = wx, wz
-      self.heldDir = nil
+      self.heldDir = nil  -- Ensure heldDir stays nil for free movement
       Controls.lastDir = nil
       Controls.lastWorldX, Controls.lastWorldZ = wx, wz
       return out
@@ -563,6 +573,21 @@ function Controls.install()
         if dir then self.player.facing = dir end
       end
       return vanillaInteract(self, ...)
+    end
+  end
+
+  -- Hook Player:walkPhase to return walking phase during free movement
+  if type(Player.walkPhase) == "function" then
+    local vanillaWalkPhase = Player.walkPhase
+    function Player:walkPhase()
+      -- Check if this player is in a world with active free movement
+      local Game = require("src.core.Game")
+      local world = Game.overworld
+      if world and world._stadiumFreeVisualMoving and world.player == self then
+        local p = self.animClock % 16
+        return (p >= 4 and p < 12) and 1 or 0
+      end
+      return vanillaWalkPhase(self)
     end
   end
 

@@ -158,26 +158,74 @@ end
 -- inputs, both walk free, and both turn the cards; how far behind the head
 -- the eye ends up is ThirdPerson's business alone.
 function FirstPerson.engaged()
-  return Voxel.isFreeCam(Voxel.level) and Voxel3D.available()
+  local engaged = Voxel.isFreeCam()
+  local mod = rawget(_G, "mod")
+  if mod and mod.log then
+    mod.log:info("FirstPerson.engaged: level=%d, engaged=%s", Voxel.level or 0, tostring(engaged))
+  end
+  return engaged
 end
 
 -- Whether the overworld is what the player is looking at: nothing pushed
 -- over it, so the buttons are free-roam's. Shared with everything else in
 -- the mod that asks the same question of the same stack (CamControl's
 -- zooms above all), rather than each restating the pcall.
+--
+-- Gen 1 and Gen 2 model this differently:
+--
+--   Gen 1 (src.core.Game) pushes the overworld itself as the base of the
+--   stack -- "on top" means the stack's top IS that singleton, the
+--   Game.overworld == Game.stack:top() pattern used all over lib/ (see
+--   Horde.lua, QoL.lua, CityLife.lua, ...).
+--
+--   Gen 2 (src.core.Game2) never pushes the live world onto its stack at
+--   all -- an EMPTY stack IS the unobstructed world, and menus/dialogs are
+--   what get pushed on top of it. lib/GoldVoxelBridge.lua's goldFreeRoam()
+--   already relies on exactly this (it gates the F6 camera-mode hotkey on
+--   `stackTop(game) == nil`), so this mirrors that proven check rather
+--   than inventing a new one.
+--
+-- Both are read through the SAME src.core.Game facade rather than as two
+-- separate branches: src/mods/Gen2Compat.lua translates .overworld to the
+-- live Game2 instance's .world on a Gen 2 boot, so one stack-top check
+-- below covers both, given the "nil counts as on top" allowance Gen 2
+-- needs.
 function FirstPerson.onTop()
-  local ok, top, ow = pcall(function()
+  -- Both generations are read through the src.core.Game facade: on a Gen 1
+  -- boot this IS src/core/Game.lua's live singleton; on a Gen 2 boot
+  -- src/mods/Gen2Compat.lua answers the same shape from the live Game2
+  -- instance, translating .overworld to Game2.world at read time. There is
+  -- no mod-facing accessor for a raw Game2 instance, so this single check
+  -- is the only supported path -- a second Game2-only branch previously
+  -- lived here but read the Game2 CLASS table (require("src.core.Game2")),
+  -- which never carries a live .world, so it always answered false and
+  -- silently masked whatever the branch above got wrong.
+  local ok, result = pcall(function()
     local Game = require("src.core.Game")
-    return Game.stack and Game.stack:top(), Game.overworld
+    local ow = Game.overworld
+    if ow == nil then return false end -- no world booted yet
+    local top = Game.stack and Game.stack:top()
+    -- Gen 1 pushes the overworld as the stack's own base state, so
+    -- "on top" there means the top IS that singleton. Gen 2 never
+    -- pushes the world at all -- an EMPTY stack means the world is
+    -- what's showing. Accept either.
+    return top == nil or top == ow
   end)
-  return ok and top ~= nil and top == ow
+  return ok and result or false
 end
 
 -- Whether first person should be READING the player's inputs right now:
 -- engaged, with the overworld on top of the stack (a menu, a dialog or a
 -- battle above it owns the buttons, exactly as it does for grid walking).
 function FirstPerson.driving()
-  return FirstPerson.engaged() and FirstPerson.onTop()
+  local engaged = FirstPerson.engaged()
+  local onTop = FirstPerson.onTop()
+  local driving = engaged and onTop
+  local mod = rawget(_G, "mod")
+  if mod and mod.log and love.timer.getFrameCount() % 30 == 0 then
+    mod.log:info("FirstPerson.driving: engaged=%s, onTop=%s, driving=%s", tostring(engaged), tostring(onTop), tostring(driving))
+  end
+  return driving
 end
 
 -- The right stick's live X, for a camera that is not this one: while a
@@ -468,10 +516,16 @@ function FirstPerson.update(dt)
   -- entering the rung: the head starts looking the way the sprite faces,
   -- pitched gently down -- the reading pose of the flat game
   if engagedNow and not wasEngaged then
+    -- Gen 1 first (Game.overworld.player), Gen 2 second (Game2.world.player
+    -- -- see the GoldVoxelBridge/Gen2VoxelBridge player-pose code, which
+    -- reads the same .facing field off the Gen-2 Player entity).
     local ok, facing = pcall(function()
       local Game = require("src.core.Game")
-      return Game.overworld and Game.overworld.player
-             and Game.overworld.player.facing
+      local f = Game.overworld and Game.overworld.player
+                and Game.overworld.player.facing
+      if f ~= nil then return f end
+      local Game2 = require("src.core.Game2")
+      return Game2.world and Game2.world.player and Game2.world.player.facing
     end)
     FirstPerson.yaw = (ok and FACING_ANGLE[facing]) or 0
     FirstPerson.pitch = FirstPerson.PITCH_DEFAULT
@@ -710,6 +764,10 @@ function FirstPerson.install()
     function Game:gamepadaxis(joystick, axis, value)
       if axis == "rightx" then stick.x = value
       elseif axis == "righty" then stick.y = value end
+      local mod = rawget(_G, "mod")
+      if mod and mod.log and (axis == "rightx" or axis == "righty") and love.timer.getFrameCount() % 30 == 0 then
+        mod.log:info("FirstPerson.gamepadaxis: axis=%s, value=%.2f, driving=%s", axis, value, tostring(FirstPerson.driving()))
+      end
       return inner(self, joystick, axis, value)
     end
   end

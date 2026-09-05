@@ -290,8 +290,35 @@ local function writeSheet(mon, path)
   local sheet = bake(mon)
   if not sheet then return false end
   local dir = path:match("^(.*)/[^/]+$")
-  if dir then love.filesystem.createDirectory(dir) end
-  local ok, err = love.filesystem.write(path, sheet:encode("png"))
+  -- love.filesystem.createDirectory/write are called through pcall here:
+  -- the current engine sandbox has already been observed pulling raw
+  -- love.filesystem access out from under mods elsewhere (reads redirected
+  -- to mod:read / mod.storage -- see the engine's own Gen2Compat notice),
+  -- and an unguarded call failing here used to throw all the way up through
+  -- WildRoamers' own pcall(tick), which caught it, latched `failed = true`
+  -- for the rest of the session on the very FIRST bake attempt, and printed
+  -- only its own generic "wild roamers failed" line -- never this module's
+  -- actual reason, and never a retry. Catching it here instead means a
+  -- write failure is answered exactly the way a missing pixel-access driver
+  -- already is: `broken` is set, the real error is the one that gets
+  -- logged, and the rest of the mod (and the random encounters) carry on.
+  local okDir, dirErr = true, nil
+  if dir then okDir, dirErr = pcall(love.filesystem.createDirectory, dir) end
+  local ok, err = false, "could not create " .. tostring(dir)
+  if okDir then
+    -- pcall's own success flag is separate from love.filesystem.write's:
+    -- a version that RAISES on failure is caught by pWriteOk below, one
+    -- that returns (false, message) like normal is caught by `not ok`.
+    local pWriteOk, writeOk, writeErr = pcall(love.filesystem.write, path,
+                                              sheet:encode("png"))
+    if pWriteOk then
+      ok, err = writeOk, writeErr
+    else
+      ok, err = false, writeOk
+    end
+  else
+    err = dirErr
+  end
   if not ok then
     broken = true
     V.mod.log:warn("could not bake overworld art (%s) -- wild Pokemon stay "

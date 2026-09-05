@@ -538,17 +538,23 @@ function WildRoamers.install()
   -- AFTER the inner call rather than instead of it, so the turn-in-place,
   -- the bump cooldown and every other thing a refused step does still
   -- happen -- this only notices what was standing there.
-  local Player = require("src.world.Player")
-  if not Player.dramaticShapeRoamHook then
+  -- Gen 2 compatibility: use correct Player path
+  local okPlayer, Player = pcall(require, "src.world.Player")
+  if not okPlayer then
+    okPlayer, Player = pcall(require, "src.world.gen2.Player")
+  end
+  if okPlayer and Player and not Player.dramaticShapeRoamHook then
     local inner = Player.tryMove
-    function Player:tryMove(dir, map, entities)
-      local result, why = inner(self, dir, map, entities)
-      if result == "blocked" and why == "entity" then
-        pcall(WildRoamers.bumped, self, dir)
+    if type(inner) == "function" then
+      function Player:tryMove(dir, map, entities)
+        local result, why = inner(self, dir, map, entities)
+        if result == "blocked" and why == "entity" then
+          pcall(WildRoamers.bumped, self, dir)
+        end
+        return result, why
       end
-      return result, why
+      Player.dramaticShapeRoamHook = true
     end
-    Player.dramaticShapeRoamHook = true
   end
 
   -- TALKING TO ONE.  A roamer sits in ow.npcs so the engine's own update

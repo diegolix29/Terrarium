@@ -75,6 +75,12 @@ end
 -- the eye. Everything that used to ask isFirstPerson for those asks this.
 function Voxel.isFreeCam(level)
   level = level or Voxel.level
+  local mod = rawget(_G, "mod")
+  if mod and mod.log then
+    mod.log:info("Voxel.isFreeCam: Voxel.level=%s, passed level=%s, isFirstPerson=%s, isThirdPerson=%s",
+      tostring(Voxel.level), tostring(level),
+      tostring(Voxel.isFirstPerson(level)), tostring(Voxel.isThirdPerson(level)))
+  end
   return Voxel.isFirstPerson(level) or Voxel.isThirdPerson(level)
 end
 

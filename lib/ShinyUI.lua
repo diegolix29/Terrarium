@@ -103,7 +103,11 @@ end
 -- engine's own layout is untouched and a layout change upstream costs us
 -- the glyph's position and nothing else.
 function ShinyUI.installSummary()
+  -- Gen 2 compatibility: use correct SummaryMenu path
   local ok, SummaryMenu = pcall(require, "src.ui.SummaryMenu")
+  if not ok then
+    ok, SummaryMenu = pcall(require, "src.ui.gen2.SummaryMenu")
+  end
   if not ok or type(SummaryMenu) ~= "table" then return end
   if SummaryMenu.dramaticShapeShiny then return end
   local inner = SummaryMenu.draw

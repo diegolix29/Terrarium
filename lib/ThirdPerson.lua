@@ -205,7 +205,17 @@ end
 
 local function overworld()
   local ok, ow = pcall(function()
-    return require("src.core.Game").overworld
+    local Game1 = require("src.core.Game")
+    if Game1.overworld and Game1.overworld.map then return Game1.overworld end
+    -- Gen 2 (Gold/Silver): no Game.overworld singleton -- see
+    -- lib/FirstPerson.lua's onTop() for the same Gen 1/Gen 2 split, and
+    -- GoldComposeBridge.resolveWorld for the .world/.overworld field order
+    -- this mirrors. Without this, the boom's wall-clip shortening was
+    -- silently disabled on Gen 2 (falling back to "always fully extended"),
+    -- rather than actually broken -- lower priority than the free-look/
+    -- free-move fixes, but fixed here for parity with Gen 1.
+    local Game2 = require("src.core.Game2")
+    return Game2.world or Game2.overworld
   end)
   if not ok or not ow or not ow.map then return nil end
   return ow

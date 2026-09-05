@@ -114,6 +114,10 @@ function BattleScene.letterboxFov(fovGB, ph, s)
 end
 
 local function paletteFor(state, home)
+  -- Gold's CGB colours are already baked into its tileset atlas and the
+  -- standalone free-roam voxel bridge passes no SGB palette callback. Match
+  -- that path here instead of calling Gen-1-only state:paletteNameFor().
+  if V.game and V.game.world then return function() return nil end end
   return function(map)
     return PaletteFX.pal(require("src.core.Game").data,
                          state:paletteNameFor(map or home))
