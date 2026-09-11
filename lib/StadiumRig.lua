@@ -795,6 +795,8 @@ function StadiumRig:textures(aux)
   for _, part in ipairs(self.parts) do
     local prim = part.prim
     local index = prim.tex
+    
+    -- Handle texture animation
     if anim and prim.texAnim and prim.texAnim >= 0 and prim.texMap then
       local stream = anim.channels[prim.texAnim + 1]
       local n = stream and #stream or 0
@@ -806,7 +808,27 @@ function StadiumRig:textures(aux)
         if mapped then index = mapped end
       end
     end
-    part.texture = StadiumPack.image(model, index)
+    
+    -- Get texture with fallback handling
+    local texture = StadiumPack.image(model, index)
+    
+    -- If texture loading failed or returned nil, try fallback texture
+    if not texture and model.textures and #model.textures > 0 then
+      -- Try to use the fallback texture if it exists
+      local fallbackIndex = (model.texturesFallback or model.fallbackTexture)
+      if fallbackIndex and fallbackIndex >= 0 and fallbackIndex < #model.textures then
+        texture = StadiumPack.image(model, fallbackIndex)
+      end
+    end
+    
+    -- If still no texture, mark part for neutral material rendering
+    if not texture then
+      part.texture = nil
+      part.needsNeutralMaterial = true
+    else
+      part.texture = texture
+      part.needsNeutralMaterial = false
+    end
   end
 end
 
@@ -833,6 +855,8 @@ function StadiumRig:draw(matrix, pull, waterBody)
   Voxel3D.seams(false)
   Voxel3D.glass(false)
   local additive = nil
+  local neutralParts = nil
+  
   for _, part in ipairs(self.parts) do
     if part.prim.additive then
       -- held back to a second pass so the flames composite over the body
@@ -841,13 +865,62 @@ function StadiumRig:draw(matrix, pull, waterBody)
       additive[#additive + 1] = part
     elseif part.texture then
       Voxel3D.draw(part.mesh, part.texture, matrix, pull, nil, nil, waterBody)
+    elseif part.needsNeutralMaterial then
+      -- Handle parts with missing/invalid textures using neutral material
+      neutralParts = neutralParts or {}
+      neutralParts[#neutralParts + 1] = part
     end
   end
+  
+  -- Draw neutral material parts with a fallback color
+  if neutralParts then
+    for _, part in ipairs(neutralParts) do
+      -- Get species-specific color from material or fallback
+      local neutralColor = { 0.85, 0.85, 0.85, 1.0 } -- Default light gray
+      
+      -- Try to get color from primitive's material
+      if part.prim and part.prim.material and part.prim.material.fallbackColor then
+        neutralColor = part.prim.material.fallbackColor
+      -- Try to get color from model's fallback texture
+      elseif self.model and self.model.textures then
+        for _, tex in ipairs(self.model.textures) do
+          if tex.fallbackColor and type(tex.fallbackColor) == "table" then
+            local fc = tex.fallbackColor
+            neutralColor = { fc[1] / 255, fc[2] / 255, fc[3] / 255, 1.0 }
+            break
+          end
+        end
+      end
+      
+      -- Create a simple fallback texture if needed
+      if not part.neutralTexture or part.neutralColor ~= neutralColor then
+        if love and love.graphics and love.graphics.newImage then
+          local data = love.image.newImageData(2, 2)
+          for y = 0, 1 do
+            for x = 0, 1 do 
+              data:setPixel(x, y, neutralColor[1], neutralColor[2], neutralColor[3], neutralColor[4])
+            end
+          end
+          part.neutralTexture = love.graphics.newImage(data)
+          if part.neutralTexture and part.neutralTexture.setFilter then
+            pcall(part.neutralTexture.setFilter, part.neutralTexture, "nearest", "nearest")
+          end
+          part.neutralColor = neutralColor -- Cache to avoid recreating
+        end
+      end
+      if part.neutralTexture then
+        Voxel3D.draw(part.mesh, part.neutralTexture, matrix, pull, nil, nil, waterBody)
+      end
+    end
+  end
+  
   if additive then
     Voxel3D.blend("add")
     for _, part in ipairs(additive) do
       if part.texture then
         Voxel3D.draw(part.mesh, part.texture, matrix, pull, nil, nil, waterBody)
+      elseif part.needsNeutralMaterial and part.neutralTexture then
+        Voxel3D.draw(part.mesh, part.neutralTexture, matrix, pull, nil, nil, waterBody)
       end
     end
     Voxel3D.blend(nil)
@@ -864,6 +937,8 @@ function StadiumRig:caster(shadowMap, matrix)
   for _, part in ipairs(self.parts) do
     if part.texture and not part.prim.additive then
       shadowMap.draw(part.mesh, part.texture, matrix)
+    elseif part.needsNeutralMaterial and part.neutralTexture and not part.prim.additive then
+      shadowMap.draw(part.mesh, part.neutralTexture, matrix)
     end
   end
 end

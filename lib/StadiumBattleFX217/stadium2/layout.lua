@@ -22,6 +22,12 @@ Layout.SPECIES_META_START = 0x3FED000
 Layout.ROM_END = 0x4000000
 Layout.SPECIES_META_RECORD_SIZE = 0x10
 Layout.HISTORICAL_SPECIES_META_RECORDS = 253
+-- Model-table file indices the 251 cache does not keep. Decoder already
+-- understands substitute + Unown B-Z; egg / extra Pikachu are guesses
+-- from the debug model viewer (jrra / TCRF) until a dump confirms them.
+Layout.MODEL_RECORD_SUBSTITUTE = 253
+Layout.MODEL_RECORD_UNOWN_B = 254
+Layout.MODEL_RECORD_UNOWN_Z = 278
 Layout.CURRENT_DECOMP_COMMIT = "c0e10f23d90cc4f335b654711f13e53c2c07323b"
 Layout.CURRENT_DECOMP_REPOSITORY = "pret/pokestadiumgs"
 Layout.HISTORICAL_REPOSITORY = "pret/pokestadium"

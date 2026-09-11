@@ -43,6 +43,12 @@ local V = ...
 
 local TileShape = {}
 
+-- Gen 3 support
+local Gen3 = (function()
+  local ok, gen3 = pcall(V.require, "Gen3")
+  return ok and gen3 or nil
+end)()
+
 -- class -> height fallbacks, used when data/voxel_heights.lua is missing
 -- or omits a class. Same numbers the shipped file carries; a cell is 16x16.
 local FALLBACK_HEIGHTS = {
@@ -786,6 +792,42 @@ function TileShape.at(map, shapes, tile, tx, ty)
       -- is to say what a square IS, and how finely it is sculpted is not that.
       sub = (type(o.sub) == "table" and o.sub.res and o.sub.h) and o.sub or nil,
     }
+  end
+
+  -- GEN 3 ROUTING: detect Gen 3 maps and route through Gen3 module
+  if Gen3 and Gen3.mapIsGen3(map) then
+    local ctx = Gen3.forMap(map)
+    if ctx then
+      local cx = math.floor(tx / 2)
+      local cy = math.floor(ty / 2)
+      local metatile = ctx.metatileAt(cx, cy)
+      if metatile ~= nil then
+        local class = ctx.classAt(cx, cy, metatile)
+        if class then
+          -- Use Gen 3 context to determine shape
+          local gen3Tile = Gen3.tileId(metatile, tx, ty)
+          local base = shapes[gen3Tile] or shapes.classes[class]
+          if base then
+            return {
+              class = class,
+              h = base.h or 0,
+              art = base.art or "upright",
+              flat = base.flat or false,
+              authored = true,
+            }
+          end
+          -- Fallback: minimal shape based on class
+          local h = FALLBACK_HEIGHTS[class] or 0
+          return {
+            class = class,
+            h = h,
+            art = (class == "ground" or class == "water") and "flat" or "upright",
+            flat = (class == "ground" or class == "water"),
+            authored = true,
+          }
+        end
+      end
+    end
   end
 
   -- AND THE EDITOR'S TILE-ID PINS, which say what a DRAWING is rather than

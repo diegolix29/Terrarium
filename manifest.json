@@ -15,7 +15,21 @@
     "engine_internals"
   ],
   "affects_link": false,
-  "description": "A full 3D diorama overworld: extruded terrain, depth-buffered occlusion, voxel characters and a tilt-shift miniature pass -- and battles fought on the map itself, shot over the shoulder at the nearest clear ground with a slow parallax drift and a depth-of-field pass. Registers two render pipelines and claims hotkeys 3, 5, 6, 7, 8 and 9 -- 3 and 5 displace the engine's TILT and GBC FX keys, both still reachable on the OPTIONS menu. Presentational only: it changes what a battle is drawn over, never where anybody stands.",
+  "description": "A full 3D diorama overworld: extruded terrain, depth-buffered occlusion, voxel characters and a tilt-shift miniature pass -- and battles fought on the map itself, shot over the shoulder at the nearest clear ground with a slow parallax drift and a depth-of-field pass. Registers two render pipelines and claims hotkeys 3, 5, 6, 7, 8 and 9 -- 3 and 5 displace the engine's TILT and GBC FX keys, both still reachable on the OPTIONS menu. Presentational only: it changes what a battle is drawn over, never where anybody stands. Includes integrated Colosseum Overhaul functionality for Pokemon Colosseum battle environments and UI.",
   "assets_transforms": "transform_birds.lua",
-  "options": "options.lua"
+  "options": "options.lua",
+  "required_imports": [
+    {
+      "id": "pokemon_colosseum_usa",
+      "name": "Pokemon Colosseum (USA) Disc",
+      "description": "Pokemon Colosseum USA GC6E01 source for Colosseum Overhaul integration. This enables Colosseum battle environments, UI, Pokemon models, and audio. The launcher validates required imports before this mod runs.",
+      "file": "pokemon_colosseum_usa.iso",
+      "md5": [
+        "e3f389dc5662b9f941769e370195ec90",
+        "a2d58d82c6b76b42653dcd25c8966de7"
+      ],
+      "format": "raw",
+      "max_size": 2147483648
+    }
+  ]
 }

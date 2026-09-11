@@ -89,6 +89,7 @@ local atlasData = {}
 
 local function pixels(tileset)
   local path = tileset.image
+  if not path then return nil end
   if atlasData[path] == nil then
     local ok, data = pcall(Assets.imageData, path)
     atlasData[path] = (ok and data and data.getPixel) and data or false

@@ -24,6 +24,12 @@ local Voxel = V.require("VoxelState")
 local Sky = V.require("Sky")
 local DayNight = V.require("DayNight")
 local GroundFX = V.require("GroundFX")
+
+-- Gen 3 support
+local Gen3 = (function()
+  local ok, gen3 = pcall(V.require, "Gen3")
+  return ok and gen3 or nil
+end)()
 local Quality = V.require("Quality")
 local Wind = V.require("Wind")
 local Water = V.require("Water")
@@ -215,6 +221,10 @@ local function groundAt(map, cellX, cellY)
   -- since its cellTile already returns a tile id.
   local tx, ty = cellX * 2, cellY * 2 + 1
   local tile = map:tileAt(tx, ty)
+  -- Gen 3: use Gen3.tileAt to get the correct synthetic tile ID
+  if Gen3 and Gen3.mapIsGen3(map) then
+    tile = Gen3.tileAt(map, tx, ty) or tile
+  end
   local s = TileShape.at(map, shapes, tile, tx, ty)
   if not s then return 0 end
   -- a recessed class (water) still supports whatever stands on it; only
@@ -304,7 +314,12 @@ local function flatTop(map, cellX, cellY)
   -- class, not a tile id, so this has to resolve the real tile the same way
   -- groundAt does (map:tileAt at the full-resolution sub-cell).
   local tx, ty = cellX * 2, cellY * 2 + 1
-  local s = TileShape.at(map, shapes, map:tileAt(tx, ty), tx, ty)
+  local tile = map:tileAt(tx, ty)
+  -- Gen 3: use Gen3.tileAt to get the correct synthetic tile ID
+  if Gen3 and Gen3.mapIsGen3(map) then
+    tile = Gen3.tileAt(map, tx, ty) or tile
+  end
+  local s = TileShape.at(map, shapes, tile, tx, ty)
   -- no shape is flat ground at zero, which groundAt already reports as 0 and
   -- every caller here rejects on its own
   if not s then return true end

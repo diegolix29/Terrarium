@@ -3169,6 +3169,529 @@ end
 
 pcall(installOverworldStadium)
 
+-- ------- Colosseum Overhaul Integration
+-- Wrapped in separate function to avoid exceeding 200 local variable limit
+local function initializeColosseumIntegration()
+  -- Port of Colosseum Overhaul functionality into Terrarium
+  -- The Colosseum files are already present in lib/ and extract/ directories
+  -- We need to add the package loading system and hook up the build pipeline and runtime installation
+
+  local function colosseumPackage(path, arg)
+    local src = mod:read(path)
+    if not src then error("COLOSSEUM: missing " .. path, 0) end
+    local chunk, err = load(src, "@" .. tostring(mod.path or mod.id) .. "/" .. path)
+    if not chunk then error(err, 0) end
+    return chunk(arg)
+  end
+
+  -- Check if Colosseum ROM is imported and build pipeline can run
+  local colosseumBuildStatus = { state = "NOT CHECKED", visualReady = false, audioReady = false, message = nil }
+  local colosseumRuntimeAllowed = false
+  local openColosseumDisc = nil
+  local PokemonExtractorRef = nil
+  local PKXMetadataRef = nil
+  local MoveFXExtractorRef = nil
+  local BuildPipelineRef = nil
+  local BuildProgressUI = nil
+
+  -- Helper function to load Colosseum modules (defined globally for use in event handlers)
+  local function getColosseumModule(name)
+    local ok, result = pcall(colosseumPackage, "lib/" .. name .. ".lua")
+    if ok then return result end
+    return nil
+  end
+
+  -- Colosseum build pipeline
+  local function runColosseumBuild()
+    if not (mod.imports and mod.cache) then
+      colosseumBuildStatus = { state = "HOST API MISSING", visualReady = false, audioReady = false, message = "Colosseum requires Gen1Recomp required-import support with mod.imports/mod.cache." }
+      return
+    end
+    
+    local info, infoErr = mod.imports:info("pokemon_colosseum_usa")
+    if not info then
+      colosseumBuildStatus = { state = "ROM NOT IMPORTED", visualReady = false, audioReady = false, message = "In the Gen1Recomp launcher, import your Pokemon Colosseum USA GC6E01 disc image." }
+      return
+    end
+    
+    -- Load Colosseum extraction modules
+    local okCompat, NativeLauncherCompat = pcall(colosseumPackage, "lib/NativeLauncherCompat.lua")
+    if not okCompat then
+      colosseumBuildStatus = { state = "MODULE LOAD FAILED", visualReady = false, audioReady = false, message = "Failed to load NativeLauncherCompat: " .. tostring(NativeLauncherCompat) }
+      return
+    end
+    
+    local launcherCompat = NativeLauncherCompat.install(mod)
+    
+    local okUI, BuildProgressUI = pcall(colosseumPackage, "lib/BuildProgressUI.lua")
+    if not okUI then
+      colosseumBuildStatus = { state = "MODULE LOAD FAILED", visualReady = false, audioReady = false, message = "Failed to load BuildProgressUI: " .. tostring(BuildProgressUI) }
+      return
+    end
+    
+    local okAudio, AudioFidelity = pcall(colosseumPackage, "lib/AudioFidelity.lua")
+    if not okAudio then
+      colosseumBuildStatus = { state = "MODULE LOAD FAILED", visualReady = false, audioReady = false, message = "Failed to load AudioFidelity: " .. tostring(AudioFidelity) }
+      return
+    end
+    
+    -- Store BuildProgressUI for later use
+    local colosseumBuildProgressUI = BuildProgressUI
+    
+    local GXTexture = colosseumPackage("extract/GXTexture.lua")
+    local GameCubeDisc = colosseumPackage("extract/GameCubeDisc.lua")
+    local FSYS = colosseumPackage("extract/FSYS.lua")
+    local HSD = colosseumPackage("extract/HSD.lua", { GXTexture = GXTexture })
+    local ArenaBuilder = colosseumPackage("extract/ArenaBuilder.lua", { 
+      HSD = HSD, 
+      FSYS = FSYS,
+      ArenaAudienceProfile = colosseumPackage("lib/ArenaAudienceProfile.lua"),
+      ArenaCacheIdentity = colosseumPackage("lib/ArenaCacheIdentity.lua")
+    })
+    local TransitionBuilder = colosseumPackage("extract/TransitionBuilder.lua")
+    local PortableMusyX = colosseumPackage("extract/PortableMusyX.lua")
+    local AudioProbe = colosseumPackage("extract/AudioProbe.lua", { FSYS = FSYS, PortableMusyX = PortableMusyX, AudioFidelity = AudioFidelity })
+    local WazaSfxBuilder = colosseumPackage("extract/WazaSfxBuilder.lua", { FSYS = FSYS, PortableMusyX = PortableMusyX })
+    local TrainerExtractor = colosseumPackage("extract/TrainerExtractor.lua", { HSD = HSD, FSYS = FSYS })
+    local ColosseumDex = colosseumPackage("lib/ColosseumDex.lua")
+    local ShinySupport = colosseumPackage("lib/ShinySupport.lua")
+    local PKXMetadata = colosseumPackage("extract/PKXMetadata.lua", { FSYS = FSYS, ColosseumDex = ColosseumDex, ShinySupport = ShinySupport })
+    local PokemonExtractor = colosseumPackage("extract/PokemonExtractor.lua", { HSD = HSD, FSYS = FSYS, ColosseumDex = ColosseumDex, PKXMetadata = PKXMetadata, ShinySupport = ShinySupport })
+    local WazaSequenceExtractor = colosseumPackage("extract/WazaSequenceExtractor.lua")
+    local MoveFXExtractor = colosseumPackage("extract/MoveFXExtractor.lua", { FSYS = FSYS, GXTexture = GXTexture, HSD = HSD, WazaSequenceExtractor = WazaSequenceExtractor })
+    local FormatProbe = colosseumPackage("extract/FormatProbe.lua", { FSYS = FSYS, HSD = HSD, WazaSequenceExtractor = WazaSequenceExtractor })
+    local CameraProbe = colosseumPackage("extract/CameraProbe.lua", { FSYS = FSYS, HSD = HSD })
+    
+    PokemonExtractorRef = PokemonExtractor
+    PKXMetadataRef = PKXMetadata
+    MoveFXExtractorRef = MoveFXExtractor
+    
+    -- Disc opening function
+    local residentDisc = nil
+    openColosseumDisc = function()
+      if residentDisc then return residentDisc end
+      local disc, why = GameCubeDisc.open(mod)
+      if disc then residentDisc = disc end
+      return disc, why
+    end
+    
+    local BuildPipeline = colosseumPackage("extract/BuildPipeline.lua", {
+      GameCubeDisc = GameCubeDisc,
+      FSYS = FSYS,
+      GXTexture = GXTexture,
+      HSD = HSD,
+      ArenaBuilder = ArenaBuilder,
+      TrainerExtractor = TrainerExtractor,
+      TransitionBuilder = TransitionBuilder,
+      AudioProbe = AudioProbe,
+      WazaSfxBuilder = WazaSfxBuilder,
+      PokemonExtractor = PokemonExtractor,
+      MoveFXExtractor = MoveFXExtractor,
+      FormatProbe = FormatProbe,
+      CameraProbe = CameraProbe,
+      ColosseumDex = ColosseumDex,
+      LauncherCompat = launcherCompat,
+      BuildVersion = "1.0",
+      PlatformOS = "Windows",
+    })
+    BuildPipelineRef = BuildPipeline
+    
+    local CueBuilder = colosseumPackage("extract/BattleAudioBuilder.lua", { 
+      FSYS = FSYS, 
+      PortableMusyX = PortableMusyX,
+      BattleAudioSpec = colosseumPackage("lib/BattleAudioSpec.lua"),
+      AudioFidelity = AudioFidelity
+    })
+    local FidelityBuilder = colosseumPackage("extract/AudioFidelityBuilder.lua", { 
+      FSYS = FSYS, 
+      PortableMusyX = PortableMusyX,
+      AudioProbe = AudioProbe,
+      BattleAudioSpec = colosseumPackage("lib/BattleAudioSpec.lua"),
+      BattleAudioBuilder = CueBuilder,
+      AudioFidelity = AudioFidelity
+    })
+    
+    -- Recover interrupted writes
+    FidelityBuilder.recover(mod)
+    
+    colosseumBuildStatus = { state = "RUNNING", visualReady = false, audioReady = false, message = "Starting GC6E01 source build." }
+    
+    local okPipeline, result = pcall(BuildPipeline.run, mod, function(label, current, total)
+      colosseumBuildStatus.state = "RUNNING"
+      colosseumBuildStatus.message = tostring(label)
+      colosseumBuildStatus.current = current
+      colosseumBuildStatus.total = total
+      colosseumBuildProgressUI.update(label, current, total)
+      if mod.log and mod.log.info then 
+        pcall(mod.log.info, mod.log, "Colosseum build: %s (%s/%s)", tostring(label), tostring(current or "?"), tostring(total or "?")) 
+      end
+    end)
+    
+    if not okPipeline then error(result, 0) end
+    colosseumBuildStatus = result or colosseumBuildStatus
+    
+    if colosseumBuildStatus.audioReady == true then
+      local okCues, cues = pcall(CueBuilder.run, mod, openColosseumDisc, function(label, current, total)
+        colosseumBuildProgressUI.update(label, current, total)
+      end)
+      colosseumBuildStatus.battleAudio = okCues and cues or { ready = false, error = tostring(cues) }
+    end
+    
+    if colosseumBuildStatus.audioReady == true and AudioFidelity.pending(mod) then
+      local okFidelity, result = pcall(FidelityBuilder.run, mod, openColosseumDisc, function(label, current, total)
+        colosseumBuildProgressUI.update(label, current, total)
+      end)
+      colosseumBuildStatus.audioFidelity = okFidelity and result or { ready = false, error = tostring(result) }
+      if not okFidelity then FidelityBuilder.recover(mod) end
+    end
+    
+    colosseumBuildProgressUI.finish(colosseumBuildStatus.state, colosseumBuildStatus.message)
+    
+    if colosseumBuildStatus.state == "FAILED" and mod.log and mod.log.error then 
+      pcall(mod.log.error, mod.log, "Colosseum build failed: %s", tostring(colosseumBuildStatus.message))
+    elseif mod.log and mod.log.info then 
+      pcall(mod.log.info, mod.log, "Colosseum build: %s", tostring(colosseumBuildStatus.state)) 
+    end
+  end
+
+  -- Run the build pipeline
+  local okBuild, buildErr = pcall(runColosseumBuild)
+  if not okBuild then
+    colosseumBuildStatus = { state = "FAILED", visualReady = false, audioReady = false, message = tostring(buildErr) }
+    if colosseumBuildProgressUI then
+      colosseumBuildProgressUI.finish("FAILED", tostring(buildErr))
+    end
+    if mod.cache then pcall(mod.cache.write, mod.cache, "build/error.txt", tostring(buildErr) .. "\n") end
+  end
+
+  -- Wait for build completion with failure gate
+  local sourceImported = (mod.imports and mod.imports:info("pokemon_colosseum_usa")) ~= nil
+  local cacheGateOutcome = nil
+
+  while sourceImported and (colosseumBuildStatus.visualReady ~= true or colosseumBuildStatus.audioReady ~= true) do
+    if colosseumBuildProgressUI then
+      local action = colosseumBuildProgressUI.failureGate(colosseumBuildStatus.state, colosseumBuildStatus.message, colosseumBuildStatus.trainerFirstError, colosseumBuildStatus.trainerSourceError)
+      if action == "retry" then
+        local okRetry, retryErr = pcall(runColosseumBuild)
+        if not okRetry then
+          colosseumBuildStatus = { state = "FAILED", visualReady = false, audioReady = false, message = tostring(retryErr) }
+          colosseumBuildProgressUI.finish("FAILED", tostring(retryErr))
+          if mod.cache then pcall(mod.cache.write, mod.cache, "build/error.txt", tostring(retryErr) .. "\n") end
+        end
+      else
+        cacheGateOutcome = action
+        break
+      end
+    else
+      break
+    end
+  end
+
+  colosseumRuntimeAllowed = colosseumBuildStatus.visualReady == true and colosseumBuildStatus.audioReady == true
+
+  -- Colosseum runtime installation
+  local function installColosseumRuntime(force)
+    if not colosseumRuntimeAllowed then return end
+    
+    -- Load Colosseum runtime modules with error handling
+    local colosseumModule = function(name, arg)
+      local ok, result = pcall(colosseumPackage, "lib/" .. name .. ".lua", arg)
+      if not ok then
+        if mod.log and mod.log.warn then
+          pcall(mod.log.warn, mod.log, "Failed to load Colosseum module %s: %s", name, tostring(result))
+        end
+        return nil
+      end
+      return result
+    end
+    
+    local namespace = { mod = mod, FALLBACK = nil, engineRequire = require }
+    local function loadColosseumModule(name, arg)
+      local value = colosseumModule(name, arg == nil and namespace or arg)
+      if value then namespace[name] = value end
+      return value
+    end
+    
+    -- Load core Colosseum modules with error handling
+    local Mat4 = colosseumModule("Mat4")
+    if Mat4 then namespace.Mat4 = Mat4 end
+    local GeneratedAssets = loadColosseumModule("GeneratedAssets")
+    local RuntimeMeshCache = loadColosseumModule("RuntimeMeshCache")
+    loadColosseumModule("WorkBudget")
+    loadColosseumModule("FrameWork")
+    namespace.MoveFXExtractor = MoveFXExtractorRef
+    loadColosseumModule("WazaPhasePolicy")
+    local MoveFXVM = loadColosseumModule("MoveFXVM")
+    local WazaSequenceRuntime = loadColosseumModule("WazaSequenceRuntime")
+    local GenerationCompat = loadColosseumModule("GenerationCompat")
+    local TrainerRig = loadColosseumModule("TrainerRig")
+    local TrainerMorph = loadColosseumModule("TrainerMorph")
+    local TrainerPerformance = loadColosseumModule("TrainerPerformance")
+    local BattleSides = loadColosseumModule("BattleSides")
+    local FreeLookCamera = loadColosseumModule("FreeLookCamera")
+    local BattleAutoProgress = loadColosseumModule("BattleAutoProgress")
+    local BattleDirector = loadColosseumModule("BattleDirector")
+    local ModLookup = loadColosseumModule("ModLookup")
+    local TrainerRoster = loadColosseumModule("TrainerRoster")
+    local Trainer = loadColosseumModule("Trainer")
+    local PlayerTrainer = loadColosseumModule("PlayerTrainer")
+    local NativeTrainerSprites = loadColosseumModule("NativeTrainerSprites")
+    local MoveFXOwnership = loadColosseumModule("MoveFXOwnership")
+    local ArenaCatalog = loadColosseumModule("ArenaCatalog")
+    local ArenaAudienceProfile = loadColosseumModule("ArenaAudienceProfile")
+    local ArenaCacheIdentity = loadColosseumModule("ArenaCacheIdentity")
+    local BattleArtBridge = loadColosseumModule("BattleArtBridge")
+    loadColosseumModule("ShinySupport")
+    loadColosseumModule("ModelIdentity")
+    local CurrentSpriteModels = loadColosseumModule("CurrentSpriteModels")
+    loadColosseumModule("ColosseumDex")
+    local PokemonActors = loadColosseumModule("PokemonActors")
+    local RelicPresentation = loadColosseumModule("RelicPresentation")
+    local Arena = loadColosseumModule("Arena")
+    local Camera = loadColosseumModule("Camera")
+    local Music = loadColosseumModule("Music")
+    loadColosseumModule("BattleAudioSpec")
+    local BattleAudio = loadColosseumModule("BattleAudio")
+    local WazaAudioRuntime = loadColosseumModule("WazaAudioRuntime")
+    local WazaHandlers = loadColosseumModule("WazaHandlers")
+    local BattleMenuUI = loadColosseumModule("BattleMenuUI")
+    local CacheManager = loadColosseumModule("CacheManager")
+    local BattleSettings = loadColosseumModule("BattleSettings")
+    loadColosseumModule("AbilityData")
+    local Abilities = loadColosseumModule("Abilities")
+    loadColosseumModule("AbilityWeather")
+    local AbilityEffectsGen1 = loadColosseumModule("AbilityEffectsGen1")
+    local AbilityEffectsGen2 = loadColosseumModule("AbilityEffectsGen2")
+    local AbilityLifecycle = loadColosseumModule("AbilityLifecycle")
+    local Transition = loadColosseumModule("Transition")
+    local StandaloneHost = loadColosseumModule("StandaloneHost")
+    local StadiumBridge = loadColosseumModule("StadiumBridge")
+    local ResidentPrewarm = loadColosseumModule("ResidentPrewarm")
+    local BattleRuntime = loadColosseumModule("BattleRuntime")
+    
+    -- Load doubles modules
+    namespace.DoublesCore = colosseumModule("doubles/Core", namespace)
+    namespace.DoublesItems = colosseumModule("doubles/Items", namespace)
+    namespace.DoublesNativeAdapter = colosseumModule("doubles/NativeAdapter", namespace)
+    namespace.DoublesMovePresentation = colosseumModule("doubles/MovePresentation", namespace)
+    namespace.DoublesRelease = colosseumModule("doubles/ReleasePresentation", namespace)
+    namespace.DoublesCamera = colosseumModule("doubles/CameraDirector", namespace)
+    namespace.DoublesPresenter = colosseumModule("doubles/Presenter", namespace)
+    namespace.DoublesRuntime = colosseumModule("doubles/Runtime", namespace)
+    namespace.BossIntro = colosseumModule("BossIntro", namespace)
+    loadColosseumModule("QuickCachePlanner")
+    loadColosseumModule("CacheScreen")
+    local BattleCache = loadColosseumModule("BattleCache")
+    
+    -- Install Colosseum runtime with error handling
+    if StadiumBridge and type(StadiumBridge.install) == "function" then
+      pcall(StadiumBridge.install)
+    end
+    if Music and type(Music.install) == "function" then
+      pcall(Music.install, mod)
+      pcall(Music.attachGame, mod.game)
+    end
+    if BattleAudio and type(BattleAudio.install) == "function" then
+      pcall(BattleAudio.install, mod)
+    end
+    if BattleSettings and type(BattleSettings.install) == "function" then
+      pcall(BattleSettings.install, mod, Trainer, Music, ArenaCatalog, BattleMenuUI, CacheManager, TrainerRoster, GenerationCompat, AudioFidelity)
+    end
+    
+    local abilityGeneration = GenerationCompat and GenerationCompat.current() or 1
+    if abilityGeneration == 2 and AbilityEffectsGen2 and type(AbilityEffectsGen2.installGlobal) == "function" then 
+      pcall(AbilityEffectsGen2.installGlobal)
+    elseif AbilityEffectsGen1 and type(AbilityEffectsGen1.installGlobal) == "function" then 
+      pcall(AbilityEffectsGen1.installGlobal) 
+    end
+    if AbilityLifecycle and type(AbilityLifecycle.install) == "function" then
+      pcall(AbilityLifecycle.install, mod, abilityGeneration)
+    end
+    
+    if ArenaCatalog and ArenaCatalog.sync then 
+      pcall(ArenaCatalog.sync, mod.game) 
+    end
+    if Transition and type(Transition.install) == "function" then
+      pcall(Transition.install, mod)
+    end
+    if StandaloneHost and type(StandaloneHost.install) == "function" then
+      pcall(StandaloneHost.install, force)
+    end
+    if BattleArtBridge and type(BattleArtBridge.install) == "function" then
+      pcall(BattleArtBridge.install)
+    end
+    
+    if PokemonActors and type(PokemonActors.install) == "function" then
+      pcall(PokemonActors.install, PokemonExtractorRef, openColosseumDisc, CurrentSpriteModels, PKXMetadataRef)
+    end
+    if MoveFXExtractorRef and type(MoveFXExtractorRef.install) == "function" then
+      pcall(MoveFXExtractorRef.install, mod, openColosseumDisc)
+    end
+    
+    if CurrentSpriteModels and type(CurrentSpriteModels.registerCapability) == "function" and PokemonActors and PokemonActors.service then
+      pcall(CurrentSpriteModels.registerCapability,
+        "COLOSSEUM_BATTLE_ENVIRONMENTS/pokemon", "battleActors", PokemonActors.service)
+    end
+    
+    if CurrentSpriteModels and PokemonActors and not CurrentSpriteModels.__cbePokemonDebugWrapped then
+      local originalDrawWorld = CurrentSpriteModels.drawWorld
+      CurrentSpriteModels.drawWorld = function(self, context)
+        local ok, result = pcall(originalDrawWorld, self, context)
+        pcall(PokemonActors.debugFrame)
+        if not ok then error(result, 0) end
+        return result
+      end
+      CurrentSpriteModels.__cbePokemonDebugWrapped = true
+    end
+    
+    if MoveFXOwnership and type(MoveFXOwnership.install) == "function" then
+      pcall(MoveFXOwnership.install)
+    end
+    if WazaHandlers and type(WazaHandlers.install) == "function" then 
+      pcall(WazaHandlers.install) 
+    end
+    if BattleRuntime and type(BattleRuntime.install) == "function" then
+      pcall(BattleRuntime.install)
+    end
+    if namespace.DoublesRuntime and type(namespace.DoublesRuntime.install) == "function" then
+      pcall(namespace.DoublesRuntime.install)
+    end
+    if BattleAutoProgress and type(BattleAutoProgress.install) == "function" then
+      pcall(BattleAutoProgress.install)
+    end
+    if namespace.BossIntro and type(namespace.BossIntro.install) == "function" then
+      pcall(namespace.BossIntro.install)
+    end
+    if BattleCache and type(BattleCache.install) == "function" then
+      pcall(BattleCache.install)
+    end
+  end
+
+  -- Install Colosseum runtime if allowed
+  if colosseumRuntimeAllowed then
+    local FreeLookCamera = getColosseumModule("FreeLookCamera")
+    local NativeTrainerSprites = getColosseumModule("NativeTrainerSprites")
+    
+    if FreeLookCamera and type(FreeLookCamera.install) == "function" then
+      pcall(FreeLookCamera.install)
+    end
+    if NativeTrainerSprites and type(NativeTrainerSprites.install) == "function" then
+      pcall(NativeTrainerSprites.install)
+    end
+    installColosseumRuntime(false)
+    
+    if mod.events and type(mod.events.on) == "function" then
+      mod.events:on("mods.loaded", function(payload)
+        local ModLookup = getColosseumModule("ModLookup")
+        if ModLookup and type(ModLookup.setLoader) == "function" then
+          pcall(ModLookup.setLoader, type(payload) == "table" and payload.loader or nil)
+        end
+        installColosseumRuntime(true)
+      end)
+      
+      mod.events:on("game.ready", function(payload)
+        local game = type(payload) == "table" and payload.game or nil
+        if game then
+          local Music = getColosseumModule("Music")
+          local BattleAudio = getColosseumModule("BattleAudio")
+          local ArenaCatalog = getColosseumModule("ArenaCatalog")
+          local BattleRuntime = getColosseumModule("BattleRuntime")
+          local ResidentPrewarm = getColosseumModule("ResidentPrewarm")
+          
+          if Music and type(Music.attachGame) == "function" then
+            pcall(Music.attachGame, game)
+          end
+          if BattleAudio and type(BattleAudio.attachGame) == "function" then
+            pcall(BattleAudio.attachGame, game)
+          end
+          if ArenaCatalog and ArenaCatalog.sync then 
+            pcall(ArenaCatalog.sync, game) 
+          end
+          if BattleRuntime and BattleRuntime.attachFrame then 
+            pcall(BattleRuntime.attachFrame, game) 
+          end
+          if ResidentPrewarm and type(ResidentPrewarm.queueStartup) == "function" then
+            pcall(ResidentPrewarm.queueStartup, game)
+          end
+        end
+      end)
+    end
+  elseif mod.log and mod.log.warn then
+    pcall(mod.log.warn, mod.log, "Colosseum runtime withheld because required cache is not ready (%s)", tostring(cacheGateOutcome or colosseumBuildStatus.state))
+  end
+
+  -- Colosseum exports
+  mod.exports.battleAudioStatus = function() 
+    if colosseumRuntimeAllowed then
+      local ok, BattleAudio = pcall(colosseumPackage, "lib/BattleAudio.lua")
+      if ok and BattleAudio and type(BattleAudio.status) == "function" then
+        return BattleAudio.status()
+      end
+    end
+    return { ready = false, error = "Colosseum runtime not available" }
+  end
+
+  mod.exports.audioFidelityStatus = function() 
+    if colosseumRuntimeAllowed then
+      local ok, AudioFidelity = pcall(colosseumPackage, "lib/AudioFidelity.lua")
+      if ok and AudioFidelity and type(AudioFidelity.status) == "function" then
+        return AudioFidelity.status(mod)
+      end
+    end
+    return { ready = false, error = "Colosseum runtime not available" }
+  end
+
+  mod.exports.probeFormats = function()
+    if not BuildPipelineRef then return false, "build pipeline unavailable (source not imported?)" end
+    local ok, result, note = pcall(BuildPipelineRef.ensureFormatProbe, mod, nil, true)
+    if not ok then return false, tostring(result) end
+    return result == true, tostring(note or ""), "build/format_probe.txt"
+  end
+
+  mod.exports.rebuildPokemon = function()
+    if not colosseumRuntimeAllowed then return false, "Colosseum runtime not available" end
+    local ok, PokemonActors = pcall(colosseumPackage, "lib/PokemonActors.lua")
+    if ok and PokemonActors and type(PokemonActors.rebuildSpecies) == "function" then
+      local ok2, result, count = pcall(PokemonActors.rebuildSpecies)
+      if not ok2 then return false, tostring(result) end
+      return result == true, ("cleared %d generated Pokemon cache files"):format(tonumber(count) or 0)
+    end
+    return false, "PokemonActors module not available"
+  end
+
+  mod.exports.rebuild = function()
+    if not colosseumRuntimeAllowed then return false, "Colosseum runtime not available" end
+    local ok, CacheManager = pcall(colosseumPackage, "lib/CacheManager.lua")
+    if ok and CacheManager and type(CacheManager.resetGenerated) == "function" then
+      local ok2, msg = CacheManager.resetGenerated()
+      if not ok2 then return false, msg end
+      local ok3, err2 = pcall(runColosseumBuild)
+      if not ok3 then return false, tostring(err2) end
+      if type(CacheManager.resetRuntime) == "function" then
+        CacheManager.resetRuntime()
+      end
+      return colosseumBuildStatus.visualReady, colosseumBuildStatus
+    end
+    return false, "CacheManager module not available"
+  end
+
+  mod.exports.presentationOwnership = function(battle)
+    if not colosseumRuntimeAllowed then return nil end
+    local ok, BattleRuntime = pcall(colosseumPackage, "lib/BattleRuntime.lua")
+    if ok and BattleRuntime and type(BattleRuntime.presentationOwnership) == "function" then
+      return BattleRuntime.presentationOwnership(battle)
+    end
+    return nil
+  end
+
+  mod.exports.colosseumStatus = function()
+    return colosseumBuildStatus
+  end
+end
+
+-- Call the Colosseum initialization (wrapped to avoid local variable limit)
+pcall(initializeColosseumIntegration)
+
 mod.exports.version = "1.15.0-mobile.snow.1"
 -- exposed so a companion mod can pin its own tiles' shapes or read the
 -- camera without reaching into this mod's file layout

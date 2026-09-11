@@ -139,21 +139,21 @@ local profile = {
 
   -- class -> height in world pixels
   heights = {
-    ground = 0,
+    ground = 1,
     water = -2,
     void = 0,
-    ledge = 6,
-    fence = 10,
-    sign = 12,
-    wall = 16,
+    ledge = 7,
+    fence = 30,
+    sign = 15,
+    wall = 17,
     -- masonry drawn two courses tall (the Indigo Plateau's rim, the
     -- badge-check gates): as tall as a statue on its plinth
-    cliff = 32,
+    cliff = 30,
     -- the top of a plateau: one course, so it lands flush with the 16px
     -- cliff face drawn holding it up
-    terrace = 16,
-    tree = 16,
-    roof = 28,
+    terrace = 15,
+    tree = 35,
+    roof = 50,
     bed = 7,
     stool = 8,
     counter = 8,
@@ -162,8 +162,8 @@ local profile = {
     backrest = 12,
     table = 12,
     desk = 24,
-    prop = 16,
-    cutout = 16,
+    prop = 44,
+    cutout = 39,
     -- a vehicle drawn side-on (the Bike Shop's bicycles): a standee like
     -- the pools above, two voxels thin so the air inside its frame stays
     -- air (see Structures' PINNED_DEPTH)
@@ -171,12 +171,12 @@ local profile = {
     -- a round drawing stacked two cells high on one cell of plot (the
     -- Centers' potted plants): 32px of hull standing in its lower cell
     planter = 32,
-    relief = 3,
+    relief = 29,
     bookcase = 32,
-    stair_e = 16,
-    stair_w = 16,
-    stair_down_e = 16,
-    stair_down_w = 16,
+    stair_e = 24,
+    stair_w = 25,
+    stair_down_e = 20,
+    stair_down_w = 25,
   },
 
   -- Gen 2 collision class -> class, for every Gen 2 tileset at once.
@@ -443,7 +443,7 @@ local profile = {
       -- $59 on both flanks, so a first-person walk along it sees pickets
       -- rather than one long plank.  See Structures' buildRails.
       rail_face = { 0x5A, 0x59 },
-      heights = { fence = 16 },
+      heights = { fence = 37 },
       -- the flowerbed ($03, drawn in block $04 and nowhere else). It sits
       -- in a walkable cell, so the cell rules made it flat painted ground;
       -- `flower` keeps that ground and stands the blooms up on it as a
@@ -8510,7 +8510,7 @@ profile.tilesets.TilesetTower = {
   -- railing rather than the end grain of a plank.  See Structures'
   -- buildRails.
   rail_face = { 0x11, 0x21 },
-  heights = { fence = 16 },
+  heights = { fence = 38 },
   -- the gilded Bellsprout statues flanking the stairs, drawn over one
   -- cell of plot and two cell rows: $4A/$4B over $5A/$5B for the head and
   -- body, $4C/$5C for the leaves it holds out, $36/$37 for the stone base
@@ -8698,7 +8698,7 @@ local cave = {
   -- face that holds a terrace up can only ever be as tall as a `cliff` --
   -- and the flight that climbs it ($36) is a single block.  At 32 the deck
   -- stood a block clear of the top step.
-  heights = { cliff = 16, terrace = 16 },
+  heights = { cliff = 28, terrace = 29 },
   -- ...but a rock lip you can HOP down is a ledge like any other, and the
   -- caves draw theirs out of the same $26 band as the walls, so the lip
   -- has to be found from the neighbouring $A1/$A3/$A5 cell.  See
