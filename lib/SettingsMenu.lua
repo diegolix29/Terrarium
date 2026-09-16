@@ -171,6 +171,13 @@ function SettingsMenu.setPipelineRows(rows)
   pipelineRows = rows or {}
 end
 
+function SettingsMenu.getPipelineRows()
+  return pipelineRows
+end
+
+-- Export getPipelineRows to V namespace for main.lua access
+V.getPipelineRows = SettingsMenu.getPipelineRows
+
 -- ------- a step here has the same consequences as a step anywhere
 --
 -- Two of these settings PIN something else when they change: 3D-BTL holds
@@ -212,11 +219,17 @@ function SettingsMenu.rows(catId, game)
   local full = isFull()
   local out = {}
   if catId == SettingsMenu.ROOT then
+    -- Debug: print pipeline rows
+    print("ROOT menu: " .. #pipelineRows .. " pipeline rows available")
+    for _, row in ipairs(pipelineRows) do
+      print("  Available pipeline row: " .. tostring(row.id) .. " (" .. tostring(row.label) .. ")")
+    end
     for _, row in ipairs(pipelineRows) do
       -- FULL owns the blur exactly as it owns the wireframe and the horizon
       -- bend, so T-SHIFT comes off with them
       if not (full and row.id == "pipeline:tiltshift") then
         out[#out + 1] = row
+        print("Added pipeline row to ROOT: " .. tostring(row.id) .. " (" .. tostring(row.label) .. ")")
       end
     end
     -- ------- settings that belong to no category
@@ -280,16 +293,27 @@ function SettingsMenu.rows(catId, game)
     -- ROM should find the row where the mod begins, not two levels down a
     -- category they have no reason to open until it has worked. Last, because
     -- the categories are what the menu is FOR.
+    
+    -- Helper function to check if a row with the same id already exists
+    local function rowExists(id)
+      for _, row in ipairs(out) do
+        if row.id == id then return true end
+      end
+      return false
+    end
+    
     local ok, importRow = pcall(function()
       return V.require("StadiumRomPick").row()
     end)
-    if ok and importRow then out[#out + 1] = importRow end
+    if ok and importRow and not rowExists(importRow.id) then 
+      out[#out + 1] = importRow 
+    end
     
     -- Stadium 2 ROM import (for Gen 2 Pokemon support)
     local ok2, importRow2 = pcall(function()
       return V.require("Stadium2RomPick").row()
     end)
-    if ok2 and importRow2 then 
+    if ok2 and importRow2 and not rowExists(importRow2.id) then 
       out[#out + 1] = importRow2 
     else
       -- Debug: Stadium 2 ROM pick failed to load
@@ -300,7 +324,9 @@ function SettingsMenu.rows(catId, game)
     local okS2, Stadium2Setting = pcall(V.require, "Stadium2Setting")
     if okS2 and Stadium2Setting then
       local statusRow = Stadium2Setting.statusRow()
-      if statusRow then out[#out + 1] = statusRow end
+      if statusRow and not rowExists(statusRow.id) then 
+        out[#out + 1] = statusRow 
+      end
     end
     
     return out
@@ -381,10 +407,22 @@ function SettingsMenu.new(game, catId)
     game = game,
     cat = catId or SettingsMenu.ROOT,
     index = 1,
-    scroll = 0,
+    scroll = 0,  -- Always start at scroll 0 to show the first row
   }, SettingsMenu)
   self.rows = SettingsMenu.rows(self.cat, game)
   self.sig = SettingsMenu.signature(self.rows)
+  
+  -- Force scroll to 0 to ensure first row is visible
+  self.scroll = 0
+  self.index = 1
+  
+  -- Debug: print the rows that were created
+  print("SettingsMenu.new created for " .. tostring(catId) .. " with " .. #self.rows .. " rows")
+  for i, row in ipairs(self.rows) do
+    print("  Row " .. i .. ": " .. tostring(row.id) .. " (" .. tostring(row.label) .. ")")
+  end
+  print("Forced scroll to 0, index to 1 to ensure first row is visible")
+  
   return self
 end
 
@@ -425,6 +463,10 @@ function SettingsMenu:refresh()
   local wasOn = self.rows[self.index] and self.rows[self.index].id
   self.rows, self.sig = rows, sig
   self.index, self.scroll = 1, 0
+  
+  -- Debug: print refresh
+  print("SettingsMenu refresh: " .. #rows .. " rows, index=" .. self.index .. ", scroll=" .. self.scroll)
+  
   if wasBack then
     self.index = #rows + 1
   else

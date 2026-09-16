@@ -10,6 +10,7 @@
 local V=...
 local MoveFX=V.MoveFXExtractor
 local MoveFXVM=V.MoveFXVM
+local SourceTravel=V.MoveFXSourceTravel
 local WazaSequence=V.WazaSequenceRuntime
 local Director=V.BattleDirector
 local GeneratedAssets=V.GeneratedAssets
@@ -18,14 +19,16 @@ local P={
   id=nil, registered=false, preferredPatched=false,
   drawn={player=false,enemy=false}, presented={player=false,enemy=false},
   battleArt=nil, animated=nil,
-  stadiumHandle=nil,stadiumApi=nil,stadiumActors={},retiringActors={},stadiumError=nil,
+  stadiumHandle=nil,stadiumApi=nil,stadiumActors={},retiringActors={},faintReturns={},stadiumError=nil,
+  stadiumRetry={},mobileRuntime=love and love.system and love.system.getOS
+    and (love.system.getOS()=="Android" or love.system.getOS()=="iOS") or false,
   actorApi=nil,actorOwner=nil,
   spriteApi=nil,spriteOwner=nil,spriteError=nil,
   mode="sprites",modeId="builtin:resolved-sprites",externalProvider=nil,
   externalBegun=false,externalError=nil,presentationFallback=nil,
   moveFxActive={},moveFxImages={},moveFxShader=nil,moveFxError=nil,
 }
-local OWNER=(V.mod and V.mod.id) or "COLOSSEUM_BATTLE_ENVIRONMENTS"
+local OWNER=(V.mod and V.mod.id) or "DRAMATIC_SHAPE"
 local ModLookup=V.ModLookup
 local registeredCapabilities={battleActors={},battleSprites={},battlePresentation={}}
 local seenEventPayload=setmetatable({},{__mode="k"})
@@ -49,7 +52,15 @@ end
 local function releaseStadiumActor(side,reason)
   local record=P.stadiumActors[side]
   if not record then return false end
+  local sourceReturn=P.faintReturns and P.faintReturns[side]
+  local RP=V and V.ReleasePresentation
+  if sourceReturn and RP and type(RP.finishFaint)=="function" then
+    pcall(RP.finishFaint,sourceReturn,nil,nil,reason or "actor-release")
+  elseif record.actor then
+    record.actor.cbeSourceFaintReturn=nil
+  end
   P.stadiumActors[side]=nil
+  P.faintReturns[side]=nil
   return releaseActorRecord(record,reason)
 end
 
@@ -61,6 +72,21 @@ end
 local function retireStadiumActor(side,reason)
   local record=P.stadiumActors[side]
   if not record then return false end
+  local sourceReturn=P.faintReturns and P.faintReturns[side]
+  local RP=V and V.ReleasePresentation
+  if sourceReturn and RP and type(RP.faintComplete)=="function" then
+    local okReturn,done=pcall(RP.faintComplete,sourceReturn)
+    if not okReturn or done~=true then return false end
+    if type(RP.finishFaint)=="function" then pcall(RP.finishFaint,sourceReturn,sourceReturn.context,nil,reason or "actor-retire") end
+    P.faintReturns[side]=nil
+    -- This is a completed Kizetu return, not a voluntary switch. Retail removes
+    -- the Pokemon/grid owner immediately after the WZX wait/free step; do not put
+    -- the already-hidden fainted actor through the ordinary recall tail.
+    P.stadiumActors[side]=nil
+    return releaseActorRecord(record,"faint-complete")
+  elseif record.actor then
+    record.actor.cbeSourceFaintReturn=nil
+  end
   P.stadiumActors[side]=nil
   record.side=side
   record.retireReason=reason or "replacement"
@@ -84,6 +110,7 @@ local function releaseRetiringActors(reason)
 end
 
 local function releaseStadiumActors(reason)
+  P.stadiumRetry={}
   local sides={}
   for side in pairs(P.stadiumActors) do sides[#sides+1]=side end
   for _,side in ipairs(sides) do releaseStadiumActor(side,reason) end
@@ -348,7 +375,7 @@ end
 local function ourArena(context)
   local arena=context and context.arena
   local id=arena and tostring(arena.id or "") or ""
-  return id:find("^COLOSSEUM_BATTLE_ENVIRONMENTS:")~=nil
+  return id:find("^DRAMATIC_SHAPE:")~=nil
 end
 
 -- WazaSequence is started from BattleDirector on the semantic move boundary,
@@ -525,11 +552,29 @@ local function actorStructuralHide(actor)
   return STRUCTURAL_HIDE_MOVE[key]==true
 end
 
+local function doublesOpeningPending(context)
+  local runtime=V and V.DoublesRuntime
+  if not (runtime and type(runtime.openingPending)=="function") then return false end
+  local ok,pending=pcall(runtime.openingPending,context and context.battle)
+  return ok and pending==true
+end
+
+local function actorAcquirePending(err)
+  local msg=tostring(err or "")
+  return msg:find("variant not resident",1,true)~=nil
+    or msg:find("pending cooperative preparation",1,true)~=nil
+    or msg:find("pending storage-action upgrade",1,true)~=nil
+    or msg:find("storage-only model needs battle action upgrade",1,true)~=nil
+    or msg:find("source extraction in progress",1,true)~=nil
+end
+
 local function stadiumActor(context,side)
   if P.mode~="stadium" then return nil end
   local api=P.actorApi or stadiumService()
   if not api then return nil end
   local battler=liveBattler(context,side)
+  local compat=V.GenerationCompat
+  if compat and type(compat.isEmptyBattler)=="function" and compat.isEmptyBattler(battler) then return nil end
   local dex,variant=dexFor(context,battler)
   local record=P.stadiumActors[side]
   if not dex or dex<1 then
@@ -550,22 +595,51 @@ local function stadiumActor(context,side)
   end
   if record then retireStadiumActor(side,"replacement") end
   local source=api.SELECTED or "selected"
-  if type(api.available)=="function" then
+  local cbe=P.modeId=="cbe:colosseum-pokemon"
+  local streaming=cbe and api.cooperativePreparation==true
+  -- An older material certificate may say unavailable although the exact cached
+  -- body is valid. Let the CBE service verify it; retain portable-provider rules.
+  if not cbe and type(api.available)=="function" then
     local ok,available=pcall(api.available,source,dex)
     if not (ok and available) then
       P.stadiumError=ok and ("actor provider reports model "..tostring(dex).." unavailable") or tostring(available)
       return nil
     end
   end
-  local ok,actor,err=pcall(api.acquire,source,dex,variant,{side=side,context=context,battler=battler})
+  local now=(love and love.timer and love.timer.getTime and love.timer.getTime()) or os.clock()
+  local retry=P.stadiumRetry[side]
+  if cbe and retry and retry.key==key and retry.battle==context.battle and now<retry.at then return nil end
+  local opts={side=side,context=context,battler=battler,
+    allowStorageBattleBody=cbe and (P.mobileRuntime or streaming),allowLegacyMaterialBody=cbe,
+    noSource=cbe and (P.mobileRuntime or streaming) or false}
+  local ok,actor,err
+  if cbe and type(api.acquireCached)=="function" then
+    ok,actor,err=pcall(api.acquireCached,source,dex,variant,opts)
+  end
+  if (not ok or not actor) and not streaming then
+    opts.noSource=cbe and P.mobileRuntime or false
+    ok,actor,err=pcall(api.acquire,source,dex,variant,opts)
+  end
+  -- Match the successful doubles path: publish the exact body/idle immediately,
+  -- and promote this concrete battler's missing action plan cooperatively. This
+  -- also retries cold singles after a failed or cancelled speculative job.
+  if cbe and (P.mobileRuntime or streaming) and V.PokemonActors and type(V.PokemonActors.queueBattlePrewarm)=="function" then
+    local owner=context and context.battle
+    if not (owner and owner.game) then owner={game=context and context.game} end
+    pcall(V.PokemonActors.queueBattlePrewarm,owner,side,battler,true)
+  end
   if not ok or not actor then
-    P.stadiumError=tostring(ok and err or actor)
-    if P.modeId=="cbe:colosseum-pokemon" and V.BattleCache then
+    local reason=tostring(ok and err or actor)
+    local pending=ok and actorAcquirePending(err)
+    if cbe then P.stadiumRetry[side]={key=key,battle=context.battle,at=now+.05} end
+    P.stadiumError=(not pending) and reason or nil
+    P.stadiumPending=pending and reason or nil
+    if not pending and P.modeId=="cbe:colosseum-pokemon" and V.BattleCache then
       V.BattleCache.noteRenderError(context.game,P.stadiumError)
     end
     return nil
   end
-  P.stadiumError=nil
+  P.stadiumError=nil;P.stadiumPending=nil;P.stadiumRetry[side]=nil
   P.stadiumActors[side]={key=key,actor=actor,dex=dex,variant=variant,
     battler=battler,state="spawn"}
   return actor
@@ -576,6 +650,7 @@ local function visible(context,side)
   local battle=context and context.battle
   local b=liveBattler(context,side)
   if not (battle and b and b.sprite) then return false end
+  if doublesOpeningPending(context) then return false end
   if side=="enemy" then
     if PlayerTrainer and type(PlayerTrainer.captureHidesEnemy)=="function" then
       local okHide,hide=pcall(PlayerTrainer.captureHidesEnemy,PlayerTrainer,context)
@@ -632,8 +707,17 @@ local function actorVisible(context,side,actor)
   -- any of those picture-layer states as actor lifecycle made the entire model
   -- vanish on impact even though Actor:hit() itself never removes the actor.
   if not (battle and b) then return false end
+  local compat=V.GenerationCompat
+  if compat and type(compat.isEmptyBattler)=="function" and compat.isEmptyBattler(b) then return false end
+  if doublesOpeningPending(context) then return false end
+  local sourceReturn=P.faintReturns and P.faintReturns[side]
+  local RP=V and V.ReleasePresentation
+  if sourceReturn and RP and type(RP.faintActorVisible)=="function" then
+    local okReturn,override=pcall(RP.faintActorVisible,sourceReturn,side)
+    if okReturn and override==false then return false end
+  end
   local wh=V and V.WazaHandlers
-  if wh and type(wh.actorVisible)=="function" then
+  if wh and type(wh.actorVisible)=="function" and not (actor and (actor.state=="faint" or actor.pendingFaint)) then
     local okW,override=pcall(wh.actorVisible,wh,side)
     if okW and override==false then return false end
   end
@@ -726,7 +810,7 @@ local function faintProgress(context,b)
   return math.max(0,math.min(1,off/56))
 end
 
-local function actorGoneByBattle(context,b,actor)
+local function actorGoneByBattle(context,side,b,actor)
   local battle=context and context.battle
   if not (battle and b) then return true end
 
@@ -734,6 +818,16 @@ local function actorGoneByBattle(context,b,actor)
   -- not a lifecycle/removal signal. Releasing a 3D actor because one blink
   -- frame is hidden is the exact cause of the 1.5.27 hit-disappearance bug.
   if b.fainted==true then
+    -- GC6E01 fightOutPokemonKizetuEffect keeps the Pokemon/grid resident until
+    -- its ItemBallData.downinWzxDataId WZX reports completion. The actor's PKX
+    -- faint clip may finish earlier; that is not permission to destroy it.
+    local RP=V and V.ReleasePresentation
+    local sourceReturn=P.faintReturns and P.faintReturns[side]
+    if sourceReturn and RP and type(RP.faintComplete)=="function" then
+      local okReturn,done=pcall(RP.faintComplete,sourceReturn)
+      if okReturn then return done==true end
+      return false
+    end
     -- A lethal damage result precedes the visible faint event on both supported
     -- battle queues. Never destroy the resident actor merely because HP is zero;
     -- it must finish hit, receive battle.fainted, then finish its faint tail.
@@ -762,6 +856,21 @@ local function syncStadiumActor(context,side)
   if not record then return nil end
   local battler=liveBattler(context,side)
   if battler~=record.battler then
+    local sourceReturn=P.faintReturns and P.faintReturns[side]
+    local RP=V and V.ReleasePresentation
+    if sourceReturn and RP and type(RP.faintComplete)=="function" then
+      local okReturn,done=pcall(RP.faintComplete,sourceReturn)
+      -- Retail Kizetu does not clear its battle-grid owner until the downin WZX
+      -- wait returns. A host that swaps the logical battler earlier must not make
+      -- that swap destroy the presentation owner early.
+      if not okReturn or done~=true then return record.actor end
+      -- A logical replacement may already occupy the host slot. Once Kizetu's
+      -- source WZX completes, the outgoing actor must still be destroyed even if
+      -- the replacement has the same species/variant; visual-identity reuse is
+      -- only valid for wrapper churn, never across a completed faint return.
+      releaseStadiumActor(side,"faint-complete")
+      return nil
+    end
     -- Wrapper identity is not stable in Gen I. Keep the resident actor whenever
     -- the authoritative visual identity (National Dex + shiny variant) is the
     -- same, regardless of whether the engine rebuilt the battler or mon table.
@@ -775,7 +884,7 @@ local function syncStadiumActor(context,side)
       return nil
     end
   end
-  if actorGoneByBattle(context,battler,record.actor) then
+  if actorGoneByBattle(context,side,battler,record.actor) then
     releaseStadiumActor(side,battler and battler.fainted and "faint-complete" or "hidden")
     return nil
   end
@@ -947,15 +1056,39 @@ local MOVE_FX_PIXEL=[[
 extern vec4 cbePrim;
 extern vec4 cbeEnv;
 extern float cbePrimEnv;
-extern float cbeAlphaCutoff;
+extern float cbeAlphaMode;
+extern float cbeAlphaP1;
+extern float cbeAlphaP2;
 extern float cbeIntensityAlpha;
+bool cbeCmp(float a, float r, float mode) {
+  float eps=0.5/255.0;
+  if (mode < 0.5) return false;
+  if (mode < 1.5) return a < r;
+  if (mode < 2.5) return abs(a-r) <= eps;
+  if (mode < 3.5) return a <= r+eps;
+  if (mode < 4.5) return a > r;
+  if (mode < 5.5) return abs(a-r) > eps;
+  if (mode < 6.5) return a+eps >= r;
+  return true;
+}
+bool cbeAlphaPass(float a) {
+  float c0=mod(floor(cbeAlphaMode/8.0),8.0);
+  float op=floor(cbeAlphaMode/64.0);
+  float c1=mod(cbeAlphaMode,8.0);
+  bool a0=cbeCmp(a,cbeAlphaP1,c0);
+  bool a1=cbeCmp(a,cbeAlphaP2,c1);
+  if (op < 0.5) return a0 && a1;
+  if (op < 1.5) return a0 || a1;
+  if (op < 2.5) return a0 != a1;
+  return a0 == a1;
+}
 vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
   vec4 t=Texel(texture,uv);
   // GX I4/I8 replicate intensity into alpha too. The retained source cache
   // stores those two formats with opaque alpha; recover their exact format
   // semantics here without recoloring or invalidating unrelated GX assets.
   if (cbeIntensityAlpha > 0.5) t.a=t.r;
-  if (t.a < cbeAlphaCutoff) discard;
+  vec4 outColor;
   if (cbePrimEnv > 0.5) {
     // GX particle Prim/Env textures use intensity as the interpolation weight.
     // Preserve that source gradient instead of flattening I4/I8 into a white
@@ -963,9 +1096,12 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     float k=clamp(t.r,0.0,1.0);
     vec3 rgb=mix(cbeEnv.rgb,cbePrim.rgb,k);
     float a=t.a*mix(cbeEnv.a,cbePrim.a,k);
-    return vec4(rgb,a)*color;
+    outColor=vec4(rgb,a)*color;
+  } else {
+    outColor=vec4(t.rgb*cbePrim.rgb,t.a*cbePrim.a)*color;
   }
-  return vec4(t.rgb*cbePrim.rgb,t.a*cbePrim.a)*color;
+  if (!cbeAlphaPass(outColor.a)) discard;
+  return outColor;
 }
 ]]
 local function particleIntensityAlpha(spec)
@@ -1051,7 +1187,7 @@ local function wazaEntryKey(entry)
     tostring(entry.index or ""),tostring(entry.offset or "")},"|")
 end
 
-local function stageMoveFx(context,side,spec,target,role,wazaEntry,wazaSerial)
+local function stageMoveFx(context,side,spec,target,role,wazaEntry,wazaSerial,activeMoveId)
   role=role or "attack"
   local executable=MoveFXVM and type(MoveFXVM.start)=="function"
     and ((type(wazaEntry)=="table" and type(MoveFXVM.hasEntry)=="function" and MoveFXVM.hasEntry(spec,wazaEntry,role))
@@ -1130,7 +1266,7 @@ local function stageMoveFx(context,side,spec,target,role,wazaEntry,wazaSerial)
   end
   P.moveFxError=nil
   local active={
-    side=side,target=target or (side=="player" and "enemy" or "player"),spec=spec,role=role,
+    side=side,target=target or (side=="player" and "enemy" or "player"),spec=spec,role=role,moveId=tonumber(activeMoveId),
     vm=vm,imagesByBank=imagesByBank,imagesByBankContainer=imagesByBankContainer,
     wazaEntry=wazaEntry,wazaSerial=wazaSerial,wazaEntryKey=entryKey,
     releaseGeometry=spec.releaseGeometry,
@@ -1151,7 +1287,8 @@ local function installWazaHandlers()
   if wazaHandlersInstalled or not (WazaSequence and type(WazaSequence.registerHandler)=="function") then return end
   local handler={
     start=function(context,instance,entry,event,state)
-      local ok,fx=stageMoveFx(context,instance.side,instance.spec,instance.target,instance.role,entry,instance.serial)
+      local id=tonumber(instance.moveId) or (instance.spec.phaseSelection and instance.spec.phaseSelection.moveId) or instance.spec.moveId
+      local ok,fx=stageMoveFx(context,instance.side,instance.spec,instance.target,instance.role,entry,instance.serial,id)
       if ok and fx then
         fx.wazaInstance=instance;fx.wazaState=state
         state.cbeParticle=fx;state.cbeParticleFrame=state.startFrame
@@ -1323,6 +1460,15 @@ local function moveFxWorldPoint(context,side,name)
   return {x,y/k,z},actor,false
 end
 
+local function actorRootWorld(context,side,actor)
+  local m=actor and actor.worldMatrix
+  if type(m)=="table" and tonumber(m[4]) and tonumber(m[8]) and tonumber(m[12]) then
+    return {tonumber(m[4]),tonumber(m[8]),tonumber(m[12])}
+  end
+  local x,z=anchor(context,side);if not x then return nil end
+  return {x,tonumber(context and context.groundY) or 0,z}
+end
+
 local function projectMoveFxWorld(context,p)
   if not (p and p[1]) then return nil end
   -- services.project already uses actorVP (stageVP * figureScale). Positions
@@ -1373,31 +1519,80 @@ local AIMED_MOVES={[53]=true,[55]=true,[56]=true,[58]=true,[59]=true,[60]=true,[
 -- Values are presentation spans measured from the GC6E01 programs, not new
 -- particle velocities/lifetimes; both attack/sp1 copies use the same selector.
 local PARTICLE_TRANSIT_SPAN={
-  [53]={selector=23,span=70}, -- kaenhousya core: ~68.84 observed with source VM
-  [55]={selector=24,span=60}, -- mizudeppou: source terminal Z=60
-  [61]={selector=22,span=65}, -- barburukousen: source terminal Z=65
-  [190]={selector=45,span=60}, -- okutanhou: core reaches ~60.51
+  -- Flamethrower's exact GC6E01 attack/sp1 root is the direct Type-3 resource
+  -- (serialized common state=0), local source bank 1, selector 23. The later
+  -- Type-3 rows in both chapters are state=1 reuses of that resource and select
+  -- different scripts (24..27/33); they do not own selector 23. `bank` below is
+  -- a cache-global remap and cannot prove either identity, so this priority core
+  -- deliberately requires sourceBank + the direct-resource state rather than
+  -- accepting a lookalike/stale selector number.
+  -- Root velocity is +2 and source friction is the exact f32
+  -- 0.9800000190734863. The particle bytecode keeps forward physics alive for
+  -- 60 steps, so the centerline transport endpoint is the geometric sum below;
+  -- a 5-degree authored cone only shortens individual particles from this bound.
+  [53]={sourceBank=1,sourceState=0,selector=23,
+    span=2*0.9800000190734863*(1-0.9800000190734863^60)/(1-0.9800000190734863),
+    phases={attack=true,sp1=true}},
+  -- These roots/cores are likewise phase-local GC6E01 bank-1 identities. Do
+  -- not accept a cache-global bank or an invented chapter with the same script
+  -- selector. Bubble Beam's authored f32 velocity is 1.2999999523162842 and
+  -- its centerline root moves for 50 source frames.
+  [55]={sourceBank=1,selector=24,span=60,phases={attack=true,sp1=true}}, -- mizudeppou deterministic water core
+  [61]={sourceBank=1,selector=22,span=1.2999999523162842*50,phases={attack=true,sp1=true}},
+  -- Octazooka's deterministic water core reaches 60. Source splash children
+  -- extend just past it (~60.8 in seeded VM runs) and must remain allowed to
+  -- overshoot after the core itself is mapped to the target.
+  [190]={sourceBank=1,selector=45,span=60,phases={attack=true}},
 }
 -- The new mappings are limited to the measured forward-moving source bank;
 -- charge auras and receiving lightning retain their authored local coordinates.
-local BLIZZARD_CORES={[11]={selector=11,span=60},[12]={selector=12,span=25}}
-local THUNDERBOLT_CORE={selector=1,span=15}
-local PIKACHU_THUNDERBOLT_CORE={selector=1,span=10}
+-- GC6E01 fubuki attack/sp1 do not give selectors 11/12 independent particle
+-- payloads: their Type-3 records have common state=2 and explicitly reuse
+-- Type-3 identifier 2, the sole owning GPT1 bank in those chapters. Require
+-- that serialized ownership marker in addition to sourceBank/selector so a
+-- coincidentally numbered bank in stale/foreign metadata is never stretched.
+-- Selector 11 uses a 1.5-unit source velocity for 38 movement steps; its
+-- emitter and A9 cone operations rotate that vector without changing its
+-- magnitude, so the exact centerline forward bound is 57. Selector 12 is
+-- likewise 0.5 units for 50 steps, exactly 25.
+local BLIZZARD_PARTICLE_OWNER=2
+local BLIZZARD_CORES={[11]={selector=11,span=57},[12]={selector=12,span=25}}
 local function transitProfile(moveId,entry)
   local id=tonumber(moveId)
   if type(entry)~="table" then return end
-  local bank=tonumber(entry.sourceBank or entry.bank);local selector=tonumber(entry.selector or entry.rootRef)
-  if id==59 and bank==1 then return BLIZZARD_CORES[selector]
-  elseif id==85 and bank==2 and selector==1 then
-    return entry.phase=="pikachu" and PIKACHU_THUNDERBOLT_CORE or THUNDERBOLT_CORE
+  if SourceTravel and type(SourceTravel.particleProfile)=="function" then
+    local profile=SourceTravel.particleProfile(id,entry)
+    if profile then return profile end
   end
-  return PARTICLE_TRANSIT_SPAN[id]
+  -- sourceBank is the phase-local resource bank from the retail WZX. `bank` is
+  -- later remapped into one cache-global namespace, so it is not an ownership
+  -- identity and must never select the priority cross-arena cores. Unknown old
+  -- metadata therefore fails closed to native/local placement instead of
+  -- stretching an unrelated muzzle/owner layer across the battlefield.
+  local sourceBank=tonumber(entry.sourceBank);local selector=tonumber(entry.selector or entry.rootRef)
+  if id==59 then
+    if sourceBank~=1 or tonumber(entry.state)~=BLIZZARD_PARTICLE_OWNER then return nil end
+    return BLIZZARD_CORES[selector]
+  end
+  -- Thunderbolt's GC6E01 attack and Pikachu bank-2/selector-1 GPT1 resources
+  -- are byte/program-identical. Their root is particle mode 8 (spherical),
+  -- radius -19.5, with BD random speed 0.6+2.0*HSD_Randf and A3 damping
+  -- 0.8600000143 across a 16-frame particle lifetime. That has no single
+  -- deterministic +Z terminal transport span, so do not stretch either phase
+  -- onto the attacker->target axis. The old 15/10 split was not source-backed.
+  local profile=PARTICLE_TRANSIT_SPAN[id]
+  if profile and profile.sourceBank and sourceBank~=profile.sourceBank then return nil end
+  if profile and profile.sourceState~=nil and tonumber(entry.state)~=profile.sourceState then return nil end
+  return profile
 end
 local function particleTransitSpan(moveId,role,entry)
   local profile=transitProfile(moveId,entry)
   if not profile or tostring(role or "attack")~="attack" or type(entry)~="table" then return 100 end
   local phase=tostring(entry.phase or "attack"):lower()
-  if phase~="attack" and phase~="sp1" and not (tonumber(moveId)==85 and phase=="pikachu") then return 100 end
+  if not profile.sourceExact then
+    if profile.phases and profile.phases[phase]~=true then return 100 end
+    if not profile.phases and phase~="attack" and phase~="sp1" then return 100 end
+  end
   if (tonumber(entry.flags) or 0)%2==1 then return 100 end -- linked model owns it
   if tonumber(entry.selector or entry.rootRef)~=profile.selector then return 100 end
   return profile.span
@@ -1406,21 +1601,60 @@ end
 local function combatGeometry(context,side,target,attachment,opts)
   opts=type(opts)=="table" and opts or {}
   local moveId=tonumber(opts.moveId)
-  local aimed=opts.sourceStrict==true and AIMED_MOVES[moveId] and tostring(opts.role or "attack")=="attack"
-  -- Blizzard's stationary prep banks are not directed streams. Only its two
-  -- measured forward cores use the live lane and target-group width.
-  if moveId==59 then aimed=aimed and particleTransitSpan(moveId,opts.role,opts.particleEntry)~=100 end
-  local fieldWave=opts.sourceStrict==true and moveId==57 and tostring(opts.role or "attack")=="attack"
+  local attackRole=tostring(opts.role or "attack")=="attack"
+  local particleProfile=opts.sourceStrict==true and attackRole and transitProfile(moveId,opts.particleEntry) or nil
+  local modelProfile
+  if opts.sourceStrict==true and attackRole and SourceTravel and type(SourceTravel.modelProfile)=="function" then
+    modelProfile=SourceTravel.modelProfile(moveId,opts.modelEntry)
+  end
+  -- Production uses exact source-row identities. Keep the historical move-wide
+  -- selector only for isolated/older hosts that do not load MoveFXSourceTravel.
+  local aimed=particleProfile~=nil or modelProfile~=nil
+    or (SourceTravel==nil and opts.sourceStrict==true and attackRole and AIMED_MOVES[moveId]==true)
+    or (opts.sourceStrict~=true and tostring(opts.style or ''):lower()=='projectile')
+  if SourceTravel==nil and (moveId==59 or moveId==85) then
+    aimed=aimed and transitProfile(moveId,opts.particleEntry)~=nil
+  end
+  local fieldWave=opts.sourceStrict==true and moveId==57 and attackRole
   local slot=tonumber(attachment)
   local name=(slot and slot>=0 and slot<#BODY_SLOT_NAMES) and BODY_SLOT_NAMES[math.floor(slot)+1] or "center"
   local other=target or (side=="player" and "enemy" or "player")
   local origin,actor=moveFxWorldPoint(context,side,name)
   local goal,targetActor=moveFxWorldPoint(context,other,"center")
   if not (origin and goal) then return nil end
+  -- Preserve the actual Waza owner before any effect-specific origin rewrite.
+  -- A target-centred source effect (notably Psychic) may deliberately swap the
+  -- particle geometry below, but battleCameraStartWaza still receives the
+  -- Pokemon that owns this WazaSequence.
+  local ownerActor=actor
+  -- Embedded HSD Waza cameras are transformed from GSmodelGetPosition(owner),
+  -- never from whichever particle/model attachment happens to be active. Expose
+  -- that exact owner-root coordinate seam without duplicating actor internals in
+  -- WazaHandlers. The ordinary effect path remains attachment-owned.
+  if opts.ownerRoot==true then
+    local root=actorRootWorld(context,side,ownerActor)
+    if root then origin=root end
+  end
+
+  -- _wazaSequenceParticleEntryStart maps positionType 0..6 to selector 1..7.
+  -- _wazaSequenceModelEntryStart proves the selector's transform enum:
+  -- 1=P, 2=R, 3=S, 4=P+R, 5=R+S, 6=P+S, 7=P+R+S; selector 0 is the unlinked
+  -- owner-root path. Previous CBE builds always inherited the body-part position,
+  -- shifting selectors 2/3/5/0 to mouth/limb space incorrectly.
+  local transformSelector
+  if opts.sourceStrict and opts.positionType~=nil then
+    local pt=math.floor(tonumber(opts.positionType) or -1)
+    transformSelector=(pt>=0 and pt<=6) and (pt+1) or 0
+    local inheritsPartPosition=(transformSelector==1 or transformSelector==4 or transformSelector==6 or transformSelector==7)
+    if not inheritsPartPosition then
+      local root=actorRootWorld(context,side,actor)
+      if root then origin=root end
+    end
+  end
 
   local originSide=side
   -- Psychic's source attack chapter is a target-centred field, not a missile.
-  if opts.sourceStrict and moveId==94 and tostring(opts.role or 'attack')=='attack' then
+  if opts.ownerRoot~=true and opts.sourceStrict and moveId==94 and tostring(opts.role or 'attack')=='attack' then
     origin,goal=goal,origin;actor,targetActor=targetActor,actor;originSide=other
   end
   local sourceHeight=actorVisualHeight(actor)
@@ -1459,7 +1693,7 @@ local function combatGeometry(context,side,target,attachment,opts)
     end
   end
 
-  if fieldWave then
+  if fieldWave and opts.ownerRoot~=true then
     local sx,sz=anchor(context,side);local tx,tz=anchor(context,other)
     local targets=context and context.cbeWazaTargets
     if type(targets)=="table" and #targets>1 then
@@ -1477,8 +1711,25 @@ local function combatGeometry(context,side,target,attachment,opts)
     forward=vnorm(vsub(goal,origin));right=vnorm(vcross({0,1,0},forward));up=vnorm(vcross(forward,right))
   end
   local sourceUnit=sourceHeight/100
-  local units={x=sourceUnit,y=sourceUnit,z=aimed and math.max(.001,fullFightDistance/particleTransitSpan(moveId,role,opts.particleEntry)) or sourceUnit}
-  if spreadWidth then units.x=math.max(sourceUnit,(spreadWidth+sourceHeight*.25)/60) end
+  local travelSpan=particleProfile and tonumber(particleProfile.span) or modelProfile and tonumber(modelProfile.reach) or nil
+  if not travelSpan and aimed then travelSpan=particleTransitSpan(moveId,role,opts.particleEntry) end
+  local travelUnit=aimed and math.max(.001,fullFightDistance/math.max(.001,travelSpan or 100)) or nil
+  local units={x=sourceUnit,y=sourceUnit,z=travelUnit or sourceUnit}
+  if particleProfile or modelProfile then
+    -- A source-proven traveling GPT1/HSD row is authored in Colosseum's common
+    -- ~100-unit battle lane. The old mapping fitted Z to the receiver but left X/Y
+    -- at Pokemon-body scale; on long/mobile arenas that collapses a beam/stream
+    -- cone into a nearly invisible needle even though its centreline technically
+    -- reaches the target. Preserve the source cross-section in battlefield space:
+    -- X/Y use the live equivalent of one retail lane unit, while Z alone accounts
+    -- for the measured row-specific travel envelope (some cores end at 25/57/69,
+    -- while e.g. Ice Beam's HSD extends just beyond 100). Particle billboard size
+    -- remains actor/reference-height driven below, so this does not invent or
+    -- globally enlarge unrelated muzzle/impact particles.
+    local fieldUnit=math.max(.001,fullFightDistance/100)
+    units={x=fieldUnit,y=fieldUnit,z=travelUnit}
+  end
+  if spreadWidth then units.x=math.max(units.x,(spreadWidth+sourceHeight*.25)/60) end
   if fieldWave then
     -- Surf's source wave/sea are authored in the common +/-50-unit fight lane.
     -- Use one fixed battlefield transform for geometry AND bound foam; never
@@ -1488,15 +1739,15 @@ local function combatGeometry(context,side,target,attachment,opts)
 
   -- Source GPT1 coordinates describe local effect motion, but projectiles also
   -- need to traverse the live combat span. Scale lateral/vertical motion from
-  -- the actor and forward motion from the fight line, bounded relative to the
-  -- actor so tiny/giant Pokemon cannot explode the authored trajectory.
+  -- the actor and forward motion from the complete fight line. A body-size
+  -- cap on forward reach made small Pokemon's effects stop mid-field.
   if (not sourceStrict) and style=="projectile" then
     local fightUnit=math.max(.01,fullFightDistance/100)
-    units.z=math.max(sourceUnit*.65,math.min(sourceUnit*6.0,fightUnit))
+    units.z=fightUnit
   elseif (not sourceStrict) and style=="wave" then
     local fightUnit=math.max(.01,fullFightDistance/100)
     units.x=math.max(sourceUnit*.80,math.min(sourceUnit*3.0,fullFightDistance/180))
-    units.z=math.max(sourceUnit*.80,math.min(sourceUnit*5.0,fightUnit))
+    units.z=fightUnit
   elseif groundField then
     local fieldUnit=math.max(.01,fullFightDistance/100)
     units.x=fieldUnit;units.z=fieldUnit
@@ -1536,10 +1787,45 @@ local function combatGeometry(context,side,target,attachment,opts)
   elseif style=="impact" or style=="contact" then modelTargetSpan=interactionHeight*.86
   else modelTargetSpan=referenceHeight end
 
+  local scaleActor=opts.ownerRoot==true and ownerActor or actor
+  local sourceScaleSelector=scaleActor and scaleActor.sourceMetadata
+    and tonumber(scaleActor.sourceMetadata.scaleSelector~=nil and scaleActor.sourceMetadata.scaleSelector or scaleActor.sourceMetadata.sequenceKind) or nil
+  -- Exact analogue of retail GSmodelGetRotation for the currently supported
+  -- battle-grid owner transform. PokemonActors stores this before any fallback
+  -- presentation roll/pitch is appended to its render matrix.
+  local ownerModelYaw=opts.ownerRoot==true and ownerActor and tonumber(ownerActor.worldYaw) or nil
+  local ownerCameraTiming
+  local ownerRetailWazaBound
+  if opts.ownerRoot==true and ownerActor and type(ownerActor.wazaCameraTiming)=="function" then
+    local okTiming,value=pcall(ownerActor.wazaCameraTiming,ownerActor)
+    if okTiming and type(value)=="table" and value.exact==true then
+      ownerCameraTiming=value
+      -- GC6E01's pokemonCreateSequence -> fn_801DE190 explicitly writes
+      -- WazaSequenceOwner+0x75 = 1. battleCameraStartWaza applies its camera-key
+      -- left shift only when +0x75 == 0 (the fightTrainerCreateSequence /
+      -- fn_801DE418 path). CurrentSpriteModels owns Pokémon, so their exact PKX
+      -- camera timing stays unshifted here.
+      ownerCameraTiming.frameShift=0
+    end
+  end
+  if opts.ownerRoot==true and ownerActor and type(ownerActor.retailWazaOwnerBound)=="function" then
+    local okBound,value=pcall(ownerActor.retailWazaOwnerBound,ownerActor)
+    if okBound and type(value)=="table" and value.exact==true and value.selectorExact==true then
+      ownerRetailWazaBound=value
+    end
+  end
   return {aimed=aimed,fieldWave=fieldWave,originSide=originSide,origin=origin,target=goal,right=right,up=up,forward=forward,actor=actor,targetActor=targetActor,
     actorScale=tonumber(actor and actor.worldScale) or 1,attachment=name,style=style,moveId=moveId,role=role,sourceStrict=sourceStrict,
+    ownerDex=opts.ownerRoot==true and ownerActor and tonumber(ownerActor.dex) or nil,
+    sourceScaleSelector=sourceScaleSelector,sourceScaleSelectorExact=sourceScaleSelector~=nil,
+    ownerCameraTiming=ownerCameraTiming,ownerCameraTimingExact=ownerCameraTiming~=nil,
+    ownerRetailWazaBound=ownerRetailWazaBound,ownerRetailWazaBoundExact=ownerRetailWazaBound~=nil,
+    ownerModelYaw=ownerModelYaw,ownerModelRotationExact=ownerModelYaw~=nil,
     groundField=groundField,sourceVisualHeight=sourceHeight,targetVisualHeight=targetHeight,interactionVisualHeight=interactionHeight,
-    fightDistance=fullFightDistance,sourceUnits=units,referenceVisualHeight=referenceHeight,modelTargetSpan=modelTargetSpan}
+    fightDistance=fullFightDistance,sourceUnits=units,referenceVisualHeight=referenceHeight,modelTargetSpan=modelTargetSpan,
+    sourceTravelProfile=particleProfile,sourceModelTravelProfile=modelProfile,sourceModelReach=modelProfile and modelProfile.reach or nil,
+    sourceTravelFieldScaled=(particleProfile~=nil or modelProfile~=nil),
+    transformSelector=transformSelector}
 end
 
 -- Public source-space bridge for first-class Waza handlers. Effect models,
@@ -1547,6 +1833,28 @@ end
 -- actor normalization and live fight geometry as GPT1.
 function P:wazaBasis(context,side,target,attachment,opts)
   return combatGeometry(context,side,target,attachment,opts)
+end
+
+local function retailScaleSelector(actor)
+  local metadata=actor and actor.sourceMetadata
+  if type(metadata)~="table" then return nil end
+  local value=metadata.scaleSelector
+  if value==nil then value=metadata.sequenceKind end
+  return value~=nil and tonumber(value) or nil
+end
+-- Exact GC6E01 ModelSequence selector exported by PKXMetadata.  Keep this
+-- separate from actor.worldScale / Pokédex readability scaling: retail camera
+-- and battle-grid code consume the resource-header selector, not final height.
+function P:retailScaleSelector(actor) return retailScaleSelector(actor) end
+function P:retailScaleSelectors()
+  local out={}
+  for _,side in ipairs({"player","enemy"}) do
+    local rec=self.stadiumActors and self.stadiumActors[side]
+    local selector=rec and retailScaleSelector(rec.actor) or nil
+    if selector==nil then return out,false end
+    out[#out+1]=selector
+  end
+  return out,#out==2
 end
 
 local function unitAxis(unit,key,index)
@@ -1606,13 +1914,13 @@ refreshMoveFxBasis=function(context,fx)
     local frame,why=V.WazaHandlers.linkedParticleFrame(context,fx.wazaInstance,fx.wazaEntry)
     if not frame then fx.attachmentError=why;return false end
     geometry=frame.basis;fx.modelLinked=true;fx.attachmentError=nil
-    if fx.vm then fx.vm.emissionTransform=frame.part;fx.vm.emissionOrigin=nil end
+    if fx.vm then fx.vm.emissionTransform=frame.particleTransform;fx.vm.emissionOrigin=nil end
     fx.linkedFrame=frame
   elseif linked and not fx.wazaInstance then
     return false -- The start hook installs the exact instance before first update.
   else
     geometry=fx.releaseGeometry or combatGeometry(context,originSide,otherSide,rootSlot,{
-      moveId=fx.spec and fx.spec.moveId,style=fx.spec and fx.spec.style,role=fx.role,
+      moveId=fx.moveId or (fx.spec and fx.spec.moveId),style=fx.spec and fx.spec.style,role=fx.role,
       sourceStrict=type(fx.wazaEntry)=="table",positionType=fx.wazaEntry and fx.wazaEntry.positionType,
       flags=fx.wazaEntry and fx.wazaEntry.flags,particleEntry=fx.wazaEntry})
   end
@@ -1701,12 +2009,26 @@ local function particleImage(fx,p)
 end
 
 local function particleColors(p)
-  local c=p and p.prim or {255,255,255,255}
-  local e=p and p.env or {0,0,0,0}
+  -- MoveFXVM keeps the retail ramp's base/target/countdown fields intact.
+  -- Display colours are the source 16.16 interpolation at the current frame,
+  -- not a repeatedly rounded CBE-side lerp.
+  local c=p and (p.primDisplay or p.prim) or {255,255,255,255}
+  local e=p and (p.envDisplay or p.env) or {0,0,0,0}
   local function f(v,d)return math.max(0,math.min(1,(tonumber(v) or d)/255)) end
-  local alphaScale=math.max(0,math.min(1,tonumber(p and p.alphaScale) or 1))
-  return {f(c[1],255),f(c[2],255),f(c[3],255),f(c[4],255)*alphaScale},
-    {f(e[1],0),f(e[2],0),f(e[3],0),f(e[4],0)*alphaScale}
+  return {f(c[1],255),f(c[2],255),f(c[3],255),f(c[4],255)},
+    {f(e[1],0),f(e[2],0),f(e[3],0),f(e[4],0)}
+end
+local function particleAlphaCompare(p)
+  local a=p and p.alphaCompare
+  if MoveFXVM and MoveFXVM._test and type(MoveFXVM._test.alphaCompareCurrent)=="function" then
+    local mode,p1,p2=MoveFXVM._test.alphaCompareCurrent(p)
+    return mode,(tonumber(p1) or 1)/255,(tonumber(p2) or 255)/255
+  end
+  return tonumber(a and a.mode) or 0x33,(tonumber(a and a.p1) or 1)/255,(tonumber(a and a.p2) or 255)/255
+end
+local function sendParticleAlphaCompare(shader,p)
+  local mode,p1,p2=particleAlphaCompare(p)
+  shader:send("cbeAlphaMode",mode);shader:send("cbeAlphaP1",p1);shader:send("cbeAlphaP2",p2)
 end
 
 local function blendForParticle(g,p)
@@ -1725,20 +2047,14 @@ end
 local function particleWorld(fx,p,pos)
   if not (fx and fx.sourceWorld and fx.right and fx.up and fx.forward) then return nil end
   local origin=fx.sourceWorld
-  -- Only the source update-joint flag makes an emitted quad follow a body
-  -- point every frame. B7/B8/BF also set a joint id, but those commands use the
-  -- joint as a direction/force target inside the VM; treating them as a render
-  -- origin double-applied the joint transform and made effects swim across the
-  -- Pokemon during Damage/attack motion.
+  -- Particle flag 0x8000 and bits 12..14 belong to Colosseum's internal PS
+  -- camera-slot tracking system (B7/B8/BF), not a Pokemon body joint. Waza
+  -- SequenceEntry/AppSRT attachment is already captured by sourceWorld or the
+  -- birth attachmentMatrix above; never re-anchor these particles to BODY_SLOT.
   if p and p.attachmentMatrix then
     local a=p.attachmentMatrix;local q=pos or p.position
     pos={a[1]*q[1]+a[2]*q[2]+a[3]*q[3]+a[4],
       a[5]*q[1]+a[6]*q[2]+a[7]*q[3]+a[8],a[9]*q[1]+a[10]*q[2]+a[11]*q[3]+a[12]}
-  end
-  if p and not fx.modelLinked and p.updateJoint and p.jointId~=nil and fx.originSide then
-    local name=BODY_SLOT_NAMES[(tonumber(p.jointId) or 0)+1]
-    local joint=name and actorAttachmentWorld(fx.originSide,name)
-    if joint then origin=joint end
   end
   return localToWorld(origin,fx.right,fx.up,fx.forward,pos or (p and p.position),fx.sourceUnits or fx.sourceUnit)
 end
@@ -1794,11 +2110,7 @@ local function drawParticleAt(g,shader,context,fx,p,entry,pos,trailAlpha)
     shader:send("cbeEnv",{env[1],env[2],env[3],env[4]*(trailAlpha or 1)})
     shader:send("cbePrimEnv",p.primEnv and 1 or 0)
     shader:send("cbeIntensityAlpha",particleIntensityAlpha(entry.spec))
-    local cutoff=p.texEdge and .055 or .004
-    if type(p.alphaCompare)=="table" then
-      cutoff=math.max(cutoff,math.min(.72,(tonumber(p.alphaCompare.p1) or 0)/255))
-    end
-    shader:send("cbeAlphaCutoff",cutoff)
+    sendParticleAlphaCompare(shader,p)
     g.setColor(1,1,1,1)
   else g.setColor(prim[1],prim[2],prim[3],alpha) end
   if type(img.setFilter)=="function" and particleFilterState[img]~=(p.nearest==true) then
@@ -1815,73 +2127,51 @@ local function drawParticleAt(g,shader,context,fx,p,entry,pos,trailAlpha)
     local x2,y2=projectMoveFxWorld(context,wp2)
     if x2 then angle=math.atan2 and math.atan2(y2-y,x2-x) or angle end
   end
-  local sx=((p.flipS~=p.mirrorS) and -sc or sc);local sy=((p.flipT~=p.mirrorT) and -sc or sc)
+  -- Retail UV reversal is controlled by the explicit E4/E5 0x40000/0x80000
+  -- bits. Low particle flags 0x20/0x40 are unrelated and must not mirror art.
+  local sx=(p.flipS and -sc or sc);local sy=(p.flipT and -sc or sc)
   blendForParticle(g,p)
   g.draw(img,x,y,angle,sx,sy,iw*.5,ih*.5)
   return true
 end
 
 local TRAIL_MESH_FORMAT={{"VertexPosition","float",2},{"VertexTexCoord","float",2},{"VertexColor","float",4}}
-local function drawTrailRibbon(g,shader,context,fx,p,entry,history)
-  if not (history and #history>=2 and entry and entry.image) then return false end
-  local pts={}
-  -- History is newest-first. Build oldest -> live point so UV progression and
-  -- taper match the source particle's actual motion instead of a generic line.
-  for i=#history,1,-1 do
-    local world=particleWorld(fx,p,history[i])
-    local x,y
-    if world then x,y=projectMoveFxWorld(context,world) end
-    if x then pts[#pts+1]={x,y,world} end
-  end
-  local liveWorld=particleWorld(fx,p,p.position)
-  local x,y
-  if liveWorld then x,y=projectMoveFxWorld(context,liveWorld) end
-  if x then pts[#pts+1]={x,y,liveWorld} end
-  if #pts<3 then return false end
-
+local particleTrailMesh
+local function drawTrailRibbon(g,shader,context,fx,p,entry)
+  if not (p and p.trail and entry and entry.image and p.position and p.velocity) then return false end
+  -- SysDolphin psDispSub/psDispSubPointTrail draws exactly one velocity
+  -- segment: current position to (position - velocity). It does not retain a
+  -- frame history. E8's `trail` scalar attenuates only the previous endpoint.
+  local prev={p.position[1]-(p.velocity[1] or 0),p.position[2]-(p.velocity[2] or 0),p.position[3]-(p.velocity[3] or 0)}
+  local oldWorld=particleWorld(fx,p,prev);local liveWorld=particleWorld(fx,p,p.position)
+  if not (oldWorld and liveWorld) then return false end
+  local x0,y0=projectMoveFxWorld(context,oldWorld);local x1,y1=projectMoveFxWorld(context,liveWorld)
+  if not (x0 and x1) then return false end
+  local dx,dy=x1-x0,y1-y0;local len=math.sqrt(dx*dx+dy*dy)
+  if len<1e-5 then return false end
+  local nx,ny=-dy/len,dx/len
   local sourceSize=math.max(.20,math.abs(tonumber(p.size) or 1))
-  local baseWidth=math.max(1,math.min(36,
-    particlePixelUnit(context,fx,fx.originActor,liveWorld)*sourceSize*.42))
-  local verts={}
-  local total=0
-  for i=2,#pts do
-    local dx,dy=pts[i][1]-pts[i-1][1],pts[i][2]-pts[i-1][2]
-    total=total+math.sqrt(dx*dx+dy*dy)
-  end
-  if total<1 then return false end
-  local walked=0
-  for i,pt in ipairs(pts) do
-    local prev=pts[math.max(1,i-1)];local nxt=pts[math.min(#pts,i+1)]
-    local dx,dy=nxt[1]-prev[1],nxt[2]-prev[2]
-    local len=math.sqrt(dx*dx+dy*dy)
-    if len<1e-5 then dx,dy,len=1,0,1 end
-    local nx,ny=-dy/len,dx/len
-    if i>1 then
-      local q=pts[i-1];local qx,qy=pt[1]-q[1],pt[2]-q[2]
-      walked=walked+math.sqrt(qx*qx+qy*qy)
-    end
-    local u=math.max(0,math.min(1,walked/total))
-    -- Fade/taper the oldest tail while leaving the live end at source size.
-    local taper=.22+.78*u
-    local hw=baseWidth*.5*taper
-    verts[#verts+1]={pt[1]+nx*hw,pt[2]+ny*hw,u,0,1,1,1,taper}
-    verts[#verts+1]={pt[1]-nx*hw,pt[2]-ny*hw,u,1,1,1,1,taper}
-  end
-  if #verts<6 then return false end
+  local point=math.floor((tonumber(p.flags) or 0)/0x40000000)%2==1
+  local width
+  if point then width=math.max(1,math.min(255,6*sourceSize))
+  else width=math.max(1,math.min(320,particlePixelUnit(context,fx,fx.originActor,liveWorld)*sourceSize)) end
+  local hw=width*.5
+  local tailAlpha=math.max(0,math.min(1,tonumber(p.trailAlpha) or 1))
+  local verts={
+    {x0+nx*hw,y0+ny*hw,0,0,1,1,1,tailAlpha},
+    {x0-nx*hw,y0-ny*hw,0,1,1,1,1,tailAlpha},
+    {x1+nx*hw,y1+ny*hw,1,0,1,1,1,1},
+    {x1-nx*hw,y1-ny*hw,1,1,1,1,1,1},
+  }
 
-  local mesh=p._cbeTrailMesh
-  local capacity=p._cbeTrailCapacity or 0
-  if not mesh or #verts>capacity then
-    capacity=math.max(32,capacity*2,#verts)
-    local ok,m=pcall(love.graphics.newMesh,TRAIL_MESH_FORMAT,capacity,"strip","stream")
+  local mesh=particleTrailMesh
+  if not mesh then
+    local ok,m=pcall(love.graphics.newMesh,TRAIL_MESH_FORMAT,4,"strip","stream")
     if not ok or not m then return false end
-    if mesh and mesh.release then pcall(mesh.release,mesh) end
-    mesh=m;p._cbeTrailMesh=mesh;p._cbeTrailCapacity=capacity
+    mesh=m;particleTrailMesh=mesh
   end
   if not pcall(mesh.setVertices,mesh,verts) then return false end
-  -- A stream buffer can retain older vertices after a shorter history upload.
-  -- Limit the draw to this frame's ribbon, avoiding stale floating trail strips.
-  if mesh.setDrawRange then mesh:setDrawRange(1,#verts) end
+  if mesh.setDrawRange then mesh:setDrawRange(1,4) end
   pcall(mesh.setTexture,mesh,entry.image)
   local prim,env=particleColors(p)
   if shader then
@@ -1889,9 +2179,7 @@ local function drawTrailRibbon(g,shader,context,fx,p,entry,history)
     shader:send("cbePrim",prim);shader:send("cbeEnv",env)
     shader:send("cbePrimEnv",p.primEnv and 1 or 0)
     shader:send("cbeIntensityAlpha",particleIntensityAlpha(entry.spec))
-    local cutoff=p.texEdge and .055 or .004
-    if type(p.alphaCompare)=="table" then cutoff=math.max(cutoff,math.min(.72,(tonumber(p.alphaCompare.p1) or 0)/255)) end
-    shader:send("cbeAlphaCutoff",cutoff)
+    sendParticleAlphaCompare(shader,p)
   end
   blendForParticle(g,p)
   g.setColor(1,1,1,1)
@@ -1947,17 +2235,15 @@ local function drawMoveFx(context)
           if not p._cbeRenderDisabled then
             local entry=particleImage(fx,p)
             if entry and p.alive~=false then
-              -- Source trail history is rendered as one tapered, source-textured
-              -- ribbon strip rather than repeated billboards/lines.
-              local history=p.trail and p.history or nil
-              if history and #history>1 then
-                local okTrail,didTrail=pcall(drawTrailRibbon,g,shader,context,fx,p,entry,history)
+              if p.trail then
+                local okTrail,didTrail=pcall(drawTrailRibbon,g,shader,context,fx,p,entry)
                 if okTrail then drew=didTrail or drew
                 else recordMoveFxRenderFault(fx,p,didTrail);pcall(g.setShader,shader) end
+              else
+                local okParticle,didParticle=pcall(drawParticleAt,g,shader,context,fx,p,entry,p.position,1)
+                if okParticle then drew=didParticle or drew
+                else recordMoveFxRenderFault(fx,p,didParticle);pcall(g.setShader,shader) end
               end
-              local okParticle,didParticle=pcall(drawParticleAt,g,shader,context,fx,p,entry,p.position,1)
-              if okParticle then drew=didParticle or drew
-              else recordMoveFxRenderFault(fx,p,didParticle);pcall(g.setShader,shader) end
             end
           end
         end
@@ -2073,6 +2359,7 @@ local function drawStadiumActors(context)
     return true
   end,{
     eye=services and services.camera and services.camera.pose and services.camera.pose.eye,
+    focus=services and services.camera and services.camera.pose and services.camera.pose.focus,
     width=services and services.renderSize and services.renderSize.width,
     height=services and services.renderSize and services.renderSize.height,
     context=context,
@@ -2104,8 +2391,8 @@ function P:begin(context)
   -- That callback runs after the transition has reached its black resolve, so
   -- cache parsing/GPU uploads here directly become a long black screen.  The
   -- normal actor path acquires already-resident/cached scenes when the battle
-  -- begins drawing; uncached source extraction remains a fail-open case rather
-  -- than a transition blocker.
+  -- begins drawing; uncached mobile bodies are scheduled cooperatively rather
+  -- than extracted on the transition frame or replaced by a native picture.
   return available
 end
 
@@ -2113,6 +2400,33 @@ local function actorDelta(context,dt)
   local TP=V and V.TrainerPerformance
   if TP and type(TP.realDt)=="function" then return TP.realDt(context,dt) end
   return math.max(0,tonumber(dt) or 0)
+end
+
+local function recordMon(record)
+  local battler=record and record.battler
+  return battler and (battler.mon or battler.pokemon) or battler
+end
+
+local function beginPendingFaintReturn(context,side,record)
+  if not (record and record.faintReturnPending) or P.faintReturns[side] then return false,"not-pending" end
+  local actor=record.actor
+  -- Damage owns the body until its source reaction bank completes. The downin
+  -- WZX then overlaps the native Kizetu bank, but its source visibility-off must
+  -- not land before the Pokemon has completed the authored stumble/fall.
+  if actor and actor.state~="faint" then return false,"waiting-for-faint-state" end
+  local RP=V and V.ReleasePresentation
+  if not (RP and type(RP.beginFaintSingle)=="function") then return false,"runtime-unavailable" end
+  if actor and type(RP.faintStartDelayFor)=="function" then
+    local okDelay,delay=pcall(RP.faintStartDelayFor,recordMon(record),actor)
+    delay=okDelay and math.max(0,tonumber(delay) or 0) or 0
+    if (tonumber(actor.faintAge) or 0)+1e-6<delay then return false,"waiting-for-faint-overlap" end
+  end
+  record.faintReturnPending=nil
+  local okReturn,sourceReturn,why=pcall(RP.beginFaintSingle,context,side,recordMon(record),actor)
+  if okReturn and sourceReturn then P.faintReturns[side]=sourceReturn;return true,sourceReturn end
+  if actor then actor.cbeSourceFaintReturn=nil end
+  P.moveFxError="source faint-return unavailable: "..tostring(okReturn and why or sourceReturn)
+  return false,"source-unavailable"
 end
 
 function P:update(context,dt)
@@ -2139,6 +2453,22 @@ function P:update(context,dt)
     end
   elseif P.mode=="stadium" then
     local actorDt=actorDelta(context,dt)
+    local RP=V and V.ReleasePresentation
+
+    -- Kizetu/downin runs in an isolated source Waza world. Advance it before
+    -- lifecycle synchronization so an instance that completes on this tick can
+    -- authorize the same post-WZX actor/grid retirement that retail performs.
+    for _,side in ipairs(SIDES_PE) do
+      local sourceReturn=P.faintReturns and P.faintReturns[side]
+      if sourceReturn and RP and type(RP.updateFaintSingle)=="function" then
+        local okReturn,advanced=pcall(RP.updateFaintSingle,context,sourceReturn,actorDt)
+        if not okReturn or advanced==false then
+          P.moveFxError="source faint-return runtime failed closed: "..tostring(okReturn and sourceReturn.error or advanced)
+          if type(RP.finishFaint)=="function" then pcall(RP.finishFaint,sourceReturn,context,nil,"source-runtime-failed") end
+          P.faintReturns[side]=nil -- no ordinary-return/generic-beam substitution
+        end
+      end
+    end
 
     -- Detached return/faint tails continue in real presentation time.
     for i=#P.retiringActors,1,-1 do
@@ -2164,7 +2494,19 @@ function P:update(context,dt)
       local existing=P.stadiumActors[side] and P.stadiumActors[side].actor
       local actor=existing or (actorVisible(context,side,existing) and stadiumActor(context,side) or nil)
       driveSpawn(context,side,actor)
-      if actor and type(actor.update)=="function" then pcall(actor.update,actor,actorDt) end
+      local actorStep=actorDt
+      local WH=V and V.WazaHandlers
+      if WH and type(WH.actorControllerState)=="function" and not (actor and (actor.state=="faint" or actor.pendingFaint)) then
+        local okController,controller=pcall(WH.actorControllerState,WH,side)
+        if okController and type(controller)=="table" and controller.motionFrozen==true then actorStep=0 end
+      end
+      -- The isolated Kizetu/downin controller owns return effects and eventual
+      -- visibility, not the Pokemon's native faint animation clock. Let the body
+      -- keep advancing while the withdraw effect plays in tandem.
+      if actor and type(actor.update)=="function" then pcall(actor.update,actor,actorStep) end
+      if P.stadiumActors[side] and P.stadiumActors[side].faintReturnPending then
+        beginPendingFaintReturn(context,side,P.stadiumActors[side])
+      end
     end
   end
 end
@@ -2177,7 +2519,44 @@ local function hasRetiringActor(side)
 end
 
 function P:covers(context,side)
-  if self.mode=="native" or not self:available(context) then return false end
+  if not self:available(context) then return false end
+  -- The grouped doubles opening owns an intentionally empty field before its
+  -- first source ball reveal. Cover the engine picture layer during the one-frame
+  -- pre-takeover boundary as well as CBE's own actor pass, otherwise an already
+  -- resident Gen-II lead can leak through even though actorVisible() is false.
+  if doublesOpeningPending(context) then return true end
+  -- Once the doubles runtime has taken presentation ownership, its four slot
+  -- records replace the native host's one-picture-per-side layer completely.
+  -- Do NOT key this to self.drawn[] or the singles stadiumActors table: doubles
+  -- intentionally hides individual 3D actors during Waza/Dig/Fly/release beats,
+  -- and Gen I/II may ask whether the native picture is covered before the world
+  -- pass for that frame.  The old draw-order-dependent contract let the stock
+  -- Game Boy picture leak back in exactly when a move began, producing a giant
+  -- screen-space sprite over the Colosseum arena.  Models OFF is covered too:
+  -- DoublesPresenter owns and projects all four resolved sprites itself, whereas
+  -- the native layer can represent only one battler per side and would duplicate
+  -- the active pair.
+  local doublesRuntime=V and V.DoublesRuntime
+  if doublesRuntime then
+    local lookup=type(doublesRuntime.presentation)=='function' and doublesRuntime.presentation
+      or (type(doublesRuntime.combat)=='function' and doublesRuntime.combat or nil)
+    if lookup then
+      local ok,session=pcall(lookup,context and context.battle)
+      if ok and session then return true end
+    end
+  end
+  if self.mode=="native" then return false end
+  -- Singles, like doubles, owns its Pokémon picture layer for the full source
+  -- presentation, including cold-body preparation, sendout, Waza hides and faint
+  -- tails. Visibility is NOT ownership: falling back to native screen-space art
+  -- during these beats produces the giant ROM sprite over the 3D battlefield.
+  -- The exact-source acquisition/worker above remains responsible for residency;
+  -- this never authorizes a substitute model or changes native battle mechanics.
+  if self.mode=="stadium" and self.modeId=="cbe:colosseum-pokemon"
+      and cbePokemonModelsEnabled(context) then
+    local b=liveBattler(context,side)
+    if b then return true end
+  end
   -- A live CBE 3D actor owns its side continuously, not only after drawWorld
   -- happened to set a per-frame `drawn` flag. Gen1 damage presentation can
   -- query the picture layer before the world pass; tying ownership to draw
@@ -2311,6 +2690,16 @@ function P:drawWorld(context)
     if okW and drewW then any=true end
   end
   any=drawMoveFx(context) or any
+  local RP=V and V.ReleasePresentation
+  if RP and type(RP.drawFaintSingle)=="function" then
+    for _,side in ipairs(SIDES_PE) do
+      local sourceReturn=P.faintReturns and P.faintReturns[side]
+      if sourceReturn then
+        local okReturn,drewReturn=pcall(RP.drawFaintSingle,context,sourceReturn)
+        if okReturn and drewReturn then any=true end
+      end
+    end
+  end
   g.setDefaultFilter(oldFilterMin,oldFilterMag,oldAniso or 1)
   return any or externalValue
 end
@@ -2391,7 +2780,8 @@ function P:event(context,name,payload)
     end
 
     if spec and V.WazaPhasePolicy then
-      spec=V.WazaPhasePolicy.select(spec,{dex=actor and actor.dex,stage=payload and payload.charging==true and "charge" or "attack"})
+      spec=V.WazaPhasePolicy.select(spec,{moveId=tonumber(resolvedId),dex=actor and actor.dex,
+        stage=payload and payload.charging==true and "charge" or "attack"})
     end
 
     local function bindStartedAttack(activeActor,nativeSampled)
@@ -2522,18 +2912,39 @@ function P:event(context,name,payload)
     else bindStartedDamage(nil,true) end
   elseif semantic=="battle.fainted" then
     side=(S and S.payload and S.payload(context,payload,{"battler","side"})) or (payload and payload.side)
-    local actor=side and (P.stadiumActors[side] and P.stadiumActors[side].actor)
+    local record=side and P.stadiumActors[side]
+    local actor=record and record.actor
     if actor and type(actor.faint)=="function" then
       -- Faint and recall are separate lifecycle beats. A KO should play the
       -- faint reaction for every side; recall belongs to a voluntary/forced
       -- battler switch and is handled below.
       pcall(actor.faint,actor,"collapse")
+      local RP=V and V.ReleasePresentation
+      record.faintReturnPending=true
+      beginPendingFaintReturn(context,side,record)
       if Director and type(Director.bindFaint)=="function" then
         local duration
         if type(actor.terminalDuration)=="function" then
           local okDur,value=pcall(actor.terminalDuration,actor,"faint");if okDur then duration=tonumber(value) end
         elseif type(actor.stateDuration)=="function" then
           local okDur,value=pcall(actor.stateDuration,actor,"faint");if okDur then duration=tonumber(value) end
+        end
+        local sourceDuration
+        if RP and type(RP.faintDurationFor)=="function" then
+          local okSource,value=pcall(RP.faintDurationFor,recordMon(record));if okSource then sourceDuration=tonumber(value) end
+        end
+        if sourceDuration then
+          local wait=0
+          if actor.hitAge and type(actor.stateDuration)=="function" then
+            local okHit,hitDuration=pcall(actor.stateDuration,actor,"hit")
+            if okHit and tonumber(hitDuration) then wait=math.max(0,tonumber(hitDuration)-tonumber(actor.hitAge or 0)) end
+          end
+          local sourceDelay=0
+          if RP and type(RP.faintStartDelayFor)=="function" then
+            local okDelay,value=pcall(RP.faintStartDelayFor,recordMon(record),actor)
+            if okDelay then sourceDelay=math.max(0,tonumber(value) or 0) end
+          end
+          duration=wait+math.max(tonumber(duration) or 0,sourceDelay+sourceDuration)
         end
         pcall(Director.bindFaint,Director,context,side,duration)
       end
@@ -2563,6 +2974,11 @@ end
 function P:finish(context,reason)
   self.drawn.player=false;self.drawn.enemy=false
   self.moveFxActive={}
+  local RP=V and V.ReleasePresentation
+  if RP and type(RP.finishFaint)=="function" then
+    for _,sourceReturn in pairs(self.faintReturns or {}) do pcall(RP.finishFaint,sourceReturn,context,nil,reason or "battle-ended") end
+  end
+  self.faintReturns={}
   if P.animated and type(P.animated.finish)=="function"
       and context and context.battle and not cbePokemonModelsEnabled(context) then
     pcall(P.animated.finish,context.battle)
@@ -2696,7 +3112,7 @@ function P.status()
       table.sort(out);return out
     end)(),
     battleArt=id,battleArtWorld=battleArtWantsWorldSprites(),
-    stadiumActors=stadium and true or false,stadiumError=P.stadiumError,
+    stadiumActors=stadium and true or false,stadiumError=P.stadiumError,stadiumPending=P.stadiumPending,
     retiringActorCount=#P.retiringActors,
     moveFxActive=#P.moveFxActive,moveFxError=P.moveFxError,moveFxRenderFaults=P.moveFxRenderFaults or 0,moveFxScale=scaleStatus,
     actorLifecycle="persistent-hit / detached-recall / faint-tail",
@@ -2710,11 +3126,27 @@ P._test.sourceNativeSlot=sourceNativeSlot
 P._test.particleIntensityAlpha=particleIntensityAlpha
 P._test.particleShaderSource=MOVE_FX_PIXEL
 P._test.particleColors=particleColors
+P._test.particleAlphaCompare=particleAlphaCompare
 P._test.drawParticleAt=drawParticleAt
 P._test.drawTrailRibbon=drawTrailRibbon
+P._test.stadiumActor=stadiumActor
 P._test.actorVisible=actorVisible
+P._test.actorGoneByBattle=actorGoneByBattle
+P._test.beginPendingFaintReturn=beginPendingFaintReturn
+P._test.syncStadiumActor=syncStadiumActor
+P._test.retireStadiumActor=retireStadiumActor
+P._test.doublesOpeningPending=doublesOpeningPending
 P._test.particleTransitSpan=particleTransitSpan
 function P:particleTransitSpan(moveId,role,entry) return particleTransitSpan(moveId,role,entry) end
+local function particleTransitProgress(fx,p)
+  if not (fx and p and fx.sourceWorld and fx.targetWorld) then return nil end
+  local world=particleWorld(fx,p,p.position);if not world then return nil end
+  local lane=vsub(fx.targetWorld,fx.sourceWorld);local d2=vdot(lane,lane)
+  if d2<1e-8 then return nil end
+  return vdot(vsub(world,fx.sourceWorld),lane)/d2
+end
+P._test.particleTransitProgress=particleTransitProgress
+function P:particleTransitProgress(fx,p) return particleTransitProgress(fx,p) end
 P._test.combatGeometry=combatGeometry
 -- Shared source-bank resolver; doubles must use the same PKX bank as singles.
 function P:sourceNativeSlot(spec,role) return sourceNativeSlot(spec,role) end

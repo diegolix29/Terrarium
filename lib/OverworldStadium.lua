@@ -24,6 +24,14 @@ local V = ...
 
 local StadiumMon = V.require("StadiumMon")
 local StadiumPack = V.require("StadiumPack")
+-- Colosseum ships the complete 386-species Gen I-III roster, unlike
+-- StadiumPack (1-151) / Stadium2Pack (1-251). This resolver tries the
+-- Stadium-sourced model first (unchanged behaviour for anyone who already
+-- has Stadium ROMs imported) and falls back to the Colosseum-sourced one
+-- everywhere Stadium can't cover -- every Gen III species, and every
+-- species at all when only the Colosseum disc is imported.
+local ColosseumMon = V.require("ColosseumMon")
+local ColosseumDex = V.require("ColosseumDex")
 local Mat4 = V.require("Mat4")
 local Config = V.require("OverworldStadiumConfig")
 local PokemonHeights = V.require("PokemonHeights")
@@ -73,7 +81,7 @@ end
 local function dexNumber(v)
   if type(v) == "number" then
     local n = math.floor(v)
-    if n >= 1 and n <= 251 then return n end
+    if n >= 1 and n <= ColosseumDex.speciesCount then return n end
   elseif type(v) == "string" then
     local n = tonumber(v)
     if n then return dexNumber(n) end
@@ -773,7 +781,12 @@ function OverworldStadium.canRenderEntity(entity)
 
   local Stadium2Pack = V.require("Stadium2Pack")
   local ok2, available2 = pcall(Stadium2Pack.available, dex)
-  return ok2 and available2 == true, dex
+  if ok2 and available2 == true then return true, dex end
+
+  -- Colosseum fallback: covers Gen III (dex > 251, where neither Stadium
+  -- pack has anything at all) and also a Stadium-less install.
+  local ok3, available3 = pcall(ColosseumMon.available, dex)
+  return ok3 and available3 == true, dex
 end
 
 local function wildBodyVisible(entity)
@@ -845,6 +858,69 @@ function OverworldStadium.canRescuePose(entity)
   return ok == true
 end
 
+-- Colosseum-sourced fallback slots, tracked separately from StadiumMon's
+-- `slots` table above so a species Stadium can't render never fights the
+-- Stadium path for the same per-entity state. Deliberately simpler than
+-- prepareOne's Stadium path below: no walk-bob/locomotion or Sky Ride
+-- anchoring yet, just correct position, facing, and idle animation. Good
+-- enough to have a Gen III / Colosseum-only Pokemon appear at all; the
+-- richer locomotion can be layered on later the same way prepareOne does it.
+local colosseumSlots = setmetatable({}, { __mode = "k" })
+
+local function prepareOneColosseum(p, dex, dt)
+  if not (p and p.entity and dex) then return false end
+  if not ColosseumMon.available(dex) then return false end
+
+  local slot = colosseumSlots[p.entity]
+  if not slot then
+    slot = { lastSeen = frameNo }
+    colosseumSlots[p.entity] = slot
+  end
+  slot.lastSeen = frameNo
+
+  if not ColosseumMon.update(dex, "normal", dt) then return false end
+
+  local renderFacing = p.facing
+  local fx, fz = facingVector(renderFacing)
+
+  -- Camera-relative facing in first/third-person free-roam, same convention
+  -- the Stadium path below uses.
+  local okFirstPerson, FirstPerson = pcall(V.require, "FirstPerson")
+  if okFirstPerson and FirstPerson then
+    local okBlend, b = pcall(FirstPerson.cardBlend)
+    if okBlend and b and b > 0 then
+      local okYaw, cameraYaw = pcall(FirstPerson.cardYaw, p.px or 0, p.py or 0)
+      cameraYaw = okYaw and cameraYaw or 0
+      local face = type(renderFacing) == "string" and string.lower(renderFacing) or renderFacing
+      local yaw = 0
+      if face == "down" then yaw = cameraYaw * b
+      elseif face == "up" then yaw = (cameraYaw + math.pi) * b
+      elseif face == "left" then yaw = (cameraYaw + math.pi / 2) * b
+      elseif face == "right" then yaw = (cameraYaw - math.pi / 2) * b
+      end
+      fx, fz = math.sin(yaw), math.cos(yaw)
+    end
+  end
+
+  local x = (p.px or 0) + 8
+  local z = (p.py or 0) + 8
+  local y = (p.gh or 0) + (p.lift or 0)
+  if p.entity and tonumber(p.entity._stadiumSkyRideLift) then
+    y = y + tonumber(p.entity._stadiumSkyRideLift)
+  end
+
+  local matrix = ColosseumMon.matrix(dex, "normal", x, y, z, fx, fz)
+  if not matrix then return false end
+
+  p.colosseumDex = dex
+  p.colosseumVariant = "normal"
+  p.colosseumMatrix = matrix
+  -- Shared with the Stadium path so anything that only reads p.stadiumDex
+  -- (logging, UI) still reports the right species.
+  p.stadiumDex = dex
+  return true
+end
+
 local function prepareOne(p, dex, dt)
   if not (p and p.entity and dex) then return false end
 
@@ -859,7 +935,9 @@ local function prepareOne(p, dex, dt)
   local mon = slot.mon
 
   local okSpecies, ready = pcall(mon.setSpecies, mon, dex)
-  if not okSpecies or not ready or not mon.rig then return false end
+  if not okSpecies or not ready or not mon.rig then
+    return prepareOneColosseum(p, dex, dt)
+  end
 
   -- keep() and KEEP appeared as the battle cache evolved.  Use them when
   -- present but never make an older/newer cache implementation a reason for
@@ -1077,6 +1155,9 @@ function OverworldStadium.prepare(posed)
     p.stadiumTargetHeight = nil
     p.stadiumHeightMeters = nil
     p.stadiumWalking = nil
+    p.colosseumDex = nil
+    p.colosseumVariant = nil
+    p.colosseumMatrix = nil
 
     local playerPokemon = isPokemonPlayerPose(p, dexForPose[i])
     if (not p.isPlayer or playerPokemon) and p.entity and dexForPose[i] then
@@ -1094,6 +1175,11 @@ function OverworldStadium.prepare(posed)
     if frameNo - (slot.lastSeen or 0) > stale then
       pcall(releaseSlot, slot)
       slots[entity] = nil
+    end
+  end
+  for entity, slot in pairs(colosseumSlots) do
+    if frameNo - (slot.lastSeen or 0) > stale then
+      colosseumSlots[entity] = nil
     end
   end
   return true
@@ -1120,6 +1206,16 @@ function OverworldStadium.safeClaimWilds(state)
 end
 
 function OverworldStadium.draw(p)
+  if p and p.colosseumMatrix then
+    local ok, result = pcall(ColosseumMon.draw, p.colosseumDex, p.colosseumVariant, p.colosseumMatrix)
+    if not ok then
+      logOnce("draw-colosseum:" .. tostring(p.colosseumDex),
+        "Colosseum overworld draw failed for dex %s; using sprite", tostring(p.colosseumDex))
+      return false
+    end
+    return result ~= false
+  end
+
   local mon = p and p.stadiumMon
   local matrix = p and p.stadiumMatrix
   if not (mon and mon.rig and matrix) then return false end
@@ -1138,6 +1234,12 @@ function OverworldStadium.safeDraw(p)
 end
 
 function OverworldStadium.cast(p, shadowMap)
+  -- Not yet supported for the Colosseum-backed path -- ColosseumMon has no
+  -- shadow-caster entry point (PokemonActors' Actor:draw doesn't expose
+  -- one). Decline cleanly rather than casting with Stadium fields that were
+  -- never populated for this pose.
+  if p and p.colosseumMatrix then return false end
+
   local mon = p and p.stadiumMon
   local matrix = p and p.stadiumMatrix
   if not (mon and mon.rig and matrix and shadowMap) then return false end
@@ -1155,6 +1257,10 @@ function OverworldStadium.releaseAll()
     releaseSlot(slot)
     slots[entity] = nil
   end
+  for entity in pairs(colosseumSlots) do
+    colosseumSlots[entity] = nil
+  end
+  pcall(ColosseumMon.clearCache)
 end
 
 return OverworldStadium

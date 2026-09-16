@@ -18,10 +18,18 @@
 -- walk stands, then reuses the engine's own machinery for every one of
 -- those questions:
 --
---   passability      the same isWalkableCell / water-while-surfing /
---                    tile-pair / entity-occupancy verdicts Collision
---                    hands the grid walker, asked per cell the player's
---                    body overlaps.
+--   passability      Collision.mayEnter -- the grid walker's own verdict,
+--                    whole, asked per cell the player's body overlaps:
+--                    side walls, bounds, passability, ELEVATION, acro
+--                    tiles and rails, tile pairs, occupancy. Asked, not
+--                    restated; a copy of it here lost three of the seven.
+--
+--   the forced moves the eddy that spins you back out (Gen 2's
+--                    whirlpool) is asked once per moving frame, before the
+--                    slide covers ground, because it is not a refusal the
+--                    body can clamp against -- an eddy reads as plain
+--                    water. Once it fires the engine's spin owns the
+--                    player and this module stands aside.
 --
 --   cell arrival     OverworldState:onStepComplete, the same landing
 --                    pipeline a grid step runs -- warps, spinners, gates,
@@ -29,12 +37,14 @@
 --                    step counters -- fired once per cell crossed, which
 --                    is exactly the rate a grid walk fires it.
 --
---   the special pushes   walking off the map edge, into a ledge, or into
---                    a boulder hands the quantised direction straight to
---                    checkEdgeExit / checkLedgeHop / checkBoulderPush,
---                    the engine's own handlers, which validate and stage
---                    everything themselves (connections, the hop arc,
---                    the two-push arm). While any of those animates a
+--   the special pushes   walking out of a door, off the map edge, into a
+--                    ledge, or into a boulder hands the quantised
+--                    direction straight to checkGen2CarpetExit /
+--                    checkGen3ArrowWarp / checkEdgeExit / checkLedgeHop /
+--                    checkBoulderPush, the engine's own handlers, which
+--                    validate and stage everything themselves (the mat's
+--                    own direction, connections, the hop arc, the
+--                    two-push arm). While any of those animates a
 --                    scripted grid move, this module stands aside and
 --                    adopts the result.
 --
@@ -98,39 +108,67 @@ end
 -- (a warp mat, the water it is surfing, a cell an NPC just stepped
 -- against).
 
-local function pairBlocked(map, surfing, sx, sy, tx, ty)
-  local Game = require("src.core.Game")
-  local tp = Game.data and Game.data.field and Game.data.field.tilePairs
-  if not tp then return false end
-  local list = surfing and tp.water or tp.land
-  if not list or #list == 0 then return false end
-  local tileset = map.def.tileset
-  local a = map:cellTile(sx, sy)
-  local b = map:cellTile(tx, ty)
-  for _, p in ipairs(list) do
-    if p.tileset == tileset
-       and ((p.a == a and p.b == b) or (p.a == b and p.b == a)) then
-      return true
-    end
-  end
-  return false
-end
-
--- Why (cx, cy) refuses the player's body, or nil when it may enter:
--- "bounds" | "tile" | "entity", the grid verdict's own names.
-local function blockedCell(state, p, cx, cy)
+-- ASK THE ENGINE. DO NOT RESTATE IT.
+--
+-- MOTIVATED BY THE CLIFF BESIDE ROUTE 114'S METEOR FALLS MOUTH (the seam
+-- between (14,52) at elevation 3 and (14,53) at elevation 4), which the free
+-- walk strolled up.  Reported from play: "when using first and third person
+-- into caves im getting an issue where it makes me move on top of the cliff
+-- instead of going into the cave entrance. shouldnt be able to climb on top
+-- of cliffs either in first or third person".
+--
+-- This function used to spell the step test out again, and it got FOUR of the
+-- engine's SEVEN clauses.  Collision's own `verdict` applies, in order: the
+-- one-way side walls, the bounds, the passability (with the surfing
+-- exception), the ELEVATION (with the coming-ashore exception), the acro
+-- tiles and the rail under the rider, the tile pairs, and the occupancy.  The
+-- copy here had bounds, passability, tile pairs and occupancy -- and no side
+-- walls, no elevation and no acro.
+--
+-- Elevation is the one that showed.  In Hoenn the sea is passable ground at
+-- elevation 1 and dry land is 3; a cliff top and its foot are two elevations
+-- with nothing solid between them, which is the whole of "you cannot walk
+-- onto water", "you cannot step off a cliff" and "the bridge and the river
+-- beneath it are different places".  Measured over the region: 4,376 cliff
+-- steps and 3,704 water steps across 107 maps that the grid walk refuses with
+-- reason "elevation" and this function waved through -- including walking off
+-- a beach onto the open sea, on foot, without surfing.
+--
+-- So it no longer has an opinion.  Collision.mayEnter is canMove asked about
+-- a cell you name instead of a direction you take, and it runs the same
+-- verdict through the same movement.collision hook -- which the restatement
+-- also skipped, so a mod that overrode collision was obeyed on the grid and
+-- ignored in first person.  Anything added to that verdict later is now the
+-- free walk's too, which is the actual repair: this is the third bug in a row
+-- from restating the engine rather than calling it.
+--
+-- `dir` is the AXIS being crossed, handed down by slideX/slideZ, because the
+-- cell asked about can be DIAGONAL from the player -- a body with a radius
+-- overlaps two cells per axis while it slides along anything. East is east
+-- through that boundary whichever row the cell is in, which is the reading
+-- the two direction-keyed clauses (the side walls, the rail) want.
+--
+-- The player's OWN cell still never blocks, and that exemption matters more
+-- now than it did: with elevation live, a body standing on a cell whose
+-- elevation disagrees with p.elevation -- a script placed them, a warp landed
+-- them -- must still be free to walk off it rather than be frozen where it
+-- stands.  (p.elevation itself is kept current by the engine: setMap writes
+-- it on entry and onStepComplete re-derives it on every cell crossed, which
+-- this module calls on every cell it crosses.  A nil elevation blocks
+-- nothing, so a mover that somehow has none walks exactly as before.)
+--
+-- Returns the engine's own reason -- "bounds" | "tile" | "entity" |
+-- "elevation" -- or nil when the body may enter.  The extra name is passed
+-- through rather than folded into "tile" because it is the engine's word for
+-- it, and the blocked-push block below already treats it the way the grid
+-- walk does: not an entity, so the door and ledge verbs are still offered it.
+local function blockedCell(state, p, cx, cy, dir)
   if cx == p.cellX and cy == p.cellY then return nil end
-  local map = state.map
-  if not map:inBounds(cx, cy) then return "bounds" end
-  if not map:isWalkableCell(cx, cy) then
-    if not (p.surfing and map:isWaterCell(cx, cy)) then return "tile" end
-  end
-  if pairBlocked(map, p.surfing, p.cellX, p.cellY, cx, cy) then
-    return "tile"
-  end
   local Collision = require("src.world.Collision")
-  if Collision.occupied(state.entities, cx, cy, p) then return "entity" end
-  return nil
+  local allowed, why = Collision.mayEnter(state.map, state.entities, p,
+                                          cx, cy, dir)
+  if allowed then return nil end
+  return why or "tile"
 end
 
 FreeMove._blockedCell = blockedCell   -- named for the suite
@@ -149,10 +187,11 @@ local function slideX(state, p, dx)
   local z0 = math.floor((pos.z - r + EPS) / 16)
   local z1 = math.floor((pos.z + r - EPS) / 16)
   local hit = nil
+  local dir = dx > 0 and "right" or "left"
   local edge = dx > 0 and math.floor((nx + r) / 16)
                or math.floor((nx - r) / 16)
   for zc = z0, z1 do
-    hit = blockedCell(state, p, edge, zc)
+    hit = blockedCell(state, p, edge, zc, dir)
     if hit then break end
   end
   if hit then
@@ -170,10 +209,11 @@ local function slideZ(state, p, dz)
   local x0 = math.floor((pos.x - r + EPS) / 16)
   local x1 = math.floor((pos.x + r - EPS) / 16)
   local hit = nil
+  local dir = dz > 0 and "down" or "up"
   local edge = dz > 0 and math.floor((nz + r) / 16)
                or math.floor((nz - r) / 16)
   for xc = x0, x1 do
-    hit = blockedCell(state, p, xc, edge)
+    hit = blockedCell(state, p, xc, edge, dir)
     if hit then break end
   end
   if hit then
@@ -205,31 +245,75 @@ end
 local function pushSpecials(state, dir, why)
   local p = state.player
   p.facing = dir      -- the handlers read the push off the facing
+
+  -- A DOORMAT IS A VERB, AND IT WAS THE ONE VERB THIS LIST LEFT OUT.
+  --
+  -- MOTIVATED BY CHERRYGROVE CITY'S POKEMON CENTER -- AND EVERY OTHER
+  -- CENTER, MART, GYM AND HOUSE IN JOHTO -- WHOSE EXIT MAT THE FREE WALK
+  -- COULD STAND ON FOREVER.  Reported from play: "first and third person not
+  -- able to exit buildings in gen2".
+  --
+  -- The list below restates the grid walk's blocked-step verbs, and it
+  -- restated three of the five.  On the grid (OverworldController:handleInput,
+  -- the held-direction loop) the order is:
+  --
+  --     checkGen2CarpetExit -> checkGen3ArrowWarp -> checkEdgeExit
+  --     -> checkLedgeHop -> checkBoulderPush
+  --
+  -- and the first two are exactly the ones a DIRECTIONAL EXIT MAT answers to.
+  -- Nothing else will: on a Gen 2 carpet ($70/$76/$78/$7E) and a Gen 3 arrow
+  -- warp ($62..$65, $6D) all three of the other ways out are shut, by design
+  -- and not by accident --
+  --
+  --   * Warp.onArrive REFUSES the mat.  That is CheckDirectionalWarp, and it
+  --     is what stops a two-cell mat from being a trapdoor you fall through
+  --     by taking one step ALONG it (Warp.lua:45-50).  It must stay refused.
+  --   * checkEdgeExit and the blocked-step Warp.onCollision below are both
+  --     gated on canCollisionWarp, and refreshStandingOnWarp clears
+  --     standingOnWarp for precisely these cells -- a mat is a warp tile and
+  --     is not a door tile -- so the gate is FALSE on every mat in the game
+  --     (OverworldController.lua:3208-3211 says so in as many words).
+  --   * there is no completed step to qualify either, because the cell the
+  --     mat points at is the doorway: off the map, or a wall.
+  --
+  -- So the free walk pushed south on the mat, was clamped flush against the
+  -- map edge, ran this function every frame, and got false from all three --
+  -- while the grid walk on the identical cell, with standingOnWarp equally
+  -- false, walked out on the first frame through the two calls that were
+  -- missing here.  Gen 1 was never affected: its mat is a DOOR tile, which
+  -- keeps standingOnWarp set, so checkEdgeExit already answered for it.
+  --
+  -- Both of these self-gate -- checkGen2CarpetExit returns false off Gen 2,
+  -- checkGen3ArrowWarp returns false on a map with no arrow warps -- so they
+  -- are safe to ask on every firm push, which is the same contract the three
+  -- below already keep.  They go FIRST, in the grid walk's own order: the
+  -- engine puts checkGen3ArrowWarp ahead of checkEdgeExit deliberately
+  -- (OverworldController.lua:3719-3724), and a mat whose front is off the map
+  -- would otherwise be answered by the edge path instead of the door.
+  if state:checkGen2CarpetExit(dir) then return true end
+  if state:checkGen3ArrowWarp(dir) then return true end
+
   if why == "bounds" and state:checkEdgeExit(dir) then return true end
   if state:checkLedgeHop(dir) then return true end
   if state:checkBoulderPush(dir) then return true end
-  
-  local Game = require("src.core.Game")
-  local Warp = require("src.world.Warp")
-
-  if why ~= "entity" then
-    -- Check for standard door/warp tiles on the current cell when blocked
-    local w = Warp.onArrive(state.map, p.cellX, p.cellY)
+  if why ~= "entity" and state:canCollisionWarp() then
+    local Game = require("src.core.Game")
+    local Warp = require("src.world.Warp")
+    local w = Warp.onCollision(state.map, Game.data.field.warpCarpets,
+                               p.cellX, p.cellY, dir)
     if w then
       state:takeWarp(w.def)
       return true
     end
-
-    -- Fallback to directional carpets
-    if state:canCollisionWarp() then
-      w = Warp.onCollision(state.map, Game.data.field.warpCarpets,
-                                 p.cellX, p.cellY, dir)
-      if w then
-        state:takeWarp(w.def)
-        return true
-      end
-    end
   end
+  -- and NO bonk. The grid walk's collision sound marks a discrete event:
+  -- you pressed a direction, the step was refused, nothing happened. A
+  -- free walk has no such moment -- the body slides along every wall it
+  -- grazes, continuously, and a corridor taken at a slight angle is a
+  -- steady graze from end to end. Rate-limited or not, that came out as a
+  -- machine-gun of bonks for walking normally down a hallway. The wall
+  -- stopping you is the feedback; the sound only ever said so twice a
+  -- second whether or not anything had changed.
   return false
 end
 
@@ -316,11 +400,59 @@ function FreeMove.tick(state)
 
   local speed = (Game.save and Game.save.onBike) and FreeMove.BIKE
                 or FreeMove.WALK
-  -- Hold B to run: 2x movement speed when option enabled and B held
-  if Game.save and Game.save.options and Game.save.options.holdBToRun and input:isDown("b") then
-    speed = speed * 2
-  end
   local dx, dz = wx * speed, wz * speed
+
+  -- AN EDDY IS NOT A WALL, WHICH IS WHY THE BLOCKED-PUSH LIST COULD NOT HOLD
+  -- IT.
+  --
+  -- MOTIVATED BY THE WHIRLPOOLS ON THE WAY INTO WHIRL ISLANDS AND UNION
+  -- CAVE'S LOWER FLOOR, which the free walk swam straight into and sat in.
+  --
+  -- The doormat verbs below live in pushSpecials because a doormat is a
+  -- REFUSED step: the mat's front is a wall or off the map, the body clamps,
+  -- and the push is the event.  An eddy is the opposite.  CollisionPermission-
+  -- Table (3E:$74BE) gives COLL_WHIRLPOOL ($24/$2C) the byte $11, whose low
+  -- nibble GetTileCollision keeps -- so the eddy reads as PLAIN WATER, .TrySurf
+  -- does not refuse it, Collision.canMove says yes, and blockedCell therefore
+  -- returns nil.  There is no clamp, no `hit`, and pushSpecials never runs at
+  -- all.  Measured on a Gen 2 pond: the free walk crossed into the eddy cell
+  -- on frame 8 and was still sitting in it on frame 22, with checkGen2Whirl-
+  -- pool never once asked, while the grid walk on the identical cell started
+  -- the spin on frame 1.
+  --
+  -- So it belongs HERE, on the allowed-movement path, before the slide covers
+  -- any ground.  That is also where the grid walk keeps it: handleInput asks
+  -- it at the TOP of the held-direction loop, outside and ahead of the
+  -- `not p.moving and p.facing == dir` guard, because ".Normal and .Surf both
+  -- `call .CheckTile` straight after .GetAction and `ret c`, so the eddy
+  -- pre-empts turning, stepping, ledges and warps alike".  Asking it after the
+  -- slide would let the body enter the current before being spun out of it,
+  -- and standing IN an eddy is the softlock the eddy-as-a-bump exists to
+  -- avoid.
+  --
+  -- The direction is the quantised TRAVEL bearing -- the same dominant-axis
+  -- rule the blocked push below uses -- because what the cartridge tests is
+  -- the cell you are heading INTO.  (checkGen2Whirlpool also answers for an
+  -- eddy underfoot, which is how a save left standing on one gets spun back
+  -- out; a free walker who reached one before this existed is rescued by the
+  -- same line.)
+  --
+  -- Once it fires, the engine owns the player: it sets p.spinning and
+  -- p.inputLocked, so the very next tick takes the branch at the top of this
+  -- function and the free walk stands aside for the whole 32-frame whirl and
+  -- the 20-frame turn-around after it.  Dropping here is what hands the body
+  -- card back, so the turn-around is drawn with the engine's own four-way
+  -- facing rather than a bearing this module froze.
+  --
+  -- It costs one call per moving frame off Gen 2, where checkGen2Whirlpool
+  -- answers false on its third line.
+  local travel = math.abs(dx) >= math.abs(dz)
+                 and (dx > 0 and "right" or "left")
+                 or (dz > 0 and "down" or "up")
+  if state:checkGen2Whirlpool(travel) then
+    FreeMove.drop()
+    return
+  end
 
   local hitX = slideX(state, p, dx)
   local hitZ = slideZ(state, p, dz)

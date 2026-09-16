@@ -481,6 +481,8 @@ function WildRoamers.engage(ow, roamer)
   if Game.stack and Game.stack:top() ~= ow then return false end
   if ow.transitioning or ow.engaging then return false end
   if ow.runner and ow.runner:isRunning() then return false end
+  -- Safety check: ensure roamer has valid species and level before starting battle
+  if not roamer.species or not roamer.level then return false end
 
   local BattleState = require("src.battle.BattleState")
   local battle = BattleState.newWild(Game, roamer.species, roamer.level)

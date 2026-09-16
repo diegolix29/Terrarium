@@ -173,7 +173,9 @@ local function borderTiles(map)
   local def = map.def
   local block = def and def.borderBlock
   local blocks = map.tileset and map.tileset.blocks
-  local row = block and blocks and blocks[block + 1]
+  -- Gen3 tilesets don't have blocks field
+  if not blocks then return set end
+  local row = block and blocks[block + 1]
   for _, t in ipairs(row or {}) do set[t] = true end
   return set
 end

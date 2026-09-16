@@ -174,6 +174,14 @@ local function specialFor(ctx)
 end
 
 function R.playerModelFor(ctx)
+  local b=battleOf(ctx)
+  if b and b.__mtbHub==true then
+    local requested=(b.trainer and b.trainer.playerModel) or "wes"
+    local choice=R.normalizeChoice(requested,"player")
+    if choice=="off" then choice="wes" end
+    local cfg=indexEntry("players",choice) or catalogEntry(choice) or catalogEntry("wes")
+    return cfg,cfg and ("mtbattle-hub:"..tostring(cfg.id or choice)) or "mtbattle-hub-model-missing"
+  end
   local p=prefs(ctx)
   local choice=R.normalizeChoice(p.playerModel or (p.playerTrainerModel==false and "off" or "red"),"player")
   if choice=="off" then return nil,"player-off" end

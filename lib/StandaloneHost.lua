@@ -99,6 +99,22 @@ end
 
 local function cameraPose(s)
   local base=baseCamera(s.context.arena)
+  if s and s.battle and s.battle.__mtbHub==true then
+    -- Dedicated Mt. Battle setup composition: Wes is the centered hero and the
+    -- UI lives on the two outer rails. Do not hand this non-combat beat to the
+    -- semantic battle camera/director, which otherwise drifts toward attacker/
+    -- target staging despite the placeholder having no battlers. FreeLookCamera
+    -- is still layered over this stable base so right-drag/wheel can inspect the
+    -- Summit throughout setup without contaminating battle camera ownership.
+    local mid=(s.context.arena and s.context.arena.mid) or {0,0}
+    local pose={
+      eye={mid[1],8.2,mid[2]-30.0},
+      focus={mid[1],4.4,mid[2]},
+      fov=math.rad(31.5),curve=0,
+    }
+    local adjusted=V.FreeLookCamera and V.FreeLookCamera.pose(s.context,pose)
+    return adjusted or pose
+  end
   if V.BossIntro then
     local intro=V.BossIntro.camera(base,s.context);if intro then if V.FreeLookCamera then V.FreeLookCamera.reset()end;return intro end
   end
@@ -462,7 +478,8 @@ local function render(s)
     return nil
   end
   s.failOpen=false;s.retryBegin=false;s.started=true
-  local gen2=Compat and Compat.isGen2Battle(battle)
+  local gen2=(battle and battle.__mtbHub==true and tonumber(battle.__cbeGeneration)==2)
+    or (Compat and Compat.isGen2Battle(battle))
   local renderer=battle.game and battle.game.renderer
   if not gen2 then
     if not (renderer and type(renderer.setWorldOverride)=="function") then return nil end
@@ -472,10 +489,29 @@ local function render(s)
   return surface
 end
 
+-- Mt. Battle's setup hub is intentionally NOT a BattleState, so the normal
+-- BattleState.draw wrapper below never gets a chance to call render(s). Expose
+-- one tightly-scoped frame seam for that non-combat session: HubScreens invokes
+-- it from the ordinary stack state's draw, after Renderer:beginFrame but before
+-- Renderer:endFrame, so Gen 1 receives the same worldOverride composition a real
+-- CBE battle does. Real battles cannot enter through this function.
+function H.renderHubFrame()
+  local s=H.session
+  local battle=s and s.battle
+  if not (battle and battle.__mtbHub==true) then return nil end
+  return render(s)
+end
+
 function H.coversSide(battle,side)
   local s=H.session
   local same=s and ((Compat and Compat.matches(s.battle,battle)) or s.battle==battle)
-  if not (same and s.presented and CurrentSprites) then return false end
+  if not (same and CurrentSprites) or s.failOpen==true then return false end
+  -- Native drawPic can precede the first world pass. Only the strict CBE model
+  -- provider may cover that boundary; generic sprite/external providers still
+  -- need an observed successful presentation before they suppress native art.
+  local ownsBeforeDraw=s.started and CurrentSprites.mode=="stadium"
+    and CurrentSprites.modeId=="cbe:colosseum-pokemon"
+  if not (s.presented or ownsBeforeDraw) then return false end
   local ok,v=pcall(CurrentSprites.covers,CurrentSprites,s.context,side)
   return ok and v==true
 end
@@ -491,14 +527,6 @@ local function cbeWorldOwns(battle)
     if ok and value==true then return true end
   end
   return false
-end
-
-local function cbeModelsEnabled(battle)
-  local settings=V.BattleSettings
-  if not (settings and type(settings.pokemonModelsEnabled)=="function") then return true end
-  local game=(battle and battle.game) or (V.mod and V.mod.game)
-  local ok,value=pcall(settings.pokemonModelsEnabled,game)
-  return (not ok) or value~=false
 end
 
 local function captureHidesNativeEnemy(battle)
@@ -525,7 +553,9 @@ end
 function H.suppressesNativeSide(battle,side)
   if not cbeWorldOwns(battle) then return H.coversSide(battle,side) end
   if side=="enemy" and captureHidesNativeEnemy(battle) then return true end
-  if cbeModelsEnabled(battle) then return true end
+  -- CurrentSpriteModels owns the provider-specific contract: selected CBE
+  -- models retain their native-picture coverage through source hides and mobile
+  -- preparation; Models OFF/portable providers retain their existing behavior.
   return H.coversSide(battle,side)
 end
 

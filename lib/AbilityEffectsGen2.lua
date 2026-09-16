@@ -1,9 +1,10 @@
--- Optional ability hooks over the supplied native Gen II engine (flat mons).
--- Use the actual native boundaries: dealDamage receives opts.move; useMove owns
--- recoil/drain/secondary handling; hitOnce owns each hit and returns damage+info.
--- Call-local definitions and temporary hooks are restored even on failure.
--- Damage modifiers retain the donor's post-formula approach, not exact Gen III
--- arithmetic. The build notes list unimplemented donor ability categories.
+-- Optional GC6E01 ability hooks over the supplied native Gen II engine (flat
+-- mons). Use the actual native boundaries: useMove owns recoil/drain/secondary
+-- handling; hitOnce owns each hit and returns damage+info; Damage.calc receives
+-- the pre-formula stat/power inputs. Source-proven formula and accuracy ordering
+-- is inserted there with call-local copies/hooks restored even on failure.
+-- Categories whose exact retail seam is still unresolved remain isolated rather
+-- than being approximated as complete Gen-III parity.
 local V=... or {}
 local unpack=unpack or table.unpack
 local function pack(...)return {n=select('#',...),...}end
@@ -14,9 +15,6 @@ local M={}
 local installed=false
 local Effects -- cached at install time: src.battle.gen2.Effects
 
-local function gameOf(battle)
-  return battle and (battle.game or (battle.host and battle.host.game))
-end
 
 local function enabled(battle)
   return Abilities.enabledBattle(battle)
@@ -39,12 +37,27 @@ local function hasAbility(battle, mon, id)
   return abilityOf(battle, mon)==id
 end
 
+local function fieldHasAbility(battle,id)
+  for _,value in ipairs(Abilities.actives(battle) or {}) do
+    local mon=value and (value.mon or value)
+    if mon and abilityOf(battle,mon)==id then return true end
+  end
+  return false
+end
+
 local PHYSICAL_TYPES={NORMAL=true,FIGHTING=true,FLYING=true,POISON=true,GROUND=true,
   ROCK=true,BUG=true,GHOST=true,STEEL=true}
 local function isPhysical(move)
   if not move then return false end
-  if move.category then return move.category=="physical" end
+  -- GC6E01 uses the Gen-III type split. A move-local category must never turn
+  -- FIRE/WATER/etc. physical or NORMAL/FIGHTING/etc. special for abilities.
   return PHYSICAL_TYPES[move.type]==true
+end
+
+local function shallow(t)
+  local out={}
+  for k,v in pairs(t or {}) do out[k]=v end
+  return out
 end
 
 local LOW_HP_TYPE={}
@@ -60,9 +73,12 @@ for id,meta in pairs(Abilities.data.byId) do
   if meta.category=="stat_veto" then STAT_VETO[id]=meta.stat end
 end
 local CONTACT_REACTIVE={}
+local CONTACT_DAMAGE={}
 for id,meta in pairs(Abilities.data.byId) do
   if meta.category=="contact_reactive" and meta.effect~="ATTRACT" then
     CONTACT_REACTIVE[id]={effect=meta.effect, chance=meta.chance, options=meta.options}
+  elseif meta.category=="contact_damage" then
+    CONTACT_DAMAGE[id]=meta.fraction or (1/16)
   end
 end
 
@@ -81,10 +97,10 @@ local function statusEquals(a, b)
 end
 
 -- ---------------------------------------------------------------------
--- 1. Power / type immunity / absorb / Thick Fat -- Battle:dealDamage.
---    Retains the donor's post-formula damage modifiers. This is deliberately
---    documented as approximate: additive constants, caps and integer rounding
---    mean it is not mathematically identical to Gen III stat/power modifiers.
+-- 1. Type immunity / absorb + Flash Fire compatibility -- Battle:dealDamage.
+--    GC6E01's ordinary stat/power abilities are installed at the pre-formula
+--    hitOnce seam below. Keeping them here would apply them twice and, more
+--    importantly, after +2/STAB/type/random rounding.
 -- ---------------------------------------------------------------------
 
 local function installDealDamage(Battle)
@@ -110,27 +126,13 @@ local function installDealDamage(Battle)
         end
         return 0
       end
-      if meta and meta.category=="type_damage_half" then
-        for _,t in ipairs(meta.moveTypes or {}) do
-          if t==moveType then damage=math.max(1, math.floor(damage/2)); break end
-        end
-      end
     end
 
     if atkAbility and damage>0 then
-      local move={type=moveType, category=(moveDef and moveDef.category)}
-      local lowHpType=LOW_HP_TYPE[atkAbility]
-      if lowHpType and moveType==lowHpType and attacker.hp
-          and attacker.hp<=math.floor(Abilities.maxHP(attacker)/3) then
-        damage=math.floor(damage*1.5)
-      end
-      if atkAbility=="HUGE_POWER" and isPhysical(move) then
-        damage=math.floor(damage*2)
-      elseif atkAbility=="HUSTLE" and isPhysical(move) then
-        damage=math.floor(damage*1.5)
-      elseif atkAbility=="GUTS" and attacker.status and isPhysical(move) then
-        damage=math.floor(damage*1.5)
-      end
+      -- Flash Fire is intentionally still isolated here. Retail applies its
+      -- activated x1.5 inside the special-damage branch immediately before the
+      -- formula's +2 return; the host does not expose that exact insertion point.
+      -- Do not mislabel a different rounding order as exact.
       local activeMeta=Abilities.meta(atkAbility)
       if activeMeta and activeMeta.category=="type_immune_boost" and activeMeta.moveType==moveType
           and Abilities.runtime(self,attacker).flashFire then
@@ -146,18 +148,36 @@ end
 --    technique as Gen I (accuracyRoll returns a bool, not a threshold).
 -- ---------------------------------------------------------------------
 
-local function installAccuracy(Battle)
+local function installAccuracy(Battle,Damage)
   local orig=Battle.accuracyRoll
   Battle.accuracyRoll=function(self,def,attacker,defender,accuracy)
     if not enabled(self) then return orig(self,def,attacker,defender,accuracy) end
-    local m=1;local a=abilityOf(self,attacker)
-    if a=="COMPOUNDEYES" then m=1.3 elseif a=="HUSTLE" and isPhysical(def) then m=.8 end
-    if hasAbility(self,defender,"SAND_VEIL") then
-      m=m*Weather.sandAccuracyMultiplier(self,2,function(mon)return hasAbility(self,mon,"CLOUD_NINE")end)
+    local a=abilityOf(self,attacker);local d=abilityOf(self,defender)
+    local active=a=="COMPOUNDEYES" or (a=="HUSTLE" and isPhysical(def)) or d=="SAND_VEIL"
+    local origRoll=Damage and Damage.rollHit
+    if not (active and origRoll and Damage.stageMultiplier) then return orig(self,def,attacker,defender,accuracy) end
+    Damage.rollHit=function(base,accuracyStage,evasionStage,random)
+      if not base or base<=0 then return true end
+      -- Reproduce the host's native stage result first, then insert the retail
+      -- ability sequence from GC6E01 fn_802284B0 before the one existing roll.
+      local num,den=Damage.stageMultiplier(accuracyStage or 0)
+      local value=math.floor(base*num/den)
+      num,den=Damage.stageMultiplier(-(evasionStage or 0))
+      value=math.floor(value*num/den)
+      value=math.max(1,math.min(100,value))
+      if a=="COMPOUNDEYES" then value=math.floor(value*130/100) end
+      if d=="SAND_VEIL" then
+        if Weather.sandAccuracyMultiplier(self,2,function(mon)return hasAbility(self,mon,"CLOUD_NINE")end)<1 then
+          value=math.floor(value*80/100)
+        end
+      end
+      if a=="HUSTLE" and isPhysical(def) then value=math.floor(value*80/100) end
+      return origRoll(value,0,0,random)
     end
-    local base=accuracy or (def and def.accuracy)
-    if m~=1 and type(base)=="number" and base>0 then return orig(self,def,attacker,defender,base*m) end
-    return orig(self,def,attacker,defender,accuracy)
+    local result=pack(pcall(orig,self,def,attacker,defender,accuracy))
+    Damage.rollHit=origRoll
+    if not result[1] then error(result[2],0) end
+    return unpack(result,2,result.n)
   end
 end
 
@@ -280,7 +300,30 @@ local function installPressure(Battle)
     local suppressed=Weather.isSuppressed(self,function(mon)return hasAbility(self,mon,"CLOUD_NINE")end)
     local weatherMove=def and (def.effect=="EFFECT_RAIN_DANCE" or def.effect=="EFFECT_SUNNY_DAY" or def.effect=="EFFECT_SANDSTORM")
     if suppressed and not weatherMove then self.weather=nil end
+
+    -- Retail Soundproof (ability 0x2B) is checked inside hit-check after PP
+    -- consumption and the move-use presentation, but before normal accuracy or
+    -- move effects. Gold resolves its effect record at that exact late-use seam.
+    -- Replace only the synchronous record lookup for this defender: doubles
+    -- repeats useMove per target, so other targets of a spread move still run
+    -- their native path and the base PP debit remains owned by the adapter.
+    local soundBlocked=defender and defender~=attacker and hasAbility(self,defender,"SOUNDPROOF")
+      and Abilities.isSoundMove and Abilities.isSoundMove(def)
+    local savedRecordResolver=Battle.moveEffectRecordFor
+    if soundBlocked and type(savedRecordResolver)=="function" then
+      local blockedEffect=(adjusted or def).effect
+      Battle.moveEffectRecordFor=function(data,effect)
+        if effect==blockedEffect then
+          return {kind="full",run=function(battle)
+            if type(battle.markMissed)=="function" then battle:markMissed() end
+            Abilities.message(battle,"SOUNDPROOF blocked the move!")
+          end}
+        end
+        return savedRecordResolver(data,effect)
+      end
+    end
     local result=pack(pcall(orig,self,attacker,defender,moveId))
+    if soundBlocked and type(savedRecordResolver)=="function" then Battle.moveEffectRecordFor=savedRecordResolver end
     if suppressed and not weatherMove then self.weather=oldWeather end
     if weatherMove and self.weatherTurns~=nil then self.weatherAbilityLocked=false end
     self.moveDef=oldMoveDef;self.__cbeLiquidOozeRedirect=oldOoze
@@ -321,6 +364,7 @@ local function installHitOnce(Battle, Damage)
   if not orig then return end
   Battle.hitOnce=function(self,attacker,defender,def,opts)
     if not enabled(self) then return orig(self,attacker,defender,def,opts) end
+    local atkAbility=abilityOf(self,attacker)
     local defAbility=abilityOf(self,defender);local meta=Abilities.meta(defAbility)
     -- Native useMove examines info.effectiveness to stop secondary effects.
     -- This must be returned, not lost by a single-return wrapper.
@@ -332,12 +376,77 @@ local function installHitOnce(Battle, Damage)
     end
     local origCrit=Damage and Damage.rollCritical
     if meta and meta.category=="crit_immune" and origCrit then Damage.rollCritical=function()return false end end
+    -- GC6E01 fn_80213E74 mutates Attack/SpA or move power BEFORE stat stages and
+    -- the damage formula.  The Gen2 host builds the formula opts inside hitOnce,
+    -- so temporarily wrap only Damage.calc for this synchronous hit.  No battle,
+    -- party or shared move record is modified.
+    local origCalc=Damage and Damage.calc
+    if origCalc then
+      Damage.calc=function(calc)
+        local c=shallow(calc);c.attacker=shallow(calc and calc.attacker);c.defender=shallow(calc and calc.defender)
+        local physical=isPhysical(def)
+        if physical then
+          local attack=tonumber(c.attacker.attack)
+          -- Guts must start from the unburned battle stat: retail applies the
+          -- 1.5 Attack boost and then explicitly skips its later burn /2 branch.
+          if atkAbility=="GUTS" and attacker and attacker.status
+              and type(self.battleStat)=="function" then
+            attack=tonumber(self:battleStat(attacker,"attack")) or attack
+          end
+          if attack then
+            if atkAbility=="HUGE_POWER" or atkAbility=="PURE_POWER" then attack=attack*2
+            elseif atkAbility=="HUSTLE" then attack=math.floor(attack*150/100)
+            elseif atkAbility=="GUTS" and attacker and attacker.status then attack=math.floor(attack*150/100) end
+            c.attacker.attack=attack
+          end
+        end
+        if meta and meta.category=="type_damage_half" then
+          for _,t in ipairs(meta.moveTypes or {}) do
+            if t==def.type and c.attacker.specialAttack then
+              c.attacker.specialAttack=math.floor(c.attacker.specialAttack/2)
+              break
+            end
+          end
+        end
+        local partnerMeta=atkAbility and Abilities.meta(atkAbility)
+        if partnerMeta and partnerMeta.category=="field_partner_special_boost"
+            and fieldHasAbility(self,partnerMeta.partnerAbility) and c.attacker.specialAttack then
+          c.attacker.specialAttack=math.floor(c.attacker.specialAttack*(partnerMeta.multiplier or 1.5))
+        end
+        if defAbility=="MARVEL_SCALE" and defender and defender.status and c.defender.defense then
+          c.defender.defense=math.floor(c.defender.defense*150/100)
+        end
+        local lowHpType=atkAbility and LOW_HP_TYPE[atkAbility]
+        if lowHpType and def.type==lowHpType and attacker and attacker.hp
+            and attacker.hp<=math.floor(Abilities.maxHP(attacker)/3)
+            and tonumber(c.power) and c.power>0 then
+          c.power=math.floor(c.power*150/100)
+        end
+        local damage,info=origCalc(c)
+        if defAbility=="WONDER_GUARD" and damage and damage>0
+            and (tonumber(info and (info.effectiveness or info.typeMult)) or 10)<=10 then
+          local blocked=type(info)=="table" and shallow(info) or {}
+          blocked.ability=defAbility;blocked.wonderGuard=true;blocked.effectiveness=0;blocked.typeMult=0;blocked.immune=true
+          return 0,blocked
+        end
+        return damage,info
+      end
+    end
     local substitute=self.volatile and (self:volatile(defender).substitute or 0)>0
     local result=pack(pcall(orig,self,attacker,defender,def,opts))
     if origCrit then Damage.rollCritical=origCrit end
+    if origCalc then Damage.calc=origCalc end
     if not result[1] then error(result[2],0) end
     local dealt=result[2]
-    if dealt and dealt>0 and not substitute and (attacker.hp or 0)>0 and Abilities.isContactMove(def.id) then
+    local info=result[3]
+    if info and info.wonderGuard then Abilities.message(self,"WONDER GUARD blocked the move!") end
+    if dealt and dealt>0 and not substitute and (attacker.hp or 0)>0 and Abilities.isContactMove(def.id,def) then
+      local fraction=defAbility and CONTACT_DAMAGE[defAbility]
+      if fraction then
+        self:dealDamage(defender,attacker,math.max(1,math.floor(Abilities.maxHP(attacker)*fraction)),{ability=defAbility,indirect=true})
+        Abilities.message(self,Abilities.displayName(defAbility).." hurt the attacker!")
+        return unpack(result,2,result.n)
+      end
       local reactive=defAbility and CONTACT_REACTIVE[defAbility]
       if reactive and Abilities.random(self)<reactive.chance then
         local status=reactive.effect=="RANDOM_MINOR" and reactive.options[Abilities.pick(self,#reactive.options)] or reactive.effect
@@ -413,6 +522,23 @@ local function installTickWeather(Battle)
   end end
 end
 
+-- GC6E01 Early Bird (ability 0x30) advances the sleep counter twice per sleep
+-- check. Gold stores remaining turns, so one extra pre-decrement gives the same
+-- wake boundary while leaving the native wake/message path authoritative.
+local function installEarlyBird(Battle)
+  local orig=Battle.canAct
+  if not orig then return end
+  Battle.canAct=function(self,mon)
+    if enabled(self) and mon and mon.status=="sleep" and abilityOf(self,mon)=="EARLY_BIRD" then
+      local vol=self.volatile and self:volatile(mon) or nil
+      -- Native Gen2 checks recharge before sleep. A recharge-only turn therefore
+      -- must not consume an Early Bird sleep tick.
+      if not (vol and vol.recharge) then mon.statusTurns=(mon.statusTurns or 1)-1 end
+    end
+    return orig(self,mon)
+  end
+end
+
 -- ---------------------------------------------------------------------
 -- Global installer
 -- ---------------------------------------------------------------------
@@ -424,7 +550,7 @@ function M.installGlobal(ctx)
   local Damage=(ctx and ctx.Damage) or req2('src.battle.gen2.Damage')
   Effects=(ctx and ctx.Effects) or req2('src.battle.gen2.Effects')
   installDealDamage(Battle)
-  installAccuracy(Battle)
+  installAccuracy(Battle,Damage)
   installStatus(Battle)
   installStatStage(Battle)
   installOhko(Battle)
@@ -432,6 +558,7 @@ function M.installGlobal(ctx)
   installHeal(Battle)
   installHitOnce(Battle, Damage)
   installTickWeather(Battle)
+  installEarlyBird(Battle)
   installed=true
   return true
 end

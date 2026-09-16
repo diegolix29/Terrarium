@@ -15,7 +15,20 @@ end
 function F.allowed(ctx)
  local battle=ctx and ctx.battle;local d=doubles(ctx)
  local screen=d and d.screen or (battle and (battle._view or battle))
- local game=ctx and (ctx.game or (screen and screen.game))
+ local game=ctx and (ctx.game or (screen and screen.game) or (battle and battle.game))
+ local hub=battle and battle.__mtbHub==true
+ if hub then
+  if not game then return false end
+  local p=game.save and game.save.colosseumBattle
+  if p and p.freeLookEnabled==false then return false end
+  if game.stack and game.stack.top then
+   local top=game.stack:top()
+   -- Every custom Battle 100 setup/intermission state is tagged by hubSurface.
+   -- Native Bag/PC children deliberately block camera gestures until they pop.
+   if not (top and top.__cbeMtBattleHubSurface==true) then return false end
+  end
+  return true
+ end
  if not screen or not game then return false end
  local p=game.save and game.save.colosseumBattle
  if p and p.freeLookEnabled==false then return false end
@@ -23,10 +36,13 @@ function F.allowed(ctx)
   local top=game.stack:top()
   if top~=screen and top~=battle then return false end
  end
- if d then
-  if d.progressing then return false end
-  local phase=d.core.phase
-  if phase~='command' and phase~='replace' and phase~='present' and phase~='resolving' then return false end
+  if d then
+   if d.progressing then return false end
+   local phase=d.core.phase
+   -- Scripted action phases retain director ownership. Manual offsets are kept
+   -- dormant and resume on the next command/replace phase; gestures can never
+   -- steer an authored launch/transit/impact/faint camera.
+   if phase~='command' and phase~='replace' then return false end
   if phase=='command' or phase=='replace' then
    local ui=d.consumer and d.consumer.states and d.consumer.states[d.core.id]
    if ui and ui.page~='commands' and ui.page~='moves' and ui.page~='targets' then return false end
@@ -36,12 +52,54 @@ function F.allowed(ctx)
  return screen.phase=='menu' or screen.phase=='moves'
 end
 
+local function cinematicOwns(ctx,d,screen)
+ local battle=ctx and ctx.battle
+ if battle and battle.__mtbHub==true then return false end
+ if d then
+  local phase=d.core and d.core.phase
+  return phase=='present' or phase=='resolving' or d.progressing==true
+ end
+ local phase=screen and screen.phase
+ return phase and phase~='menu' and phase~='moves'
+end
+
 local function inside(x,y,w,h)return x and y and x>w*.12 and x<w*.88 and y>h*.16 and y<h*.68 end
+local function gestureInside(ctx,x,y,w,h)
+ if not inside(x,y,w,h) then return false end
+ local battle=ctx and ctx.battle
+ if not (battle and battle.__mtbHub) then return true end
+ local game=ctx.game or battle.game
+ local stack=game and game.stack
+ local top=stack and type(stack.top)=='function' and stack:top() or nil
+ local L=top and top.__cbeMobileLayout
+ if not L then return true end
+ -- The touch gesture must start in the exposed arena, not under a rental row,
+ -- move list, category tab, team summary or footer. Keep existing drags alive
+ -- across panel edges; only acquisition is gated, so camera motion stays smooth.
+ for _,key in ipairs({'header','card','team','footer'}) do
+  local r=L[key]
+  if r and x>=r.x and x<=r.x+r.w and y>=r.y and y<=r.y+r.h then return false end
+ end
+ return true
+end
+
 local function down(key)return love and love.keyboard and love.keyboard.isDown and love.keyboard.isDown(key) end
 function F.reset() F.state={} end
+local function contextKey(ctx)
+ local d=doubles(ctx)
+ if d and d.core then return d.core end
+ local battle=ctx and ctx.battle
+ if battle then return battle._view or battle end
+ return ctx and ctx.game or ctx
+end
 local function contextState(ctx)
  local s=F.state
- if s.context~=ctx then F.reset();s=F.state;s.context=ctx end
+ local key=contextKey(ctx)
+ -- Renderer/presenter contexts are often rebuilt as short-lived tables. Manual
+ -- offsets belong to the battle/combat core, not to one wrapper table; resetting
+ -- on wrapper identity makes free-look mysteriously disappear between draws.
+ if s.contextKey~=key then F.reset();s=F.state;s.contextKey=key end
+ s.context=ctx
  s.yawOffset=s.yawOffset or 0;s.pitchOffset=s.pitchOffset or 0
  s.zoomLog=s.zoomLog or 0;s.panX=s.panX or 0;s.panY=s.panY or 0
  return s
@@ -71,7 +129,7 @@ function F.wheel(game,dx,dy)
  if owner~=game then return false end
  if not (love and love.mouse and love.graphics) then return false end
  local x,y=love.mouse.getPosition();local w,h=love.graphics.getDimensions()
- if not inside(x,y,w,h) or (tonumber(dy) or 0)==0 then return false end
+ if not gestureInside(ctx,x,y,w,h) or (tonumber(dy) or 0)==0 then return false end
  dolly(s,-clamp(tonumber(dy) or 0,-8,8)*.12)
  return true
 end
@@ -83,9 +141,11 @@ function F.pose(ctx,base)
  if not allowed then
   local d=doubles(ctx);local game=ctx and (ctx.game or (ctx.battle and ctx.battle.game))
   local prefs=game and game.save and game.save.colosseumBattle
-  if not d or (prefs and prefs.freeLookEnabled==false) then F.reset();return nil end
+  if prefs and prefs.freeLookEnabled==false then F.reset();return nil end
   -- Overlay ownership blocks sampling, not the underlying automatic shots.
   s.mode=nil;s.drag=nil;s.pinch=nil
+  local battle=ctx and ctx.battle;local screen=d and d.screen or (battle and (battle._view or battle))
+  if cinematicOwns(ctx,d,screen) then return nil end
  else
   local w,h=love.graphics.getDimensions()
   local x,y,mode,pinch,bothInside
@@ -96,7 +156,7 @@ function F.pose(ctx,base)
    local ax,ay=touch.getPosition(ids[1]);local bx,by=touch.getPosition(ids[2])
    x,y=(ax+bx)*.5,(ay+by)*.5;pinch=math.sqrt((ax-bx)^2+(ay-by)^2)
    local a,b=tostring(ids[1]),tostring(ids[2]);if b<a then a,b=b,a end
-   mode='two-touch:'..a..':'..b;bothInside=inside(ax,ay,w,h) and inside(bx,by,w,h)
+   mode='two-touch:'..a..':'..b;bothInside=gestureInside(ctx,ax,ay,w,h) and gestureInside(ctx,bx,by,w,h)
   elseif #ids==0 and love.mouse then
    x,y=love.mouse.getPosition()
    if love.mouse.isDown(2) then mode=(down('lshift') or down('rshift')) and 'dolly' or 'orbit'
@@ -104,7 +164,7 @@ function F.pose(ctx,base)
   end
   if mode then
    if s.mode~=mode then
-    s.mode=mode;s.drag=inside(x,y,w,h) and bothInside~=false;s.x=x;s.y=y;s.pinch=pinch
+    s.mode=mode;s.drag=gestureInside(ctx,x,y,w,h) and bothInside~=false;s.x=x;s.y=y;s.pinch=pinch
    elseif s.drag then
     local dx,dy=x-s.x,y-s.y;s.x=x;s.y=y
     local changed=math.abs(dx)+math.abs(dy)>.01

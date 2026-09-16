@@ -4,8 +4,24 @@ local Assets=V and V.GeneratedAssets
 local CSM=V and V.CurrentSpriteModels
 local Audio=V and V.WazaAudioRuntime
 local RuntimeMeshCache=V and V.RuntimeMeshCache
+local CameraFov=V and V.WazaCameraFov
+local CameraParams=V and V.WazaCameraParams
 local H={installed=false,models={},effects={},controllers={player={},enemy={}},opaque={},lastModel=nil,modelCache={},partsCache={},modelErrors={},textureCache={},drawError=nil,
   postCanvas=nil,postHistory=nil,postW=0,postH=0,distortShader=nil,postErrors=0}
+
+-- Hard-cache slicing runs repeatedly while materializing Waza runtime meshes.
+-- Platform identity cannot change mid-process, so resolve it once rather than
+-- calling love.system.getOS() on every pump (a relatively expensive bridge on
+-- Android). No timing budget changes: only the lookup is removed.
+local function platformOS()
+  if love and love.system and type(love.system.getOS)=="function" then
+    local ok,value=pcall(love.system.getOS)
+    if ok and value then return tostring(value) end
+  end
+  return "Unknown"
+end
+local PLATFORM_OS=platformOS()
+local MOBILE_RUNTIME=PLATFORM_OS=="Android" or PLATFORM_OS=="iOS"
 
 local FORMAT_STATIC={
   {"VertexPosition","float",3},{"VertexTexCoord","float",2},{"VertexNormal","float",3},
@@ -68,11 +84,15 @@ uniform float unlit;
 uniform float forceOpaque;
 uniform float envMode;
 uniform vec3 effectTint;
+uniform vec3 uvRow0;
+uniform vec3 uvRow1;
 varying vec3 wNormal;
 vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
   vec3 nn=normalize(wNormal);
   vec2 envUV=vec2(nn.x*0.5+0.5,0.5-nn.y*0.5);
-  vec4 t=Texel(texture,mix(uv,envUV,envMode));
+  vec3 uvh=vec3(uv,1.0);
+  vec2 sourceUV=vec2(dot(uvRow0,uvh),dot(uvRow1,uvh));
+  vec4 t=Texel(texture,mix(sourceUV,envUV,envMode));
   float texA=mix(1.0,t.a,useTexture);
   float a=mix(texA,1.0,forceOpaque)*materialColor.a*opacity*color.a;
   if (a<0.025) discard;
@@ -91,6 +111,8 @@ local modelUseSerial=0
 local runtimeMeshHits,runtimeMeshWrites,runtimeMeshFallbacks=0,0,0
 local hardCacheQueue,hardCacheSeen={},{}
 local hardCacheState={running=false,total=0,done=0,failed=0,last=nil}
+local hardCacheRetries={}
+local HARD_CACHE_ROW_RETRIES=1
 
 local function key(inst,entry)
   local entryKey=entry and (entry.runtimeIdentifier or
@@ -164,7 +186,10 @@ end
 -- their filename (or a missing cache size) happens to match. This namespace
 -- refreshes only Waza binary sidecars; source/arena/actor/audio caches survive.
 local RUNTIME_MESH_VERSION=2
-local function extractorRevision() return tonumber(V and V.MoveFXExtractor and V.MoveFXExtractor.revision) or 0 end
+local function extractorRevision()
+  local x=V and V.MoveFXExtractor
+  return tonumber(x and (x.runtimeRevision or x.revision)) or 0
+end
 local function runtimeRoot(path)
   return tostring(path or "cache/waza/model_cache.lua"):gsub("%.lua$","").."_runtime_v2_r"..extractorRevision()
 end
@@ -197,14 +222,14 @@ local function compactGroup(g,path,i)
   o.vertexCount=type(g.vertices)=="table" and #g.vertices or tonumber(g.vertexCount)
   return o
 end
-local function writeRuntimeMeta(path,cache,size)
+local function writeRuntimeMeta(path,cache,size,preserveExisting)
   if not (RuntimeMeshCache and RuntimeMeshCache.writeLua) then return false end
   local o={}
   for k,v in pairs(cache or {}) do if k~="groups" then o[k]=v end end
   o.runtimeMeshVersion=RUNTIME_MESH_VERSION;o.sourcePath=path;o.extractorRevision=extractorRevision()
   o.sourceSize=size
   o.groups={};for i,g in ipairs(cache.groups or {}) do o.groups[i]=compactGroup(g,path,i) end
-  local ok=RuntimeMeshCache.writeLua(runtimeMetaPath(path),o);if ok then runtimeMeshWrites=runtimeMeshWrites+1 end;return ok
+  local ok=RuntimeMeshCache.writeLua(runtimeMetaPath(path),o,preserveExisting);if ok then runtimeMeshWrites=runtimeMeshWrites+1 end;return ok
 end
 
 local function loadCache(path)
@@ -217,8 +242,11 @@ local function loadCache(path)
   if not (love and love.graphics and love.graphics.newMesh) then return nil,"LÖVE mesh API unavailable" end
   local size=sourceSize(path)
   local cache,err,fromRuntime
+  local preserveWazaRuntime=false
   if RuntimeMeshCache and type(RuntimeMeshCache.readLua)=="function" then
-    local rt=select(1,RuntimeMeshCache.readLua(runtimeMetaPath(path)))
+    local rtPath=runtimeMetaPath(path)
+    local rt=select(1,RuntimeMeshCache.readLua(rtPath))
+    preserveWazaRuntime=rt~=nil or (type(RuntimeMeshCache.exists)=="function" and RuntimeMeshCache.exists(rtPath)) or false
     if runtimeUsable(rt,path,size) then cache=rt;fromRuntime=true;runtimeMeshHits=runtimeMeshHits+1 end
   end
   if not cache then cache,err=readLua(path) end
@@ -260,7 +288,7 @@ local function loadCache(path)
       local ok,built=pcall(love.graphics.newMesh,fmt,vertices,"triangles","static")
       if not ok then H.modelCache[path]=false;H.modelErrors[path]=tostring(built);return nil,built end
       mesh=built
-      if RuntimeMeshCache and RuntimeMeshCache.supported and RuntimeMeshCache.supported() then RuntimeMeshCache.writeRows(runtimeBinPath(path,i),vertices,stride) end
+      if RuntimeMeshCache and RuntimeMeshCache.supported and RuntimeMeshCache.supported() then RuntimeMeshCache.writeRows(runtimeBinPath(path,i),vertices,stride,nil,preserveWazaRuntime) end
     end
     if img then mesh:setTexture(img) end
     local effectLike=g.effect==true or (g.useConstant==true and g.useDiffuseLighting==false)
@@ -277,11 +305,11 @@ local function loadCache(path)
   if not fromRuntime and RuntimeMeshCache and RuntimeMeshCache.packSupported and RuntimeMeshCache.packSupported() then
     local all=true;local bpv=(morph and 44 or 8)*4
     for i=1,#(cache.groups or {}) do local info=Assets.info and Assets.info(runtimeBinPath(path,i)) or nil;local n=info and tonumber(info.size);if not info or (n and (n<bpv or n%bpv~=0)) then all=false;break end end
-    if all then writeRuntimeMeta(path,cache,size) end
+    if all then writeRuntimeMeta(path,cache,size,preserveWazaRuntime) end
   end
   local out={groups=groups,bounds=cache.bounds,source=cache.source,textures=textures,morph=morph,
     morphFrames=tonumber(cache.morphFrames) or 0,startFrame=tonumber(cache.startFrame) or 0,endFrame=tonumber(cache.endFrame) or 0,
-    animation=cache.animation}
+    animation=cache.animation,textureAnimation=cache.textureAnimation}
   modelUseSerial=modelUseSerial+1;out.__cbeUse=modelUseSerial
   H.modelCache[path]=out;H.modelErrors[path]=nil;return out
 end
@@ -292,19 +320,22 @@ end
 -- Bake one model per stable overworld scheduler slice and allocate no GPU mesh.
 local function bakeRuntimeCache(path,checkpoint)
   local size=sourceSize(path)
+  local preserveRuntime=false
   if RuntimeMeshCache and type(RuntimeMeshCache.readLua)=="function" then
-    local meta=select(1,RuntimeMeshCache.readLua(runtimeMetaPath(path)))
+    local metaPath=runtimeMetaPath(path)
+    local meta=select(1,RuntimeMeshCache.readLua(metaPath))
     if runtimeUsable(meta,path,size) then return true,"ready" end
+    preserveRuntime=meta~=nil or (type(RuntimeMeshCache.exists)=="function" and RuntimeMeshCache.exists(metaPath)) or false
   end
   if not (RuntimeMeshCache and RuntimeMeshCache.packSupported and RuntimeMeshCache.packSupported()) then return false,"float32 pack API unavailable" end
   local cache,err=readLua(path);if type(cache)~="table" then return false,err end
   local stride=(tonumber(cache.morphFrames) or 0)>0 and 44 or 8
   for i,g in ipairs(cache.groups or {}) do
     local rows,why=decodedVertices(g,stride,checkpoint);if not rows then return false,why end
-    local ok,werr=RuntimeMeshCache.writeRows(runtimeBinPath(path,i),rows,stride,checkpoint);if not ok then return false,werr end
+    local ok,werr=RuntimeMeshCache.writeRows(runtimeBinPath(path,i),rows,stride,checkpoint,preserveRuntime);if not ok then return false,werr end
   end
   if #(cache.groups or {})==0 then return false,"Waza model cache empty" end
-  local ok=writeRuntimeMeta(path,cache,size)
+  local ok=writeRuntimeMeta(path,cache,size,preserveRuntime)
   if RuntimeMeshCache.invalidateLua then RuntimeMeshCache.invalidateLua(runtimeMetaPath(path)) end
   return ok==true,ok and "baked" or "metadata write failed"
 end
@@ -321,6 +352,10 @@ end
 
 local hardTask=nil
 local hardDeadline=0
+local hardCacheHead=1
+local function hardPending()
+  return math.max(0,#hardCacheQueue-hardCacheHead+1)
+end
 local function hardClock()
   if love and love.timer and love.timer.getTime then return love.timer.getTime() end
   return os.clock()
@@ -329,12 +364,11 @@ local function hardCheckpoint()
   if hardClock()>=hardDeadline then coroutine.yield("cpu-slice") end
 end
 local function hardSlice()
-  local ok,platform=pcall(function() return love.system.getOS() end)
-  return ok and platform=="Android" and 0.003 or 0.006
+  return MOBILE_RUNTIME and 0.003 or 0.006
 end
 function H.queueHardCacheSpecs(specs)
   hardTask=nil
-  hardCacheQueue={};hardCacheSeen={};hardCacheState={running=false,total=0,done=0,failed=0,last=nil}
+  hardCacheQueue={};hardCacheHead=1;hardCacheSeen={};hardCacheRetries={};hardCacheState={running=false,total=0,done=0,failed=0,last=nil}
   for _,spec in ipairs(type(specs)=="table" and specs or {}) do collectHardCachePaths(spec,0,{}) end
   hardCacheState.total=#hardCacheQueue;hardCacheState.running=#hardCacheQueue>0
   return #hardCacheQueue
@@ -342,23 +376,49 @@ end
 function H.pumpHardCache(maxItems)
   maxItems=math.max(1,math.floor(tonumber(maxItems) or 1));local n=0
   hardDeadline=hardClock()+hardSlice()
-  while n<maxItems and #hardCacheQueue>0 do
-    local path=hardCacheQueue[1]
+  -- This queue can contain many Type-2 model payloads across a six-mon moveset.
+  -- Removing element 1 shifts every remaining Lua array entry, making a full
+  -- Hard Cache bake O(n^2) bookkeeping on top of the actual source work. Keep a
+  -- monotonic head instead. The queue is reset when drained, so retained path
+  -- strings never outlive the current hard-cache pass.
+  while n<maxItems and hardCacheHead<=#hardCacheQueue do
+    local path=hardCacheQueue[hardCacheHead]
     if not hardTask then hardTask=coroutine.create(function() return bakeRuntimeCache(path,hardCheckpoint) end) end
     local resumed,ok,why=coroutine.resume(hardTask)
     if resumed and coroutine.status(hardTask)~="dead" then break end
-    hardTask=nil;table.remove(hardCacheQueue,1);n=n+1
+    hardTask=nil;hardCacheHead=hardCacheHead+1;n=n+1
     hardCacheState.last=path
     if resumed and ok then hardCacheState.done=hardCacheState.done+1
-    else hardCacheState.failed=hardCacheState.failed+1;H.modelErrors[path]=tostring(resumed and why or ok) end
+    else
+      local reason=tostring(resumed and why or ok)
+      local retries=(hardCacheRetries[path] or 0)+1;hardCacheRetries[path]=retries
+      if retries<=HARD_CACHE_ROW_RETRIES then
+        -- Same bounded transient-retry policy as Pokemon storage rows. Canonical
+        -- Waza Lua remains authoritative; a half-written runtime sidecar cannot
+        -- become a completion proof because the retry revalidates it first.
+        hardCacheState.retried=(hardCacheState.retried or 0)+1
+        hardCacheState.lastRetry=path;hardCacheState.lastRetryError=reason
+        hardCacheQueue[#hardCacheQueue+1]=path
+      else
+        hardCacheState.failed=hardCacheState.failed+1
+        hardCacheState.lastFailed=path;hardCacheState.lastError=reason
+        H.modelErrors[path]=reason
+      end
+    end
     if hardClock()>=hardDeadline then break end
   end
-  hardCacheState.running=#hardCacheQueue>0
-  return {processed=n,pending=#hardCacheQueue,running=hardCacheState.running,done=hardCacheState.done,failed=hardCacheState.failed}
+  local pending=hardPending()
+  hardCacheState.running=pending>0
+  if pending==0 then hardCacheQueue={};hardCacheHead=1;hardCacheRetries={} end
+  return {processed=n,pending=pending,running=hardCacheState.running,done=hardCacheState.done,failed=hardCacheState.failed}
 end
-function H.cancelHardCache() hardTask=nil;hardCacheQueue={};hardCacheSeen={};hardCacheState.running=false end
+function H.cancelHardCache() hardTask=nil;hardCacheQueue={};hardCacheHead=1;hardCacheSeen={};hardCacheRetries={};hardCacheState.running=false end
 
-function H.hardCacheStatus() return {running=hardCacheState.running,pending=#hardCacheQueue,total=hardCacheState.total,done=hardCacheState.done,failed=hardCacheState.failed,last=hardCacheState.last} end
+function H.hardCacheStatus()
+  return {running=hardCacheState.running,pending=hardPending(),total=hardCacheState.total,done=hardCacheState.done,failed=hardCacheState.failed,last=hardCacheState.last,
+    lastFailed=hardCacheState.lastFailed,lastError=hardCacheState.lastError,retried=hardCacheState.retried or 0,
+    lastRetry=hardCacheState.lastRetry,lastRetryError=hardCacheState.lastRetryError}
+end
 
 local function pageForAsset(asset,localFrame)
   local anim=type(asset)=="table" and asset.animation
@@ -393,6 +453,21 @@ local function morphWeights(page,localFrame)
   else w[i+1]=1-t;w[i+2]=t end
   return w
 end
+local UV_IDENTITY={1,0,0,0,1,0}
+local function textureAnimationSample(model,groupIndex,localFrame)
+  local anim=type(model)=="table" and model.textureAnimation or nil
+  if not anim and type(model)=="table" and type(model.asset)=="table" then anim=model.asset.textureAnimation end
+  local frames=type(anim)=="table" and type(anim.groups)=="table" and anim.groups[groupIndex] or nil
+  if type(frames)~="table" or #frames==0 then return UV_IDENTITY end
+  local last=math.max(0,math.min(#frames-1,math.floor(tonumber(anim.endFrame) or (#frames-1))))
+  local x=math.max(0,math.min(last,tonumber(localFrame) or 0))
+  local i=math.floor(x);local t=x-i
+  local a=frames[i+1] or frames[1] or UV_IDENTITY
+  local b=frames[math.min(last,i+1)+1] or a
+  if t<=0 then return a end
+  local out={};for k=1,6 do out[k]=(tonumber(a[k]) or UV_IDENTITY[k])+((tonumber(b[k]) or UV_IDENTITY[k])-(tonumber(a[k]) or UV_IDENTITY[k]))*t end
+  return out
+end
 local function modelSpan(model,basis)
   local b=model and (model.normalizationBounds or model.bounds)
   local mn,mx=b and b.min,b and b.max
@@ -403,7 +478,60 @@ local function modelSpan(model,basis)
   if basis and basis.groundField then return math.max(.001,sx,sz) end
   return math.max(.001,sx,sy,sz)
 end
-local MODEL_REACH={[58]=85.9,[62]=103.45}
+-- Per-move reach overrides are allowed only when retail proves that the model
+-- uses a local lane other than the common 100-unit attacker->target space.
+-- Ice Beam (58) must NOT be listed here: GC6E01 reitoubeam Type-2 entry 8 is
+-- played directly by _wazaSequenceModelEntryStart with no target-fit transform.
+-- Its decoded HSD grows to Z=103.13538192332825 on the source end page, i.e. it
+-- intentionally extends a little beyond the 100-unit target line. The old 85.9
+-- override enlarged that source overshoot into roughly 20% of the live lane.
+local function partTransformSelector(positionType)
+  local pt=tonumber(positionType)
+  if not pt then return 0 end
+  pt=math.floor(pt)
+  return (pt>=0 and pt<=6) and (pt+1) or 0
+end
+local function filteredPartTransform(part,positionType)
+  if type(part)~="table" then return nil,0 end
+  local selector=partTransformSelector(positionType)
+  if selector==0 then return nil,selector end
+  -- GSmodelAttachToGSpart's selector is an enum, not a binary mask. The exact
+  -- component combinations are proven by _wazaSequenceModelEntryStart's switch:
+  -- 1=P, 2=R, 3=S, 4=P+R, 5=R+S, 6=P+S, 7=P+R+S.
+  local inheritPosition=(selector==1 or selector==4 or selector==6 or selector==7)
+  local inheritRotation=(selector==2 or selector==4 or selector==5 or selector==7)
+  local inheritScale=(selector==3 or selector==5 or selector==6 or selector==7)
+  local out={};for i=1,12 do out[i]=tonumber(part[i]) or 0 end
+  local scales={}
+  for c=1,3 do
+    local x,y,z=out[c],out[c+4],out[c+8];local n=math.sqrt(x*x+y*y+z*z)
+    scales[c]=n>1e-9 and n or 1
+  end
+  if inheritRotation then
+    if not inheritScale then
+      for c=1,3 do local n=scales[c];out[c]=out[c]/n;out[c+4]=out[c+4]/n;out[c+8]=out[c+8]/n end
+    end
+  else
+    for r=1,3 do for c=1,3 do out[(r-1)*4+c]=(r==c) and (inheritScale and scales[c] or 1) or 0 end end
+  end
+  if not inheritPosition then out[4],out[8],out[12]=0,0,0 end
+  return out,selector
+end
+local function linkedParticleBirthTransform(part,positionType,flags)
+  local selector=partTransformSelector(positionType)
+  -- Retail _wazaSequenceParticleEntryStart passes `(node->flags >> 1) & 1`
+  -- as fn_80118FB0's transform state. fn_80118FB0 only installs the GSpart/JObj
+  -- follow when that state is non-zero. This is distinct from the Type-2 model
+  -- attachment selector above: a flag-1 linked particle (Surf's authored foam
+  -- rows) uses the linked Type-2 object as its source model, but does NOT inherit
+  -- the selected part matrix. Applying selector-2 as a model-style rotation-only
+  -- matrix made those generators rotate with wave parts even though retail does
+  -- not install that attachment.
+  local state=math.floor((tonumber(flags) or 0)/2)%2
+  if state==0 then return nil,selector,state end
+  local transform=filteredPartTransform(part,positionType)
+  return transform,selector,state
+end
 local function modelMatrix(basis,model,asset)
   local o,r,u,f=basis.origin,basis.right,basis.up,basis.forward
   -- Type-2 HSD effects are raw source models, unlike Pokemon bodies which are
@@ -414,12 +542,11 @@ local function modelMatrix(basis,model,asset)
   -- collapses to essentially the previous Pokemon-relative scale.
   if basis.aimed or basis.fieldWave or (asset and asset.transformOnly) then
     -- Keep authored animation growth: fitting each morph page to its own
-    -- bounds shrank a beam as it extended. Scale source axes consistently.
+    -- bounds shrank a beam as it extended. CurrentSpriteModels has already
+    -- converted each exact retail model/particle forward envelope into the
+    -- live attacker->target unit, so use those source axes directly here.
     local v=basis.sourceUnits
-    -- Positive-Z reach measured from the final source HSD pages.
-    local reach=MODEL_REACH[basis.moveId] or 100
-    local z=v.z*100/reach
-    return {r[1]*v.x,u[1]*v.y,f[1]*z,o[1],r[2]*v.x,u[2]*v.y,f[2]*z,o[2],r[3]*v.x,u[3]*v.y,f[3]*z,o[3],0,0,0,1}
+    return {r[1]*v.x,u[1]*v.y,f[1]*v.z,o[1],r[2]*v.x,u[2]*v.y,f[2]*v.z,o[2],r[3]*v.x,u[3]*v.y,f[3]*v.z,o[3],0,0,0,1}
   end
   local desired=math.max(.10,tonumber(basis.modelTargetSpan) or tonumber(basis.referenceVisualHeight) or 16)
   local span=modelSpan(asset or (model and model.asset) or model,basis)
@@ -465,8 +592,8 @@ function H.linkedParticleFrame(ctx,inst,entry)
   local part={};for k=1,12 do part[k]=a[k]+(b[k]-a[k])*t end
   local originSide=inst.role=="damage" and inst.target or inst.side
   local otherSide=originSide==inst.side and inst.target or inst.side
-  local basis=CSM:wazaBasis(ctx,originSide,otherSide,e.attachment,{moveId=(inst.spec and inst.spec.moveId) or inst.moveId,
-    style=inst.spec and inst.spec.style,role=inst.role,sourceStrict=true,positionType=e.positionType,flags=e.flags})
+  local basis=CSM:wazaBasis(ctx,originSide,otherSide,e.attachment,{moveId=tonumber(inst.moveId) or (inst.spec and inst.spec.moveId),
+    style=inst.spec and inst.spec.style,role=inst.role,sourceStrict=true,positionType=e.positionType,flags=e.flags,modelEntry=e})
   if not basis then return nil,"linked effect-model world basis unavailable" end
   local m=modelMatrix(basis,nil,asset)
   local function column(i)
@@ -478,7 +605,9 @@ function H.linkedParticleFrame(ctx,inst,entry)
   if not (right and up and forward) then return nil,"singular linked effect-model transform" end
   basis.origin={m[4],m[8],m[12]};basis.right=right;basis.up=up;basis.forward=forward
   basis.sourceUnits={x=x,y=y,z=z};basis.modelLinked=true
-  return {basis=basis,part=part,modelIdentifier=wanted,partIndex=entry.partIndex,frame=frame}
+  local particleTransform,selector,linkState=linkedParticleBirthTransform(part,entry.positionType,entry.flags)
+  return {basis=basis,part=part,particleTransform=particleTransform,transformSelector=selector,
+    particleLinkState=linkState,modelIdentifier=wanted,partIndex=entry.partIndex,frame=frame}
 end
 
 -- Source type 2 is proven by the retail main.dol dispatcher/loader to be the
@@ -509,14 +638,6 @@ local function modelUpdate(ctx,inst,entry,frame,state)
 end
 local function modelFinish(ctx,inst,entry) remove(H.models,key(inst,entry));return true end
 local function modelCancel(ctx,inst,entry) remove(H.models,key(inst,entry));return true end
-local function opaqueStart(ctx,inst,entry)
-  H.opaque[#H.opaque+1]={context=ctx,serial=inst.serial,frame=inst.frame,entryType=entry.entryType,
-    kind=entry.kind,index=entry.index,identifier=entry.identifier,rawPath=entry.rawPath,
-    rawOffset=entry.rawOffset,rawSize=entry.rawSize,payloadOffset=entry.payloadOffset,
-    commonMode=entry.commonMode,words=entry.words,subtype=entry.subtype,mode=entry.mode,value=entry.value,effectType=entry.effectType,effectFrames=entry.effectFrames}
-  while #H.opaque>512 do table.remove(H.opaque,1) end
-  return true
-end
 local function opaqueFinish() return true end
 
 local function controllerSide(inst)
@@ -526,10 +647,6 @@ local function controllerSide(inst)
 end
 local function controllerState(inst)
   local side=controllerSide(inst);H.controllers[side]=H.controllers[side] or {};return H.controllers[side],side
-end
-local function signed32(v)
-  v=tonumber(v) or 0;v=v%4294967296
-  return v>=2147483648 and (v-4294967296) or v
 end
 
 -- Source type 1 is the retail sequence wait/stop controller. GC6E01 converts
@@ -557,23 +674,27 @@ local function type1Update(ctx,inst,entry,frame,state)
   return "done"
 end
 
--- Source type 6 is a zero-duration owner/model controller. The names below are
--- direct counterparts of the GC6E01 wazaSequenceEntryStart dispatch.
+-- Source type 6 is a zero-duration owner/model controller. Drive semantics by
+-- the proven numeric dispatcher, not the older descriptive aliases serialized
+-- by WazaSequenceExtractor. Current GC6E01 sequence.c shows:
+--   0/1 toggle owner effect_handle resources, 2/3 visibility, 4 remove root null,
+--   5/6 add/remove root null + refresh owner animation, 7/8 stop/resume owner
+--   animation while adding/removing field_80 resources, 9 sequence cleanup.
 local function type6Start(ctx,inst,entry)
-  local st,side=controllerState(inst);local op=entry.controllerOp
-  if op=="visibility_off" then st.hidden=true
-  elseif op=="visibility_on" then st.hidden=false
-  elseif op=="ambient_enable" then st.ambient=true
-  elseif op=="ambient_clear" then st.ambient=false
-  elseif op=="remove_root_null" then st.rootNull=false
-  elseif op=="lighting_override_enable" then st.lightingOverride=true
-  elseif op=="field_effect_clear" then st.fieldEffect=false
-  elseif op=="lighting_override_activate" then st.lightingActive=true
-  elseif op=="lighting_override_clear" then st.lightingActive=false;st.lightingOverride=false
-  elseif op=="sequence_cleanup" then
+  local st,side=controllerState(inst);local op=tonumber(entry.subtype)
+  if op==0 then st.ownerAuxEffect=true
+  elseif op==1 then st.ownerAuxEffect=false
+  elseif op==2 then st.hidden=true
+  elseif op==3 then st.hidden=false
+  elseif op==4 then st.rootNull=false
+  elseif op==5 then st.rootNull=true;st.ownerAnimationRefresh=(tonumber(st.ownerAnimationRefresh) or 0)+1
+  elseif op==6 then st.rootNull=false;st.ownerAnimationRefresh=(tonumber(st.ownerAnimationRefresh) or 0)+1
+  elseif op==7 then st.motionFrozen=true;st.fieldAuxEffect=true
+  elseif op==8 then st.motionFrozen=false;st.fieldAuxEffect=false;st.ownerAnimationRefresh=(tonumber(st.ownerAnimationRefresh) or 0)+1
+  elseif op==9 then
     if Waza and type(Waza.requestStop)=="function" then Waza:requestStop(inst,"type6-sequence-cleanup") end
   else return false end
-  st.lastOp=op;st.serial=inst.serial;st.frame=inst.frame;st.side=side
+  st.lastOp=op;st.lastOpAlias=entry.controllerOp;st.serial=inst.serial;st.frame=inst.frame;st.side=side
   return true
 end
 
@@ -667,14 +788,14 @@ local function sourceBasis(ctx,rec,attachment)
   if not (CSM and type(CSM.wazaBasis)=="function") then return nil end
   local inst=rec.instance;local originSide,other=effectSides(rec)
   local ok,b=pcall(CSM.wazaBasis,CSM,ctx,originSide,other,attachment~=nil and attachment or (rec.entry and rec.entry.attachment),
-    {moveId=(inst.spec and inst.spec.moveId) or inst.moveId,style=inst.spec and inst.spec.style,role=inst.role,sourceStrict=true,positionType=rec.entry and rec.entry.positionType,flags=rec.entry and rec.entry.flags})
+    {moveId=tonumber(inst.moveId) or (inst.spec and inst.spec.moveId),style=inst.spec and inst.spec.style,role=inst.role,sourceStrict=true,positionType=rec.entry and rec.entry.positionType,flags=rec.entry and rec.entry.flags})
   return ok and b or nil
 end
 local function sourceLocalPoint(ctx,rec,pos,attachment)
   if not (type(pos)=="table" and CSM and type(CSM.wazaLocalPoint)=="function") then return nil end
   local inst=rec.instance;local originSide,other=effectSides(rec)
   local ok,p=pcall(CSM.wazaLocalPoint,CSM,ctx,originSide,other,attachment~=nil and attachment or (rec.entry and rec.entry.attachment),pos,
-    {moveId=(inst.spec and inst.spec.moveId) or inst.moveId,style=inst.spec and inst.spec.style,role=inst.role,sourceStrict=true,positionType=rec.entry and rec.entry.positionType,flags=rec.entry and rec.entry.flags})
+    {moveId=tonumber(inst.moveId) or (inst.spec and inst.spec.moveId),style=inst.spec and inst.spec.style,role=inst.role,sourceStrict=true,positionType=rec.entry and rec.entry.positionType,flags=rec.entry and rec.entry.flags})
   return ok and p or nil
 end
 local function projectSource(ctx,p)
@@ -717,6 +838,48 @@ local function keyedColor(keys,p,default)
     end
   end
   return keys[#keys].to or default
+end
+local function sourceSurfaceColor(e,p)
+  -- GC6E01 fn_80137780 normalizes unused channels before interpolation.
+  -- Mode 0 is the full-screen filter and always animates RGBA. Modes 1/2
+  -- normally animate RGB only; descriptor flag 4 disables RGB and flag 1
+  -- enables alpha. Neutral GS material modulation is 128,128,128,255.
+  e=type(e)=="table" and e or {}
+  local c=keyedColor(e.keys,p,{128,128,128,255})
+  local mode=tonumber(e.mode) or 0
+  local layout=tonumber(e.layoutMode) or 0
+  local flags=tonumber(e.flags) or 0
+  local useRgb,useAlpha=true,false
+  if layout~=1 and layout~=2 then
+    if math.floor(flags/4)%2==1 then useRgb=false end
+    if flags%2==1 then useAlpha=true end
+  end
+  if mode==0 then useRgb,useAlpha=true,true end
+  return {
+    useRgb and (tonumber(c[1]) or 128) or 127,
+    useRgb and (tonumber(c[2]) or 128) or 127,
+    useRgb and (tonumber(c[3]) or 128) or 127,
+    useAlpha and (tonumber(c[4]) or 255) or 255,
+  }
+end
+
+-- Type-4 family 0, mode 1 is not a ring/wave primitive. Retail
+-- _wazaSequenceEffectEntryStart gathers the current floor archive's model list
+-- and applies animated GS material modulation to those source models. Arena
+-- asks for that live colour before drawing its HSD groups; Pokemon/trainers/UI
+-- therefore do not inherit the battlefield-only operation.
+function H.arenaModulation()
+  local best
+  for _,rec in pairs(H.effects) do
+    local e=rec.effect or {}
+    if tonumber(rec.family)==0 and tonumber(e.mode)==1 then
+      if not best or (tonumber(rec.startedFrame) or 0)>(tonumber(best.startedFrame) or 0) then best=rec end
+    end
+  end
+  if not best then return nil end
+  local p=effectProgress(best)
+  local c=sourceSurfaceColor(best.effect,p)
+  return {c[1]/255,c[2]/255,c[3]/255,c[4]/255},best
 end
 local function keyedScalar(e,p,default)
   local keys=e and e.keys
@@ -793,18 +956,6 @@ local function drawDynamicColorMesh(g,rec,slot,verts)
   end
   return pcall(g.draw,mesh)
 end
-local function drawSoftEllipseRing(g,rec,slot,cx,cy,rx,ry,thickness,alpha)
-  local verts={};local segments=48;local inner=math.max(.05,1-math.max(.02,math.min(.45,tonumber(thickness) or .10)))
-  for i=0,segments-1 do
-    local a0=i/segments*math.pi*2;local a1=(i+1)/segments*math.pi*2
-    local x0,y0=cx+math.cos(a0)*rx,cy+math.sin(a0)*ry;local x1,y1=cx+math.cos(a1)*rx,cy+math.sin(a1)*ry
-    local ix0,iy0=cx+math.cos(a0)*rx*inner,cy+math.sin(a0)*ry*inner
-    local ix1,iy1=cx+math.cos(a1)*rx*inner,cy+math.sin(a1)*ry*inner
-    verts[#verts+1]={ix0,iy0,1,1,1,0};verts[#verts+1]={x0,y0,1,1,1,alpha};verts[#verts+1]={x1,y1,1,1,1,alpha}
-    verts[#verts+1]={ix0,iy0,1,1,1,0};verts[#verts+1]={x1,y1,1,1,1,alpha};verts[#verts+1]={ix1,iy1,1,1,1,0}
-  end
-  return drawDynamicColorMesh(g,rec,slot,verts)
-end
 local function drawAuraField(g,rec,cx,cy,rx,ry,alpha)
   local verts={};local segments=56
   for i=0,segments-1 do
@@ -834,14 +985,9 @@ local function drawProceduralEffects(ctx)
           local r,gc,bb,a=effectRGBA(c,1-p*.12)
           g.push("all");g.setColor(r,gc,bb,a)
           if fam==0 then
-            -- surfEffectStart: source-timed concentric surface waves anchored to
-            -- the effect owner. Use serialized colour keyframes directly.
-            pcall(g.setBlendMode,"add","alphamultiply")
-            local radius=math.max(12,math.min(180,(tonumber(e.count) or 4)*7+42*p))
-            for i=0,math.max(1,math.min(6,tonumber(e.count) or 3))-1 do
-              local q=(p+i*.17)%1;g.setColor(r,gc,bb,1)
-              drew=drawSoftEllipseRing(g,rec,i+1,x2,y2,radius*(.35+.8*q),radius*(.12+.32*q),.08+.05*q,a*(1-q)*.45) or drew
-            end
+            -- Family 0 is GS model/filter modulation. Mode 1 is consumed by
+            -- Arena through H.arenaModulation; mode 0 is a framebuffer filter
+            -- and mode 2 is owner-model modulation. None is a world-space ring.
           elseif fam==1 then
             -- electronStartEffect: branch chains use the actual serialized GS
             -- texture and authored count/depth. Descriptor vectors remain in
@@ -854,7 +1000,7 @@ local function drawProceduralEffects(ctx)
             if img then
               pcall(g.setBlendMode,"add","alphamultiply")
               for branch=1,count do
-                local px,py=sx,sy;local dx,dy=ex-sx,ey-sy;local len=math.max(1,math.sqrt(dx*dx+dy*dy));local nx,ny=-dy/len,dx/len
+                local dx,dy=ex-sx,ey-sy;local len=math.max(1,math.sqrt(dx*dx+dy*dy));local nx,ny=-dy/len,dx/len
                 local pieces=math.max(3,depth*3)
                 for j=1,pieces do
                   local t0=(j-1)/pieces;local t1=j/pieces
@@ -1030,8 +1176,8 @@ function H.drawWorld(ctx)
     local attachment=entry and entry.attachment
     if ee and (family==5 or family==7 or family==11) then attachment=ee.partA or attachment end
     local okBasis,basis=pcall(CSM.wazaBasis,CSM,ctx,originSide,otherSide,attachment,{
-      moveId=inst and ((inst.spec and inst.spec.moveId) or inst.moveId),style=inst and inst.spec and inst.spec.style,role=inst and inst.role,
-      sourceStrict=true,positionType=entry and entry.positionType,flags=entry and entry.flags})
+      moveId=inst and (tonumber(inst.moveId) or (inst.spec and inst.spec.moveId)),style=inst and inst.spec and inst.spec.style,role=inst and inst.role,
+      sourceStrict=true,positionType=entry and entry.positionType,flags=entry and entry.flags,modelEntry=entry})
     local frac=(tonumber(inst and inst.accumulator) or 0)*60
     local localFrame=(tonumber(inst and inst.frame) or 0)+frac-(tonumber(rec.state and rec.state.startFrame) or tonumber(rec.startedFrame) or 0)
     local model,err,page
@@ -1113,7 +1259,7 @@ function H.drawWorld(ctx)
               local weights=morphWeights(job.page,job.localFrame)
               for wi=0,12 do sh:send("w"..wi,weights[wi+1] or 0) end
             end
-            for _,grp in ipairs(job.model.groups) do
+            for gi,grp in ipairs(job.model.groups) do
               if not grp._cbeRenderDisabled then
                 local class=grp.luminous and "add" or (grp.xlu and "alpha" or "solid")
                 if class==kind then
@@ -1123,6 +1269,8 @@ function H.drawWorld(ctx)
                     sh:send("materialColor",{tonumber(d[1]) or 1,tonumber(d[2]) or 1,tonumber(d[3]) or 1,(tonumber(grp.alpha) or 1)*ta})
                     sh:send("effectTint",{tr,tg,tb})
                     sh:send("useTexture",grp.image and 1 or 0);sh:send("opacity",1);sh:send("forceOpaque",0)
+                    local uv=textureAnimationSample(job.model,gi,job.localFrame)
+                    sh:send("uvRow0",{uv[1],uv[2],uv[3]});sh:send("uvRow1",{uv[4],uv[5],uv[6]})
                     sh:send("envMode",job.environment and 1 or 0)
                     sh:send("unlit",(grp.luminous or grp.effect or grp.useConstant or not grp.useDiffuseLighting) and 1 or 0)
                     g.setDepthMode("lequal",class=="solid" and not grp.noz)
@@ -1167,7 +1315,7 @@ function H.drawAsset(ctx,asset,vp,worldModel,localFrame,opts)
     end
     local function pass(kind)
       if kind=="add" then pcall(g.setBlendMode,"add","alphamultiply") else pcall(g.setBlendMode,"alpha","alphamultiply") end
-      for _,grp in ipairs(model.groups or {}) do
+      for gi,grp in ipairs(model.groups or {}) do
         if not grp._cbeRenderDisabled then
           local class=opts.forceOpaque and "solid" or (grp.luminous and "add" or (grp.xlu and "alpha" or "solid"))
           if class==kind then
@@ -1175,6 +1323,8 @@ function H.drawAsset(ctx,asset,vp,worldModel,localFrame,opts)
             local materialAlpha=opts.forceOpaque and 1 or (tonumber(grp.alpha) or 1)
             sh:send("materialColor",{tonumber(d[1]) or 1,tonumber(d[2]) or 1,tonumber(d[3]) or 1,materialAlpha})
             sh:send("useTexture",grp.image and 1 or 0);sh:send("opacity",opts.forceOpaque and 1 or opacity);sh:send("forceOpaque",opts.forceOpaque and 1 or 0)
+            local uv=textureAnimationSample(model,gi,localFrame)
+            sh:send("uvRow0",{uv[1],uv[2],uv[3]});sh:send("uvRow1",{uv[4],uv[5],uv[6]})
             sh:send("envMode",0)
             local forcedUnlit=opts.unlit
             sh:send("unlit",forcedUnlit~=nil and (forcedUnlit and 1 or 0) or ((grp.luminous or grp.effect or grp.useConstant or not grp.useDiffuseLighting) and 1 or 0))
@@ -1220,8 +1370,8 @@ local SOURCE_CAMERA_FOV=math.rad(39.09)
 local function cadd(a,b,s)return {(a[1] or 0)+(b[1] or 0)*(s or 1),(a[2] or 0)+(b[2] or 0)*(s or 1),(a[3] or 0)+(b[3] or 0)*(s or 1)} end
 local function clerp(a,b,t)return {(a[1] or 0)+((b[1] or 0)-(a[1] or 0))*t,(a[2] or 0)+((b[2] or 0)-(a[2] or 0))*t,(a[3] or 0)+((b[3] or 0)-(a[3] or 0))*t} end
 local function cdist(a,b)local x=(b[1] or 0)-(a[1] or 0);local y=(b[2] or 0)-(a[2] or 0);local z=(b[3] or 0)-(a[3] or 0);return math.sqrt(x*x+y*y+z*z) end
-local function csmooth(t)t=math.max(0,math.min(1,tonumber(t) or 0));return t*t*(3-2*t) end
-local cameraContinuity={session=nil,currentSerial=nil,transitionFrom=nil,transitionStartFrame=0,lastPose=nil}
+local cameraContinuity={session=nil,currentSerial=nil,transitionFrom=nil,transitionStartFrame=0,lastPose=nil,actionKey=nil,axisSign=nil,
+  motionKey=nil,motionMode=nil,lastMotionMode=nil}
 local function latestCameraInstance()
   local best
   for _,inst in ipairs(Waza and Waza.active or {}) do
@@ -1244,21 +1394,509 @@ local function cameraAttachment(inst)
   end
   return fallback
 end
+local function hasCameraFlag(flags,mask)
+  flags=math.max(0,math.floor(tonumber(flags) or 0));mask=math.max(1,math.floor(tonumber(mask) or 1))
+  return math.floor(flags/mask)%2==1
+end
+local function cameraPhaseRole(phase)
+  local name=tostring(phase and (phase.name or phase.phase) or "all"):lower()
+  return (name=="status" or name:match("^damage")) and "damage" or "attack"
+end
+local function sourceCameraPhase(inst,role)
+  local fallback
+  for _,phase in ipairs(type(inst and inst.spec)=="table" and (inst.spec.wazaPhases or {}) or {}) do
+    if cameraPhaseRole(phase)==role and (phase.sequenceFlags~=nil or phase.sequenceKind~=nil or phase.cameraActive~=nil) then
+      if #(phase.entries or {})>0 then return phase end
+      fallback=fallback or phase
+    end
+  end
+  return fallback
+end
+local function sourceMotionOptions(flags,modelId)
+  -- GC6E01 _wazaSequenceCameraSelectMotion: bit 0 hard-selects mode 5;
+  -- bits 3/4/5/6 admit modes 3/0/1/2. With no bits retail admits all four,
+  -- and when several are admitted it avoids the immediately previous mode.
+  -- ModelSequence +0x70 == 0x13A is the one source-proven hard mode-4 case.
+  if CameraParams and type(CameraParams.motionOptions)=="function" then
+    return CameraParams.motionOptions(flags,modelId)
+  end
+  if hasCameraFlag(flags,0x1) then return {5},true end
+  local out={}
+  if hasCameraFlag(flags,0x08) then out[#out+1]=3 end
+  if hasCameraFlag(flags,0x10) then out[#out+1]=0 end
+  if hasCameraFlag(flags,0x20) then out[#out+1]=1 end
+  if hasCameraFlag(flags,0x40) then out[#out+1]=2 end
+  if #out==0 then out={3,0,1,2} end
+  return out,#out==1
+end
+local function chooseSourceMotion(inst,phase,role,ownerDex)
+  local flags=math.max(0,math.floor(tonumber(phase and phase.sequenceFlags) or 0))
+  local key=table.concat({tostring(inst.presentationSerial or inst.serial or 0),role,tostring(flags),
+    tostring(phase and phase.sequenceKind or ""),tostring(ownerDex or "")},":")
+  if cameraContinuity.motionKey==key and cameraContinuity.motionMode~=nil then return cameraContinuity.motionMode end
+  local options,forced
+  if CameraParams and type(CameraParams.motionOptionsForPokemonDex)=="function" and ownerDex~=nil then
+    options,forced=CameraParams.motionOptionsForPokemonDex(flags,ownerDex)
+  else
+    options,forced=sourceMotionOptions(flags,phase and phase.modelSequenceId)
+  end
+  local pool={}
+  for _,mode in ipairs(options) do
+    if forced or #options==1 or mode~=cameraContinuity.lastMotionMode then pool[#pool+1]=mode end
+  end
+  if #pool==0 then pool=options end
+  -- Retail uses its shared battle RNG here. CBE deliberately does not pretend
+  -- to own that RNG stream; choose deterministically *within the exact source
+  -- allowed set* while preserving retail's non-repeat rule.
+  local salt=(flags%65536)+(tonumber(phase and phase.sequenceKind) or 0)*31+(role=="damage" and 97 or 17)
+  local r=stable01(inst.presentationSerial or inst.serial or 1,inst.serial or 1,salt)
+  local idx=math.min(#pool,math.floor(r*#pool)+1);local mode=pool[idx]
+  cameraContinuity.motionKey=key;cameraContinuity.motionMode=mode;cameraContinuity.lastMotionMode=mode
+  return mode
+end
+local function sourceParamsFlags(flags,ownerPosition)
+  -- battleCameraStartWaza converts raw Waza root flags into the camera-parameter
+  -- mask before CalculateParams/DoFOV. The 0x00400000 branch is selected from
+  -- GSmodelGetPosition(owner->model).z, so callers must pass the owner-root
+  -- position -- never the attack/effect origin (which can belong to the other
+  -- battler during a damage chapter).
+  local out=0
+  if hasCameraFlag(flags,0x00200000) then out=2
+  elseif hasCameraFlag(flags,0x00000200) then out=4
+  elseif hasCameraFlag(flags,0x00400000) then out=((ownerPosition and (ownerPosition[3] or 0)<0) and 4 or 8) end
+  if hasCameraFlag(flags,0x00000400) then out=out+0x20
+  elseif hasCameraFlag(flags,0x00000800) then out=out+0x40
+  elseif hasCameraFlag(flags,0x00001000) then out=out+0x80 end
+  return out
+end
+local function sourceDistanceBand(paramsFlags)
+  -- Neutral ModelSequence-size baseline from retail CalculateParams after its
+  -- clamps: 0x20 => 25..40, 0x40 => 35..50, 0x80 => 48..60, default => 20..60.
+  -- The owner ModelSequence kind can scale these before clamping; that owner
+  -- class is not currently exported by the live actor bridge, so do not claim
+  -- these are the exact per-Pokemon samples.
+  if hasCameraFlag(paramsFlags,0x20) then return 25,40 end
+  if hasCameraFlag(paramsFlags,0x40) then return 35,50 end
+  if hasCameraFlag(paramsFlags,0x80) then return 48,60 end
+  return 20,60
+end
+local function sourceRotationBand(paramsFlags)
+  local low=paramsFlags%0x20
+  if hasCameraFlag(low,0x01) then return 0,math.rad(30) end
+  if hasCameraFlag(low,0x02) then return math.rad(18),math.rad(36) end
+  -- Bits 4/8 branch again on the owner's ModelSequence kind. The bridge does
+  -- not expose that class, so use the exact UNION of both retail ranges rather
+  -- than inventing an averaged narrower interval.
+  if hasCameraFlag(low,0x04) then return math.rad(18),math.rad(54) end
+  if hasCameraFlag(low,0x08) then return math.rad(36),math.rad(72) end
+  if hasCameraFlag(low,0x10) then return math.rad(72),math.rad(90) end
+  return math.rad(18),math.rad(63)
+end
+local function sourceCameraTargetSlot(phase)
+  -- battleCameraStartWaza selects cameraParams +0x4C + sequence[0x17]*4.
+  -- fn_801DC5F0 initializes sequence[0x17]=2, and only root mode 5 replaces it
+  -- with root payload +0x0C (`variant` in WazaSequenceExtractor).  The PKX row
+  -- stores the 16 BODY_KEYS beginning at +0x4C, so this value is directly the
+  -- existing CurrentSpriteModels body-slot index; no cache revision is needed.
+  local root=type(phase)=="table" and phase.root or nil
+  if type(root)~="table" then return nil,false end
+  local mode=tonumber(root.mode)
+  if mode==nil then return nil,false end
+  local slot=mode==5 and tonumber(root.variant) or 2
+  if slot==nil or slot<0 or slot>=16 or slot~=math.floor(slot) then return nil,false end
+  return slot,true
+end
+local function sourceCameraDecision(inst,role,src,ownerRootBasis,ownerSide)
+  local phase=sourceCameraPhase(inst,role);if not phase then return nil end
+  if phase.cameraActive==false then return {active=false,phase=phase} end
+  local flags=math.max(0,math.floor(tonumber(phase.sequenceFlags) or 0))
+  local embeddedSize=math.max(0,math.floor(tonumber(phase.root and phase.root.embeddedSize) or 0))
+  -- battleCameraStartWaza checks sequence +0x18/+0x20 first and immediately
+  -- returns after cameraPlayOffsetAnime when the embedded HSD camera resource is
+  -- valid. The extractor now decodes supported HSD_CObj/WObj camera tracks into
+  -- executable source-local samples. Mark the embedded branch either way so CBE
+  -- never runs the mutually-exclusive procedural selector when the source camera
+  -- exists; unsupported transforms retain the safe source-shaped fallback.
+  if embeddedSize>0 then
+    local camera=type(phase.sourceCamera)=="table" and phase.sourceCamera or nil
+    local curveDecoded=camera and camera.complete==true and type(camera.samples)=="table" and #camera.samples>0
+    -- Embedded flag-0x4 cameras stay in battle-grid space. GC6E01's exact
+    -- normalisation constants and PKX ModelSequence selector source are now
+    -- decoded; cameraPose resolves that branch against all active selectors.
+    -- +0x4000 belongs only to the non-grid branch. The live actor bridge can now
+    -- provide the exact frame-0 GSmodel bound midpoint for Pokemon owners; keep
+    -- the flag here and resolve availability only after cameraPose fetches that
+    -- exact owner-root basis.
+    local battleSpace=hasCameraFlag(flags,0x4)
+    local boundCentre=(not battleSpace) and hasCameraFlag(flags,0x00004000)
+    -- GC6E01 has one additional non-grid owner-position adjustment that cannot
+    -- be approximated from Pokemon visual height.  When sequence +0x2E == 2
+    -- (the fight-side damage/target sequence), owner flag bit 2 is active and a
+    -- synthetic root null is present, battleCameraStartWaza adds the CHILD root
+    -- local translation Y returned by GSmodelGetRootPosition to offsetPosition.
+    -- CBE currently tracks the Type-6 add/remove-root-null controller state, but
+    -- not the exact mutable child translation.  Retail model-entry teardown can
+    -- write a nonzero value here, and one reachable path depends on the still-
+    -- unavailable source-equivalent GSmodel bounds.  Fail closed whenever this
+    -- special branch can be active rather than substituting actor/visual height.
+    local rootNullSpecial=false
+    if not battleSpace and role=="damage" then
+      local ownerState=H.controllers[tostring(controllerSide(inst) or "")]
+      rootNullSpecial=ownerState and ownerState.rootNull==true or false
+    end
+    local gridNormalised=battleSpace and hasCameraFlag(flags,0x00800000)
+    local gridYIdentity=gridNormalised and hasCameraFlag(flags,0x01000000)
+    local gridFacingFlip=battleSpace and hasCameraFlag(flags,0x02000000)
+    -- GC6E01's retail side data is now source-proven rather than inferred from
+    -- screen placement.  fightTarget type 4 is the relative host side
+    -- (fightTargetIsHostSide), active FightFloorData rows bind it to
+    -- FightSideData 2 (yrot=1), and battleGridAddPokemon converts nonzero yrot
+    -- to owner byte +0x76 == -1.  Type 5 binds FightSideData 1 (yrot=0), which
+    -- becomes +1.  cameraPose can therefore execute the conditional PI yaw when
+    -- the CBE owner side is known, instead of treating the whole flag as opaque.
+    local transformSupported=not rootNullSpecial
+    local transformUnsupported=rootNullSpecial and "owner-root-null-y-unavailable" or nil
+    return {active=true,phase=phase,flags=flags,sequenceKind=tonumber(phase.sequenceKind),embedded=true,embeddedSize=embeddedSize,
+      camera=camera,embeddedCurveDecoded=curveDecoded,embeddedDecoded=curveDecoded and transformSupported,
+      battleSpace=battleSpace,gridNormalised=gridNormalised,gridYIdentity=gridYIdentity,gridFacingFlip=gridFacingFlip,
+      boundCentre=boundCentre,rootNullSpecial=rootNullSpecial,embeddedTransformUnsupported=transformUnsupported}
+  end
+  local ownerPosition=type(ownerRootBasis)=="table" and ownerRootBasis.origin or src
+  local paramsFlags=sourceParamsFlags(flags,ownerPosition)
+  local retailParams
+  if CameraParams and type(CameraParams.calculate)=="function" and type(ownerRootBasis)=="table" then
+    retailParams=CameraParams.calculate(paramsFlags,ownerRootBasis.sourceScaleSelector,
+      ownerRootBasis.ownerRetailWazaBound,ownerRootBasis.ownerModelYaw)
+  end
+  local near,far
+  if retailParams and retailParams.exact then near,far=retailParams.distanceMin,retailParams.distanceMax
+  else near,far=sourceDistanceBand(paramsFlags) end
+  local motion=chooseSourceMotion(inst,phase,role,ownerRootBasis and ownerRootBasis.ownerDex)
+  local serial=tonumber(inst.presentationSerial or inst.serial) or 1
+  local targetSlot,targetSlotExact=sourceCameraTargetSlot(phase)
+  -- Exact scalar geometry is now shared with the decoded GC6E01 DoPosition
+  -- formulas. Random draws remain CBE-local (the host does not expose the
+  -- retail HSD_Randf stream), but the angle/distance/height bands, mode-1
+  -- lateral start, mode-0 ordering gate and fixed mode-4/5 angles are no longer
+  -- hand-tuned approximations whenever the exact owner bound/selector exists.
+  local motionSample
+  if retailParams and retailParams.exact and CameraParams and type(CameraParams.sampleMotion)=="function" then
+    local salts={
+      ["dolly-alternate"]=131,["dolly-distance-a"]=149,["dolly-distance-b"]=167,
+      ["mode1-lateral"]=181,["distance"]=193,["height"]=197,
+      ["rotation-a"]=211,["rotation-b"]=229,
+    }
+    local ownerFacing=ownerSide=="player" and -1 or (ownerSide=="enemy" and 1 or nil)
+    local ownerReverse=ownerFacing and ownerFacing<0 and not hasCameraFlag(flags,0x80) or false
+    motionSample=CameraParams.sampleMotion(motion,retailParams,function(key)
+      return stable01(serial,inst.serial or 1,(salts[key] or 251)+(flags%997))
+    end,{rotationBase=ownerRootBasis.ownerModelYaw,reverse=ownerFacing~=nil and ownerReverse or nil})
+  end
+  local r0=stable01(serial,inst.serial or 1,flags%10007+11)
+  local r1=stable01(serial,inst.serial or 1,flags%10009+37)
+  local distance0=motionSample and motionSample.distance0 or (near+(far-near)*r0)
+  local distance1=motionSample and motionSample.distance1 or (near+(far-near)*r1)
+  if not motionSample then
+    if motion==1 then
+      distance0=20+30*r0;distance1=distance0
+    elseif motion==4 and CameraParams and type(CameraParams.mode4)=="function" then
+      local m4=CameraParams.mode4();distance0=m4.distance;distance1=m4.distance
+    elseif motion==5 then
+      local selector=retailParams and retailParams.selector
+      local exactDistance=CameraParams and type(CameraParams.mode5Distance)=="function" and selector~=nil
+        and CameraParams.mode5Distance(selector) or nil
+      distance0=exactDistance or 50;distance1=distance0
+    end
+  end
+  local rot0,rot1
+  if motionSample then
+    rot0=motionSample.rotation0;rot1=motionSample.rotation1
+  else
+    local rotLo,rotHi
+    if retailParams and retailParams.exact then rotLo,rotHi=retailParams.rotationMin,retailParams.rotationMax
+    else rotLo,rotHi=sourceRotationBand(paramsFlags) end
+    rot0=rotLo+(rotHi-rotLo)*stable01(serial,inst.serial or 1,53)
+    rot1=rotLo+(rotHi-rotLo)*stable01(serial,inst.serial or 1,71)
+    if rot1<rot0 then rot0,rot1=rot1,rot0 end
+  end
+  local ownerFacing=ownerSide=="player" and -1 or (ownerSide=="enemy" and 1 or nil)
+  local ownerReverse=ownerFacing and ownerFacing<0 and not hasCameraFlag(flags,0x80) or false
+  return {active=true,phase=phase,flags=flags,sequenceKind=tonumber(phase.sequenceKind),motion=motion,paramsFlags=paramsFlags,
+    retailParams=retailParams,paramsExact=retailParams and retailParams.exact==true or false,
+    motionSample=motionSample,motionScalarExact=motionSample and motionSample.scalarFormulaExact==true or false,
+    motionRngExact=motionSample and motionSample.rngExact==true or false,
+    motionWorldRotationExact=motionSample and motionSample.worldRotationFormulaExact==true or false,
+    targetSlot=targetSlot,targetSlotExact=targetSlotExact,ownerSide=ownerSide,ownerFacing=ownerFacing,ownerReverse=ownerReverse,
+    distance0=distance0,distance1=distance1,rotation0=rot0,rotation1=rot1}
+end
+local function sourceFovEnvelope(decision,visualHeight,distance,rangeIndex)
+  -- DoFOV derives a lens from the owner's live GSmodel bounds and camera range.
+  -- Exact GSmodel frame-0 bounds now cross the actor bridge.  The range sample is
+  -- still driven by CBE's deterministic non-retail draw stream, so this improves
+  -- the source geometry without claiming retail sample/RNG parity.
+  local params=decision and decision.retailParams
+  rangeIndex=tonumber(rangeIndex) or 1
+  local exactGeometry=params and params.exact==true
+  local span
+  if exactGeometry then
+    local scaleMin,scaleMax=tonumber(params.scaleMin),tonumber(params.scaleMax)
+    -- The second transition executes after the retail params cursor advances by
+    -- four bytes. Relative to the original 0x34-byte buffer, its scaleMin read
+    -- therefore lands on +0x08 (scaleMax) and its scaleMax read on +0x0C
+    -- (rotationMin). This odd overlap is literal GC6E01 behavior, not a typo.
+    if rangeIndex>=3 then scaleMin,scaleMax=scaleMax,tonumber(params.rotationMin) end
+    if scaleMin==nil or scaleMax==nil then exactGeometry=false
+    else span=math.max(.75*scaleMin,scaleMax) end
+  end
+  if not exactGeometry then span=math.max(1,tonumber(visualHeight) or 6) end
+  local range=math.max(1,tonumber(distance) or 40)
+  local low=math.deg(2*math.atan(.5*span/range));local high=math.deg(2*math.atan(2*span/range))
+  low=math.max(15,math.min(85,low));high=math.max(15,math.min(85,high));if high<low then low,high=high,low end
+  return low,high,exactGeometry
+end
+local function sourceCameraFov(decision,visualHeight,ranges,serial,frame,timing)
+  -- _wazaSequenceCameraDoPosition writes three radii at params +0x28/+0x2C/+0x30.
+  -- DoFOV consumes range0 for its initial lens, then advances the params pointer
+  -- by four bytes per transition so segment 1 uses range1 and segment 2 range2.
+  -- Preserve that tuple instead of collapsing it to one representative radius.
+  local function rangeAt(index)
+    if type(ranges)=="table" then
+      if index==1 then return tonumber(ranges.near or ranges[1]) end
+      if index==2 then return tonumber(ranges.mid or ranges.middle or ranges[2]) end
+      return tonumber(ranges.far or ranges[3])
+    end
+    return tonumber(ranges)
+  end
+  local function envelope(index)
+    return sourceFovEnvelope(decision,visualHeight,rangeAt(index),index)
+  end
+  local low,high,boundGeometryExact=envelope(1)
+  local draw=0
+  local function rand01()
+    draw=draw+1
+    return stable01(serial,draw,149+draw*37+(tonumber(decision.sequenceKind) or 0)*11)
+  end
+  local function randIndex(n)return math.floor(rand01()*math.max(1,n)) end
+  local function choose(flags,rangeIndex)
+    local eLow,eHigh,eExact=envelope(rangeIndex or 1)
+    if eExact~=boundGeometryExact then boundGeometryExact=boundGeometryExact and eExact end
+    local a,b
+    if CameraFov and type(CameraFov.mixBand)=="function" then a,b=CameraFov.mixBand(flags)
+    else
+      if hasCameraFlag(flags,1) then a,b=0,.20
+      elseif hasCameraFlag(flags,4) then a,b=.75,1
+      else a,b=.35,.60 end
+    end
+    local mix=a+(b-a)*rand01()
+    return eLow+(eHigh-eLow)*mix
+  end
+
+  local usesPattern=CameraFov and CameraFov.usesPattern and CameraFov.usesPattern(decision.motion)
+  if not CameraFov then
+    local flags=hasCameraFlag(decision.paramsFlags,0x20) and 1
+      or (hasCameraFlag(decision.paramsFlags,0x80) and 4 or 2)
+    local value=choose(flags,1)
+    return math.rad(value),{patternExact=false,timingExact=false,boundsExact=false,boundsProxy=true,reason="pattern-module-unavailable"}
+  end
+
+  -- Modes 0/4/5 never use the retail pattern table. Their static FOV band is
+  -- source-exact even when camera timing metadata is absent because no FOV
+  -- transition is scheduled.
+  if not usesPattern then
+    local flags=CameraFov.staticChoice(decision.paramsFlags)
+    local value=choose(flags,1)
+    return math.rad(value),{patternExact=true,patternUsed=false,timingExact=true,
+      boundsExact=false,boundsProxy=not boundGeometryExact,boundGeometryExact=boundGeometryExact,
+      rangeFormulaExact=decision and decision.motionSample and decision.motionSample.fovRangeFormulaExact==true or false,
+      rangeSampleExact=false,tableName="none",rowIndex=nil,frameShift=timing and timing.frameShift or nil}
+  end
+
+  local timingExact=type(timing)=="table" and timing.exact==true
+    and tonumber(timing.rate)==60 and tonumber(timing.count) and type(timing.frames)=="table"
+  if not timingExact then
+    -- Table semantics are decoded, but without the exact active PKX owner row we
+    -- cannot place its two transition keys. Stay inside the source lens envelope
+    -- rather than inventing transition frames.
+    local value=low+(high-low)*(.35+.40*rand01())
+    return math.rad(value),{patternExact=false,patternUsed=true,timingExact=false,
+      boundsExact=false,boundsProxy=true,reason="owner-camera-timing-unavailable"}
+  end
+
+  local plan=CameraFov.plan(decision.sequenceKind,decision.paramsFlags,decision.motion,timing,rand01,randIndex)
+  local current=choose(plan.initialFlags,1)
+  local keys={}
+  for i,segment in ipairs(plan.segments or {}) do
+    local ending=current
+    if not segment.hold then ending=choose(segment.descriptor and segment.descriptor.flags or 0,i+1) end
+    keys[i]={start=current,finish=ending,startFrame=segment.startFrame,endFrame=segment.endFrame}
+    current=ending
+  end
+  local cameraClock=(tonumber(plan.frame0) or 0)+math.max(0,tonumber(frame) or 0)
+  local value
+  if #keys==0 then value=current
+  else
+    value=keys[#keys].finish
+    for _,key in ipairs(keys) do
+      if cameraClock<=key.startFrame then value=key.start;break end
+      if cameraClock<=key.endFrame then
+        local span=key.endFrame-key.startFrame
+        local t=span>0 and (cameraClock-key.startFrame)/span or 1
+        value=key.start+(key.finish-key.start)*math.max(0,math.min(1,t));break
+      end
+      value=key.finish
+    end
+  end
+  return math.rad(value),{patternExact=true,patternUsed=true,timingExact=true,boundsExact=false,boundsProxy=not boundGeometryExact,
+    boundGeometryExact=boundGeometryExact,
+    rangeFormulaExact=decision and decision.motionSample and decision.motionSample.fovRangeFormulaExact==true or false,
+    rangeSampleExact=false,
+    tableName=plan.tableName,rowIndex=plan.rowIndex,selection=plan.selection,frameShift=plan.frameShift,
+    cameraClock=cameraClock,frame0=plan.frame0,keyCount=#keys}
+end
 local function offsetEye(focus,forward,right,back,side,height)
   local eye=cadd(focus,forward,-back)
   eye=cadd(eye,right,side)
   eye[2]=(eye[2] or 0)+height
   return eye
 end
+
+-- Exact fn_801DABAC f32 return values. In particular selector 1 is the binary32
+-- value encoded by retail 1.33329999f, not the visually rounded Lua decimal.
+local RETAIL_CAMERA_OWNER_SCALES={0.5,0.75,1.0,1.333299994468689,2.0,3.25}
+local RETAIL_CAMERA_SCALE_BY_SELECTOR={[-2]=0.5,[-1]=0.75,[0]=1.0,[1]=1.333299994468689,[2]=2.0,[3]=3.25}
+-- GC6E01 battleGridGetNormalisedScale performs one single-precision multiply:
+-- base selector {-2/-1=.875, 0=1, 1=1.3999999761581421,
+-- 2=1.7999999523162842, 3=2.75} * lbl_8047DFA0=1.7105263471603394.
+-- Store the resulting f32 values directly. Recomputing this in Lua double made
+-- a decoded battle-grid HSD camera slightly different from the retail scale
+-- while still labelling the source frame exact. Unknown selectors take retail's
+-- default base 1.0 and therefore the selector-0 result.
+local RETAIL_GRID_NORMALISED_BY_SELECTOR={
+  [-2]=1.4967105388641357,[-1]=1.4967105388641357,[0]=1.7105263471603394,
+  [1]=2.3947367668151855,[2]=3.0789473056793213,[3]=4.7039475440979,
+}
+local RETAIL_GRID_NORMALISED_DEFAULT=1.7105263471603394
+local function embeddedCameraSample(camera,frame)
+  local samples=type(camera)=="table" and camera.samples or nil
+  if type(samples)~="table" or #samples==0 then return nil end
+  local f=math.max(0,math.min(#samples-1,tonumber(frame) or 0))
+  local i0=math.floor(f)+1;local i1=math.min(#samples,i0+1);local t=f-math.floor(f)
+  local a,b=samples[i0],samples[i1]
+  if not (a and a.eye and a.focus and b and b.eye and b.focus) then return nil end
+  local function v3(x,y)return {lerp(x[1],y[1],t),lerp(x[2],y[2],t),lerp(x[3],y[3],t)}end
+  return {eye=v3(a.eye,b.eye),focus=v3(a.focus,b.focus),fov=lerp(tonumber(a.fov) or 40,tonumber(b.fov) or tonumber(a.fov) or 40,t)}
+end
+local function embeddedOwnerScale(basis,figureScale)
+  -- Retail fn_801DABAC uses one of six discrete ModelSequence owner classes.
+  -- `sequenceLoad` copies the PKX resource header's +0x0C sequenceKind directly
+  -- into this selector. New metadata exports that word, so prefer it exactly.
+  -- Old pre-v5 caches retain the previous visual-height classifier only as an
+  -- explicit compatibility fallback until their tiny PKX sidecar is refreshed.
+  local selector=basis and tonumber(basis.sourceScaleSelector)
+  if selector~=nil then
+    local exact=RETAIL_CAMERA_SCALE_BY_SELECTOR[selector]
+    -- Retail's switch defaults to 1.0 for any selector outside -2..3.
+    return exact or 1.0,nil,selector,true
+  end
+  local stageHeight=math.max(.01,(tonumber(basis and basis.sourceVisualHeight) or 17.25)*math.max(.01,figureScale or .4))
+  local relative=stageHeight/6.90
+  local best,bestErr=1,math.huge
+  for _,v in ipairs(RETAIL_CAMERA_OWNER_SCALES) do local e=math.abs(relative-v);if e<bestErr then best,bestErr=v,e end end
+  return best,relative,nil,false
+end
+local function embeddedOwnerPoint(basis,p,figureScale,stageScale,ownerScale,reverse)
+  local origin=basis.origin
+  local yaw=tonumber(basis and basis.ownerModelYaw)
+  if yaw==nil or basis.ownerModelRotationExact~=true then return nil end
+  local ox,oy,oz=origin[1]*figureScale,origin[2]*figureScale,origin[3]*figureScale
+  local q=(stageScale or .25)*(ownerScale or 1)
+  local x,y,z=(p[1] or 0)*q,(p[2] or 0)*q,(p[3] or 0)*q
+  -- Retail order remains scale -> GSmodel rotation -> post-rotation world-Z
+  -- mirror -> owner position.  CBE's battle line is a rotated presentation of
+  -- retail's +/-X grid: for owner yaw theta, Q=Ry(theta-pi/2). Conjugating the
+  -- retail reverse through Q gives
+  --   Q * Fz * Ry(pi/2) = Ry(theta) * Fx,
+  -- so the EXACT CBE-coordinate operation is an X reflection in camera-local
+  -- coordinates followed by the owner's base yaw. This is not an approximation
+  -- or a reordering in retail space; it is the same transform after the proven
+  -- retail-world -> CBE-world coordinate change.
+  if reverse then x=-x end
+  local cs,sn=math.cos(yaw),math.sin(yaw)
+  local dx,dz=cs*x+sn*z,-sn*x+cs*z
+  return {ox+dx,oy+y,oz+dz}
+end
+local function retailGridScale(ctx)
+  local selectors=ctx and ctx.cbeRetailScaleSelectors
+  local complete=ctx and ctx.cbeRetailScaleSelectorsComplete
+  if selectors==nil and CSM and type(CSM.retailScaleSelectors)=="function" then
+    local ok,a,b=pcall(CSM.retailScaleSelectors,CSM)
+    if ok then selectors,complete=a,b end
+  end
+  if complete~=true or type(selectors)~="table" or #selectors==0 then return nil,nil,false end
+  local maxSelector=nil
+  for _,value in ipairs(selectors)do
+    local selector=tonumber(value)
+    if selector==nil then return nil,nil,false end
+    if maxSelector==nil or selector>maxSelector then maxSelector=selector end
+  end
+  local scale=RETAIL_GRID_NORMALISED_BY_SELECTOR[maxSelector] or RETAIL_GRID_NORMALISED_DEFAULT
+  return scale,maxSelector,true
+end
+local function retailWazaOwnerFacing(side)
+  -- Exact GC6E01 common_rel.fdat / fight-target contract:
+  --   target type 4 (host)  -> FightSideData 2 -> yrot 1 -> grid +0x76 = -1
+  --   target type 5 (other) -> FightSideData 1 -> yrot 0 -> grid +0x76 = +1
+  -- Every non-dummy retail FightFloorData row uses the pair (2,1). CBE's
+  -- canonical `player` side is the locally controlled/host side and `enemy` is
+  -- the other side.  Do not derive this sign from actor X/Z placement.
+  if side=="player" then return -1 end
+  if side=="enemy" then return 1 end
+  return nil
+end
+local function retailEmbeddedReverse(side,flags)
+  -- battleCameraStartWaza derives `reverse` from the *Waza owner*, before it
+  -- dispatches either embedded-camera transform branch.  A negative owner only
+  -- reverses when sequence flag 0x80 is clear. cameraPlayOffsetAnime then stores
+  -- shift=4, and _cameraOffsetAnimeUpdate applies that as a post-rotation Z
+  -- mirror (flags[2]&4), before offsetPosition is added.
+  if hasCameraFlag(flags,0x80) then return false,retailWazaOwnerFacing(side) end
+  local facing=retailWazaOwnerFacing(side)
+  if facing==nil then return nil,nil end
+  return facing<0,facing
+end
+local function embeddedBattlePoint(ctx,p,stageScale,sx,sy,sz)
+  local x=(tonumber(p and p[1]) or 0)*(sx or 1)*(stageScale or .25)
+  local y=(tonumber(p and p[2]) or 0)*(sy or 1)*(stageScale or .25)
+  local z=(tonumber(p and p[3]) or 0)*(sz or 1)*(stageScale or .25)
+  local yaw=tonumber(ctx and ctx.arena and ctx.arena.stageYaw) or 0
+  if yaw~=0 then
+    local cs,sn=math.cos(yaw),math.sin(yaw)
+    x,z=cs*x+sn*z,-sn*x+cs*z
+  end
+  return {x,y,z}
+end
 function H.cameraPose(ctx)
   if not (Waza and CSM and type(CSM.wazaBasis)=="function") then return nil end
   local inst=latestCameraInstance();if not inst then return nil end
   local role=tostring(inst.role or "attack")
-  local originSide=role=="damage" and inst.target or inst.side
-  local otherSide=originSide==inst.side and inst.target or inst.side
+  -- Camera grammar follows the attacker's action axis for the complete sentence.
+  -- Damage/reaction Waza rows are target-owned effects, but rebuilding the camera
+  -- basis as defender->attacker mirrors `right` and crosses the 180-degree line
+  -- exactly at impact. Keep attacker->target orientation and simply move focus to
+  -- the receiver for the damage chapter.
+  local originSide=inst.side
+  local otherSide=inst.target or (originSide=="player" and "enemy" or "player")
+  -- Retail fight_waza.c loads WZX type 1 on the move user and type 2 on the
+  -- target. fightOutPokemonLoadWazaEffect then attaches the sequence directly to
+  -- that Pokemon's Waza owner, and wazaSequenceStart passes that exact owner to
+  -- battleCameraStartWaza. Damage chapters are therefore target-owned for every
+  -- owner-local camera transform/selector/facing decision, even though the
+  -- presentation sentence below deliberately keeps attacker->target continuity.
+  local sourceOwnerSide=(role=="damage") and otherSide or originSide
+  local sourceOtherSide=(sourceOwnerSide==originSide) and otherSide or originSide
   local attachment=cameraAttachment(inst)
   local ok,basis=pcall(CSM.wazaBasis,CSM,ctx,originSide,otherSide,attachment,{
-    moveId=(inst.spec and inst.spec.moveId) or inst.moveId,style=inst.spec and inst.spec.style,role=role,sourceStrict=true})
+    moveId=tonumber(inst.moveId) or (inst.spec and inst.spec.moveId),style=inst.spec and inst.spec.style,role=role,sourceStrict=true})
   if not ok or type(basis)~="table" or type(basis.origin)~="table" or type(basis.target)~="table" then return nil end
 
   local src,dst=basis.origin,basis.target
@@ -1266,60 +1904,358 @@ function H.cameraPose(ctx)
   local right=type(basis.right)=="table" and basis.right or {1,0,0}
   local frame=(tonumber(inst.frame) or 0)+(tonumber(inst.accumulator) or 0)*60
   local total=math.max(1,tonumber(inst.sourceEndFrame) or 1)
-  local p=math.max(0,math.min(1,frame/total));local sp=csmooth(p)
-  local style=V.WazaPhasePolicy and V.WazaPhasePolicy.cameraStyle(inst.spec) or tostring(inst.spec and inst.spec.style or "impact"):lower()
+  local p=math.max(0,math.min(1,frame/total))
+  local fallbackStyle=V.WazaPhasePolicy and V.WazaPhasePolicy.cameraStyle(inst.spec) or tostring(inst.spec and inst.spec.style or "impact"):lower()
   local fight=math.max(10,tonumber(basis.fightDistance) or cdist(src,dst))
   local sh=math.max(2.8,tonumber(basis.sourceVisualHeight) or 5.5)
   local th=math.max(2.8,tonumber(basis.targetVisualHeight) or sh)
   local avgH=(sh+th)*.5
   local focus,eye,fov=clerp(src,dst,.5),nil,SOURCE_CAMERA_FOV
+  local fovSourceStatus
+  local ownerRootBasis
+  local okOwnerRoot,ownerRoot=pcall(CSM.wazaBasis,CSM,ctx,sourceOwnerSide,sourceOtherSide,nil,{
+    moveId=tonumber(inst.moveId) or (inst.spec and inst.spec.moveId),style=inst.spec and inst.spec.style,role=role,sourceStrict=true,ownerRoot=true})
+  if okOwnerRoot and type(ownerRoot)=="table" and type(ownerRoot.origin)=="table" then ownerRootBasis=ownerRoot end
+  local sourceDecision=sourceCameraDecision(inst,role,src,ownerRootBasis,sourceOwnerSide)
+  if sourceDecision and sourceDecision.active==false then return nil end
+  local sourceCameraTarget
+  if sourceDecision and not sourceDecision.embedded and sourceDecision.targetSlotExact then
+    local okTarget,targetBasis=pcall(CSM.wazaBasis,CSM,ctx,sourceOwnerSide,sourceOtherSide,sourceDecision.targetSlot,{
+      moveId=tonumber(inst.moveId) or (inst.spec and inst.spec.moveId),style=inst.spec and inst.spec.style,
+      role=role,sourceStrict=true})
+    if okTarget and type(targetBasis)=="table" and type(targetBasis.origin)=="table" then
+      sourceCameraTarget=targetBasis.origin;sourceDecision.targetResolved=true
+    end
+  end
+  -- Keep the diagnostic style distinct from the composition selector. An
+  -- embedded retail camera resource owns the real shot, but until its HSD
+  -- curve is decoded we must retain the move's previous safe source-shaped
+  -- composition rather than falling through to the unrelated generic branch.
+  local compositionStyle=fallbackStyle
+  local style=sourceDecision and sourceDecision.embedded
+      and (sourceDecision.embeddedDecoded and "source-embedded-hsd" or ("source-embedded-fallback-"..fallbackStyle))
+    or (sourceDecision and ("source-motion-"..tostring(sourceDecision.motion)) or fallbackStyle)
+  -- battleCameraStartWaza mirrors its camera rotation from the owner's facing
+  -- (`reverse`) and the attack/damage Waza instances share BattleDirector's
+  -- presentationSerial. Preserve one mirrored side of the 180-degree line for
+  -- that complete source presentation instead of letting style-specific signs
+  -- flip launch and impact to opposite sides.
+  local actionKey=tostring(inst.presentationSerial or inst.parentAttackSerial or inst.serial or "waza")
+  if cameraContinuity.actionKey~=actionKey then
+    cameraContinuity.actionKey=actionKey
+    cameraContinuity.axisSign=originSide=="enemy" and -1 or 1
+  end
+  local axisSign=cameraContinuity.axisSign or 1
 
-  if role=="damage" then
+  local embeddedStageSpace=false
+  if sourceDecision and sourceDecision.embeddedDecoded then
+    -- Retail embedded camera data is owner-local in this branch. Resolve the
+    -- owner's model root (not a particle attachment), preserve the decoded HSD
+    -- eye/interest/FOV curve, then reproduce the offset transform in final stage
+    -- space. Source stageScale and actor figureScale are intentionally separate.
+    local okRoot,rootBasis=ownerRootBasis~=nil,ownerRootBasis
+    local sample=embeddedCameraSample(sourceDecision.camera,frame)
+    if okRoot and type(rootBasis)=="table" and type(rootBasis.origin)=="table" and sample then
+      local figureScale=tonumber(ctx and ctx.arena and ctx.arena.figureScale) or tonumber(ctx and ctx.services and ctx.services.figureScale) or 1
+      local stageScale=tonumber(ctx and ctx.arena and ctx.arena.stageScale) or .25
+      local ownerScale,ownerRelative,ownerSelector,ownerSelectorExact=embeddedOwnerScale(rootBasis,figureScale)
+      local ownerReverse,ownerFacing=retailEmbeddedReverse(sourceOwnerSide,sourceDecision.flags)
+      sourceDecision.ownerSide=sourceOwnerSide;sourceDecision.ownerFacing=ownerFacing;sourceDecision.ownerReverse=ownerReverse==true
+      if ownerReverse==nil then
+        sourceDecision.embeddedDecoded=false
+        sourceDecision.embeddedTransformUnsupported="owner-facing-unavailable"
+        style="source-embedded-fallback-"..fallbackStyle
+      end
+      if sourceDecision.battleSpace then
+        local gridScale,gridSelector,gridScaleExact=1,nil,true
+        if sourceDecision.gridNormalised then
+          gridScale,gridSelector,gridScaleExact=retailGridScale(ctx)
+          if not gridScale then
+            sourceDecision.embeddedDecoded=false
+            sourceDecision.embeddedTransformUnsupported="battle-grid-selector-unavailable"
+            style="source-embedded-fallback-"..fallbackStyle
+          end
+        end
+        local gridOwnerSide=sourceOwnerSide
+        local gridOwnerFacing=ownerFacing
+        local gridFacingSign=1
+        if sourceDecision.gridFacingFlip then
+          if gridOwnerFacing==nil then
+            sourceDecision.embeddedDecoded=false
+            sourceDecision.embeddedTransformUnsupported="battle-grid-owner-facing-unavailable"
+            style="source-embedded-fallback-"..fallbackStyle
+          elseif gridOwnerFacing<0 then
+            -- battleCameraStartWaza writes offsetRotation.y = PI.  In grid-local
+            -- coordinates that is exactly x,z -> -x,-z before stageYaw.
+            gridFacingSign=-1
+          end
+        end
+        if sourceDecision.embeddedDecoded then
+          local yScale=sourceDecision.gridYIdentity and 1 or gridScale
+          -- Retail transform order is scale -> offsetRotation -> reverse-axis
+          -- flags -> offsetPosition. For the grid branch offsetPosition is zero;
+          -- optional facing PI rotates both X/Z, then reverse shift=4 mirrors Z.
+          local reverseZ=ownerReverse and -1 or 1
+          eye=embeddedBattlePoint(ctx,sample.eye,stageScale,gridScale*gridFacingSign,yScale,gridScale*gridFacingSign*reverseZ)
+          focus=embeddedBattlePoint(ctx,sample.focus,stageScale,gridScale*gridFacingSign,yScale,gridScale*gridFacingSign*reverseZ)
+          sourceDecision.gridScale=gridScale;sourceDecision.gridSelector=gridSelector
+          sourceDecision.gridScaleExact=gridScaleExact==true
+          sourceDecision.gridOwnerSide=gridOwnerSide;sourceDecision.gridOwnerFacing=gridOwnerFacing
+          sourceDecision.gridFacingApplied=sourceDecision.gridFacingFlip and gridFacingSign<0 or false
+          sourceDecision.reverseMirrorApplied=ownerReverse==true
+          embeddedStageSpace=true
+        end
+      else
+        if rootBasis.ownerModelRotationExact~=true or tonumber(rootBasis.ownerModelYaw)==nil then
+          sourceDecision.embeddedDecoded=false
+          sourceDecision.embeddedTransformUnsupported="owner-model-rotation-unavailable"
+          style="source-embedded-fallback-"..fallbackStyle
+        elseif sourceDecision.embeddedDecoded then
+          local pointBasis=rootBasis
+          if sourceDecision.boundCentre then
+            local retailBound=rootBasis.ownerRetailWazaBound
+            if not (type(retailBound)=="table" and retailBound.exact==true and retailBound.selectorExact==true
+                and type(retailBound.centerWorld)=="table") then
+              sourceDecision.embeddedDecoded=false
+              sourceDecision.embeddedTransformUnsupported="owner-bound-centre-unavailable"
+              style="source-embedded-fallback-"..fallbackStyle
+            else
+              pointBasis={origin=retailBound.centerWorld,ownerModelYaw=rootBasis.ownerModelYaw,ownerModelRotationExact=true}
+              sourceDecision.ownerBoundCentreExact=true
+              sourceDecision.ownerBoundAnimationIndex=retailBound.animationIndex
+            end
+          end
+          if sourceDecision.embeddedDecoded then
+            eye=embeddedOwnerPoint(pointBasis,sample.eye,figureScale,stageScale,ownerScale,ownerReverse)
+            focus=embeddedOwnerPoint(pointBasis,sample.focus,figureScale,stageScale,ownerScale,ownerReverse)
+            if eye and focus then
+              sourceDecision.ownerModelYaw=rootBasis.ownerModelYaw
+              sourceDecision.reverseMirrorApplied=ownerReverse==true
+              embeddedStageSpace=true
+            else
+              sourceDecision.embeddedDecoded=false
+              sourceDecision.embeddedTransformUnsupported="owner-model-rotation-unavailable"
+              style="source-embedded-fallback-"..fallbackStyle
+            end
+          end
+        end
+      end
+      fov=math.rad(math.max(1,math.min(179,tonumber(sample.fov) or 40)))
+      sourceDecision.ownerScale=ownerScale;sourceDecision.ownerRelative=ownerRelative;sourceDecision.ownerSelector=ownerSelector
+      sourceDecision.ownerSelectorExact=ownerSelectorExact;sourceDecision.stageScale=stageScale
+    else
+      -- A decoded source curve without a live owner transform is not safe to
+      -- present as retail. Fall through to the previous source-shaped fallback.
+      sourceDecision.embeddedDecoded=false
+      style="source-embedded-fallback-"..fallbackStyle
+    end
+  end
+  if embeddedStageSpace then
+    -- Decoded retail HSD pose already owns eye/focus/FOV in final stage space.
+  elseif sourceDecision and not sourceDecision.embedded then
+    -- Source root data wins over the legacy style vocabulary. Retail chooses one
+    -- of camera motion modes 0/1/2/3/5 from the Waza root flags, calculates a
+    -- source distance/rotation envelope, and advances that camera over the Waza
+    -- duration. Reconstruct that *system* here; exact random samples and the
+    -- authored HSD offset-camera animation remain explicitly outside this path.
+    local motion=sourceDecision.motion
+    local motionSample=sourceDecision.motionSample
+    local ownerH=role=="damage" and th or sh
+    local distance=sourceDecision.distance0
+    local angle=sourceDecision.rotation0
+    local worldAngle
+    local sourceLateral
+    if motion==0 then
+      -- Retail beam/projectile mode: dolly between two source-range samples over
+      -- the sequence duration. Focus stays at the owner/effect origin; this is
+      -- camera travel, never projectile tracking.
+      distance=lerp(sourceDecision.distance0,sourceDecision.distance1,p)
+      focus=role=="damage" and {dst[1],dst[2]+th*.04,dst[3]} or clerp(src,dst,.08)
+    elseif motion==1 then
+      -- Mode 1 performs one timed lateral camera position
+      -- move. Retail actually starts 10 units off-axis and then moves a further
+      -- 25..35; when exact scalar params are available preserve that start/end
+      -- displacement directly rather than collapsing it into a zero-based arc.
+      if motionSample and motionSample.lateral0 and motionSample.lateral1 then
+        sourceLateral=lerp(motionSample.lateral0,motionSample.lateral1,p)
+        angle=math.atan(sourceLateral/math.max(1,distance))
+      else
+        local lateral=25+10*stable01(inst.presentationSerial or inst.serial or 1,inst.serial or 1,181)
+        angle=math.atan((lateral*p)/math.max(1,distance))
+      end
+      focus=role=="damage" and {dst[1],dst[2]+th*.04,dst[3]} or clerp(src,dst,.16)
+    elseif motion==2 then
+      -- Mode 2 is the source's one timed Y-rotation channel. It is an authored
+      -- arc within the shot, not a perpetual arena orbit.
+      angle=lerp(sourceDecision.rotation0,sourceDecision.rotation1,p)
+      focus=role=="damage" and {dst[1],dst[2]+th*.04,dst[3]} or clerp(src,dst,.27)
+    elseif motion==3 then
+      focus=role=="damage" and {dst[1],dst[2]+th*.04,dst[3]} or clerp(src,dst,.24)
+    elseif motion==4 then
+      -- ModelSequence id 0x13A forces retail mode 4: 110 distance, 25 height,
+      -- and a fixed 0.47123894-radian (27-degree) owner-relative yaw. Earlier
+      -- CBE builds inherited a random rotation-band sample here.
+      if motionSample then angle=motionSample.rotation0
+      elseif CameraParams and type(CameraParams.mode4)=="function" then angle=CameraParams.mode4().rotation end
+      focus=role=="damage" and {dst[1],dst[2]+th*.04,dst[3]} or {src[1],src[2]+sh*.05,src[3]}
+    elseif motion==5 then
+      angle=motionSample and motionSample.rotation0 or math.rad(45)
+      focus=role=="damage" and {dst[1],dst[2]+th*.04,dst[3]} or {src[1],src[2]+sh*.05,src[3]}
+    end
+    if sourceCameraTarget then
+      -- The target identity is source-exact: +0x4C + sequence[0x17]*4 in the
+      -- current PKX animation row. CurrentSpriteModels resolves that body-map
+      -- slot against the live owner animation, matching retail's per-frame part
+      -- tracking instead of aiming procedural cameras at a semantic midpoint.
+      focus={sourceCameraTarget[1],sourceCameraTarget[2],sourceCameraTarget[3]}
+    end
+    local height
+    if motionSample and tonumber(motionSample.height) then height=motionSample.height
+    elseif motion==1 then height=1+9*stable01(inst.presentationSerial or inst.serial or 1,inst.serial or 1,197)
+    elseif motion==4 and CameraParams and type(CameraParams.mode4)=="function" then height=CameraParams.mode4().height
+    elseif sourceDecision.retailParams and sourceDecision.retailParams.exact then
+      local rp=sourceDecision.retailParams
+      height=rp.heightMin+(rp.heightMax-rp.heightMin)*stable01(inst.presentationSerial or inst.serial or 1,inst.serial or 1,197)
+    else height=math.max(6,math.min(20,ownerH*.80)) end
+    local fovRange=distance
+    if motion==0 then fovRange=math.sqrt(sourceDecision.distance0*sourceDecision.distance0+height*height)
+    elseif motion==1 then
+      if motionSample and motionSample.fovRange then fovRange=motionSample.fovRange.near
+      else
+        local lateral=25+10*stable01(inst.presentationSerial or inst.serial or 1,inst.serial or 1,181)
+        fovRange=math.sqrt(lateral*lateral+height*height)
+      end
+    elseif motion==2 then fovRange=math.sqrt(distance*distance+height*height)
+    elseif motion==3 then fovRange=math.sqrt(distance*distance+height*height+angle*angle)
+    elseif motion==4 and CameraParams and type(CameraParams.mode4)=="function" then fovRange=CameraParams.mode4().range
+    elseif motion==5 then fovRange=math.sqrt(distance*distance+height*height+math.rad(45)*math.rad(45)) end
+    if motion~=1 and motionSample and motionSample.worldRotationFormulaExact
+        and tonumber(motionSample.worldRotation0) and tonumber(motionSample.worldRotation1) then
+      -- GC6E01 camera mode 7 is cylindrical around the selected target.  Once
+      -- GSmodel.rotation.y and the owner reverse bit are exact, DoPosition gives
+      -- literal world Y rotations. Keep source linear interpolation for mode 2;
+      -- modes 0/3/4/5 simply hold the source yaw while position/radius changes.
+      worldAngle=lerp(motionSample.worldRotation0,motionSample.worldRotation1,p)
+      eye={focus[1]+math.sin(worldAngle)*distance,focus[2]+height,focus[3]+math.cos(worldAngle)*distance}
+      sourceDecision.worldRotationApplied=true;sourceDecision.worldRotation=worldAngle
+    elseif sourceLateral then
+      -- cameraMovePosition mode 1 translates the already-offset eye in X while
+      -- retaining the 20..50 source distance. This is not a circular yaw arc.
+      eye=offsetEye(focus,forward,right,distance,sourceLateral*axisSign,height)
+    else
+      local back=distance*math.cos(angle);local side=distance*math.sin(angle)*axisSign
+      eye=offsetEye(focus,forward,right,back,side,height)
+    end
+    local ownerTiming
+    local okTiming,timingBasis=pcall(CSM.wazaBasis,CSM,ctx,sourceOwnerSide,sourceOtherSide,nil,{
+      moveId=tonumber(inst.moveId) or (inst.spec and inst.spec.moveId),style=inst.spec and inst.spec.style,
+      role=role,sourceStrict=true,ownerRoot=true})
+    if okTiming and type(timingBasis)=="table" then ownerTiming=timingBasis.ownerCameraTiming end
+    local fovRanges=motionSample and motionSample.fovRange or fovRange
+    fov,fovSourceStatus=sourceCameraFov(sourceDecision,ownerH,fovRanges,
+      inst.presentationSerial or inst.serial or 1,frame,ownerTiming)
+  elseif role=="damage" then
     -- Hold the struck actor's live source pose. The authored reaction supplies
     -- the impact motion; do not add an unrelated shake waveform to every move.
-    focus={src[1],src[2]+sh*.05,src[3]}
-    eye=offsetEye(focus,forward,right,fight*.29,fight*.22,sh*.52)
+    focus={dst[1],dst[2]+th*.05,dst[3]}
+    eye=offsetEye(focus,forward,right,fight*.29,fight*.22*axisSign,th*.52)
     fov=math.rad(35.5)
-  elseif style=="projectile" then
+  elseif compositionStyle=="projectile" then
     -- The reference launch shot holds the attacker and its mouth-origin stream;
     -- the target receives its own damage shot. Do not chase the projectile
     -- across the entire arena before that authored phase boundary.
     focus=clerp(src,dst,.08);focus[2]=focus[2]+sh*.03
-    eye=offsetEye(focus,forward,right,fight*.20,fight*.30,sh*.48)
+    eye=offsetEye(focus,forward,right,fight*.20,fight*.30*axisSign,sh*.48)
     fov=math.rad(36.5)
-  elseif style=="wave" then
+  elseif compositionStyle=="wave" then
     focus=clerp(src,dst,.5);focus[2]=focus[2]+avgH*.02
-    eye=offsetEye(focus,forward,right,fight*.17,fight*.52,avgH*.68)
+    eye=offsetEye(focus,forward,right,fight*.17,fight*.52*axisSign,avgH*.68)
     fov=math.rad(40.0)
-  elseif style=="contact" then
+  elseif compositionStyle=="contact" then
     focus=clerp(src,dst,.28);focus[2]=focus[2]+avgH*.04
-    eye=offsetEye(focus,forward,right,fight*.23,fight*.36,avgH*.50)
+    eye=offsetEye(focus,forward,right,fight*.23,fight*.36*axisSign,avgH*.50)
     fov=math.rad(36.0)
-  elseif style=="aura" or style=="self" then
+  elseif compositionStyle=="aura" or compositionStyle=="self" then
     focus={src[1],src[2]+sh*.08,src[3]}
-    eye=offsetEye(focus,forward,right,fight*.30,fight*.26,sh*.62)
+    eye=offsetEye(focus,forward,right,fight*.30,fight*.26*axisSign,sh*.62)
     fov=math.rad(34.5)
-  elseif style=="target" then
+  elseif compositionStyle=="target" then
     focus={dst[1],dst[2]+th*.05,dst[3]}
-    eye=offsetEye(focus,forward,right,fight*.28,-fight*.25,th*.57)
+    eye=offsetEye(focus,forward,right,fight*.28,fight*.25*axisSign,th*.57)
     fov=math.rad(35.5)
   else -- A readable held attack composition while exact retail curves are pending.
     focus=clerp(src,dst,.25);focus[2]=focus[2]+avgH*.04
-    eye=offsetEye(focus,forward,right,fight*.25,-fight*.34,avgH*.56)
+    eye=offsetEye(focus,forward,right,fight*.25,fight*.34*axisSign,avgH*.56)
     fov=math.rad(36.0)
   end
   -- Chapter changes are cuts, including hit/launch changes. Live actor motion
   -- still moves the focus within each shot through Camera's velocity limiter.
 
   local k=tonumber(ctx and ctx.arena and ctx.arena.figureScale) or tonumber(ctx and ctx.services and ctx.services.figureScale) or 1
-  eye={eye[1]*k,eye[2]*k,eye[3]*k};focus={focus[1]*k,focus[2]*k,focus[3]*k}
-  local pose={eye=eye,focus=focus,fov=fov,sourceSerial=inst.serial,sourceFrame=frame,sourceProgress=p,
-    sourceStyle=style,sourceRole=role,presentationSerial=inst.presentationSerial,blend=.10,cut=true}
+  if not embeddedStageSpace then
+    eye={eye[1]*k,eye[2]*k,eye[3]*k};focus={focus[1]*k,focus[2]*k,focus[3]*k}
+  end
+  local shotId=tostring(inst.presentationSerial or inst.serial or "waza")..":"..role..":"..style
+  local cut=cameraContinuity.currentSerial~=shotId
+  cameraContinuity.currentSerial=shotId
+  local pose={eye=eye,focus=focus,fov=fov,sourceSerial=inst.serial,sourceShotId=shotId,sourceFrame=frame,sourceProgress=p,
+    sourceStyle=style,sourceRole=role,presentationSerial=inst.presentationSerial,blend=.10,cut=cut,
+    sourceCameraMotion=sourceDecision and sourceDecision.motion or nil,sourceCameraFlags=sourceDecision and sourceDecision.flags or nil,
+    sourceCameraParamsFlags=sourceDecision and sourceDecision.paramsFlags or nil,sourceSequenceKind=sourceDecision and sourceDecision.sequenceKind or nil,
+    sourceCameraMotionScalarExact=sourceDecision and sourceDecision.motionScalarExact==true or false,
+    sourceCameraMotionRngExact=sourceDecision and sourceDecision.motionRngExact==true or false,
+    sourceCameraWorldRotationExact=sourceDecision and sourceDecision.motionWorldRotationExact==true or false,
+    sourceCameraWorldRotationApplied=sourceDecision and sourceDecision.worldRotationApplied==true or false,
+    sourceCameraWorldRotation=sourceDecision and sourceDecision.worldRotation or nil,
+    sourceCameraTargetSlot=sourceDecision and sourceDecision.targetSlot or nil,
+    sourceCameraTargetSlotExact=sourceDecision and sourceDecision.targetSlotExact==true or false,
+    sourceCameraTargetResolved=sourceDecision and sourceDecision.targetResolved==true or false,
+    sourceCameraMode1LateralStart=sourceDecision and sourceDecision.motionSample and sourceDecision.motionSample.lateral0 or nil,
+    sourceCameraMode1LateralEnd=sourceDecision and sourceDecision.motionSample and sourceDecision.motionSample.lateral1 or nil,
+    sourceCameraEmbedded=sourceDecision and sourceDecision.embedded==true or false,
+    sourceCameraEmbeddedSize=sourceDecision and sourceDecision.embeddedSize or nil,
+    sourceCameraEmbeddedCurveDecoded=sourceDecision and sourceDecision.embeddedCurveDecoded==true or false,
+    sourceCameraEmbeddedDecoded=sourceDecision and sourceDecision.embeddedDecoded==true or false,
+    sourceCameraEmbeddedTransformUnsupported=sourceDecision and sourceDecision.embeddedTransformUnsupported or nil,
+    sourceCameraRootNullSpecial=sourceDecision and sourceDecision.rootNullSpecial==true or false,
+    sourceCameraOwnerBoundCentreExact=sourceDecision and sourceDecision.ownerBoundCentreExact==true or false,
+    sourceCameraOwnerBoundAnimationIndex=sourceDecision and sourceDecision.ownerBoundAnimationIndex or nil,
+    sourceCameraOwnerScale=sourceDecision and sourceDecision.ownerScale or nil,
+    sourceCameraOwnerRelative=sourceDecision and sourceDecision.ownerRelative or nil,
+    sourceCameraOwnerSelector=sourceDecision and sourceDecision.ownerSelector or nil,
+    sourceCameraOwnerSelectorExact=sourceDecision and sourceDecision.ownerSelectorExact==true or false,
+    sourceCameraOwnerSide=sourceDecision and sourceDecision.ownerSide or nil,
+    sourceCameraOwnerFacing=sourceDecision and sourceDecision.ownerFacing or nil,
+    sourceCameraOwnerReverse=sourceDecision and sourceDecision.ownerReverse==true or false,
+    sourceCameraOwnerModelYaw=sourceDecision and sourceDecision.ownerModelYaw or nil,
+    sourceCameraReverseMirrorApplied=sourceDecision and sourceDecision.reverseMirrorApplied==true or false,
+    sourceCameraStageScale=sourceDecision and sourceDecision.stageScale or nil,
+    sourceCameraGridScale=sourceDecision and sourceDecision.gridScale or nil,
+    sourceCameraGridScaleExact=sourceDecision and sourceDecision.gridScaleExact==true or false,
+    sourceCameraGridSelector=sourceDecision and sourceDecision.gridSelector or nil,
+    sourceCameraGridOwnerSide=sourceDecision and sourceDecision.gridOwnerSide or nil,
+    sourceCameraGridOwnerFacing=sourceDecision and sourceDecision.gridOwnerFacing or nil,
+    sourceCameraGridFacingApplied=sourceDecision and sourceDecision.gridFacingApplied==true or false,
+    sourceCameraFovPatternExact=fovSourceStatus and fovSourceStatus.patternExact==true or false,
+    sourceCameraFovPatternUsed=fovSourceStatus and fovSourceStatus.patternUsed==true or false,
+    sourceCameraFovTimingExact=fovSourceStatus and fovSourceStatus.timingExact==true or false,
+    sourceCameraFovBoundsExact=fovSourceStatus and fovSourceStatus.boundsExact==true or false,
+    sourceCameraFovBoundsProxy=fovSourceStatus and fovSourceStatus.boundsProxy==true or false,
+    sourceCameraFovBoundGeometryExact=fovSourceStatus and fovSourceStatus.boundGeometryExact==true or false,
+    sourceCameraFovRangeFormulaExact=fovSourceStatus and fovSourceStatus.rangeFormulaExact==true or false,
+    sourceCameraFovRangeSampleExact=fovSourceStatus and fovSourceStatus.rangeSampleExact==true or false,
+    sourceCameraFovTable=fovSourceStatus and fovSourceStatus.tableName or nil,
+    sourceCameraFovRow=fovSourceStatus and fovSourceStatus.rowIndex or nil,
+    sourceCameraFovSelection=fovSourceStatus and fovSourceStatus.selection or nil,
+    sourceCameraFovFrameShift=fovSourceStatus and fovSourceStatus.frameShift or nil,
+    sourceCameraFovClock=fovSourceStatus and fovSourceStatus.cameraClock or nil,
+    sourceCameraFovUnsupported=fovSourceStatus and fovSourceStatus.reason or nil,
+    sourceCameraRetailFrameExact=sourceDecision and sourceDecision.camera and sourceDecision.camera.retailFrameExact==true or false}
   cameraContinuity.lastPose={eye={eye[1],eye[2],eye[3]},focus={focus[1],focus[2],focus[3]},fov=fov}
   return pose
 end
 function H.activeModels() local out={};for _,row in pairs(H.models) do out[#out+1]=row end;return out end
-function H.finish() releasePost();if H.distortShader and H.distortShader.release then pcall(H.distortShader.release,H.distortShader) end;H.distortShader=nil;for _,rec in pairs(H.effects) do releaseDynamicMeshes(rec) end;H.models={};H.effects={};H.controllers={player={},enemy={}};cameraContinuity={session=nil,currentSerial=nil,transitionFrom=nil,transitionStartFrame=0,lastPose=nil};return true end
+function H.finish() releasePost();if H.distortShader and H.distortShader.release then pcall(H.distortShader.release,H.distortShader) end;H.distortShader=nil;for _,rec in pairs(H.effects) do releaseDynamicMeshes(rec) end;H.models={};H.effects={};H.controllers={player={},enemy={}};cameraContinuity={session=nil,currentSerial=nil,transitionFrom=nil,transitionStartFrame=0,lastPose=nil,actionKey=nil,axisSign=nil,motionKey=nil,motionMode=nil,lastMotionMode=nil};return true end
 
 local function releaseLoveObject(obj,seen)
   if obj==nil then return end
@@ -1382,14 +2318,16 @@ function H.trimRuntimeMemory()
   return true
 end
 
-H._test={runtimeUsable=runtimeUsable,runtimeRoot=runtimeRoot,runtimeMetaPath=runtimeMetaPath,bakeRuntimeCache=bakeRuntimeCache,modelMatrix=modelMatrix,morphWeights=morphWeights,ensureShader=ensureShader,keyedColor=keyedColor,drawTraceRibbon=drawTraceRibbon,releaseDynamicMeshes=releaseDynamicMeshes}
+H._test={runtimeUsable=runtimeUsable,runtimeRoot=runtimeRoot,runtimeMetaPath=runtimeMetaPath,bakeRuntimeCache=bakeRuntimeCache,modelMatrix=modelMatrix,morphWeights=morphWeights,ensureShader=ensureShader,keyedColor=keyedColor,sourceSurfaceColor=sourceSurfaceColor,drawTraceRibbon=drawTraceRibbon,releaseDynamicMeshes=releaseDynamicMeshes,
+  type6Start=type6Start,filteredPartTransform=filteredPartTransform,partTransformSelector=partTransformSelector,linkedParticleBirthTransform=linkedParticleBirthTransform,
+  textureAnimationSample=textureAnimationSample,sourceCameraFov=sourceCameraFov,sourceFovEnvelope=sourceFovEnvelope,sourceParamsFlags=sourceParamsFlags,retailGridScale=retailGridScale}
 
 function H.status()
   local m=0;for _ in pairs(H.models) do m=m+1 end
   local cached=0;for _,v in pairs(H.modelCache) do if v then cached=cached+1 end end
   return {installed=H.installed,activeModels=m,cachedModels=cached,opaqueEntries=#H.opaque,drawError=H.drawError,renderFaults=H.renderFaults or 0,runtimeMeshHits=runtimeMeshHits,runtimeMeshWrites=runtimeMeshWrites,runtimeMeshFallbacks=runtimeMeshFallbacks,hardCache=H.hardCacheStatus(),
     provenSourceTypes={controller=1,model=2,particle=3,effect=4,sound=5,ownerController=6},opaqueSourceTypes={},
-    cameraDecoder="selected Waza chapter cuts + held live-attachment framing; retail camera curves not decoded",
+    cameraDecoder="embedded HSD_CObj retail-frame curves plus procedural FOV pattern/timing tables; exact GSmodel-bound geometry and DoPosition range formulas are used when available, retail RNG identity remains unresolved; bound-centre/root-null-Y/unsupported path transforms fail closed",
     modelDecoder="native-HSD-60Hz-morph-pages-v4-safe-tev-pass"}
 end
 return H

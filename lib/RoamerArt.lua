@@ -406,19 +406,38 @@ do
       -- True-colour walker sheets (the shipped Gen-2 roamers) already carry
       -- their own species colours. Remapping them through monPal would wash
       -- a sandshrew into the zone's ground brown and undo the whole point.
-      if spriteDef and spriteDef.trueColor then return nil end
+      if spriteDef and spriteDef.trueColor then
+        return nil
+      end
       local colors, group = inner(spriteDef, seed)
-      if colors ~= nil then return colors, group end
+      if colors ~= nil then
+        return colors, group
+      end
       local species = spriteDef and spriteDef.dsSpecies
-      if not species then return colors, group end
+      if not species then
+        return colors, group
+      end
       local ok, pal, name = pcall(function()
         local Game = require("src.core.Game")
         local data = Game and Game.data
         if not data then return nil end
-        return PaletteFX.monPal(data, species),
-               PaletteFX.monPalName(data, species)
+        
+        -- Try species name lookup first (works for Gen 1/2)
+        local pal1, name1 = PaletteFX.monPal(data, species), PaletteFX.monPalName(data, species)
+        if pal1 then return pal1, name1 end
+        
+        -- Fallback: try to convert species to dex and look up by dex
+        local pokemon = data.pokemon and data.pokemon[species]
+        if pokemon and pokemon.id then
+          local pal2, name2 = PaletteFX.monPal(data, pokemon.id), PaletteFX.monPalName(data, pokemon.id)
+          if pal2 then return pal2, name2 end
+        end
+        
+        return nil
       end)
-      if not (ok and pal) then return nil end
+      if not (ok and pal) then
+        return nil
+      end
       return PaletteFX.darkObp(pal, "dsmon:" .. tostring(name))
     end
     PaletteFX.dramaticShapeMonObp = true

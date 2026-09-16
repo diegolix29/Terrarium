@@ -44,19 +44,16 @@ function M.rotateX(a)
   return {1,0,0,0, 0,c,-s,0, 0,s,c,0, 0,0,0,1}
 end
 
--- Right-handed perspective onto GL clip space (z in [-1, 1]).
-function M.perspective(fovY, aspect, near, far)
-  local f = 1 / math.tan(fovY / 2)
-  local d = near - far
-  return { f / aspect, 0, 0, 0,
-           0, f, 0, 0,
-           0, 0, (far + near) / d, (2 * far * near) / d,
-           0, 0, -1, 0 }
-end
-
 function M.rotateZ(a)
   local c,s=cos(a),sin(a)
   return {c,-s,0,0, s,c,0,0, 0,0,1,0, 0,0,0,1}
+end
+
+function M.perspective(fovY,aspect,near,far)
+  local f=1/tan(fovY/2)
+  local d=near-far
+  return {f/aspect,0,0,0, 0,f,0,0,
+          0,0,(far+near)/d,(2*far*near)/d, 0,0,-1,0}
 end
 
 function M.ortho(l, r, b, t, n, f)
@@ -101,14 +98,6 @@ function M.invert(m)
     for c = 1, 4 do o[(r - 1) * 4 + c] = a[r][4 + c] end
   end
   return o
-end
-
-
-function M.perspective(fovY,aspect,near,far)
-  local f=1/tan(fovY/2)
-  local d=near-far
-  return {f/aspect,0,0,0, 0,f,0,0,
-          0,0,(far+near)/d,(2*far*near)/d, 0,0,-1,0}
 end
 
 -- lookAt previously allocated four closures (sub/norm/cross/dot) on EVERY

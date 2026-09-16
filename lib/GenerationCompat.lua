@@ -75,6 +75,10 @@ local function syncBattler(facade,side)
   local mon=activeMon(facade,side)
   local battler=facade[side]
   if type(battler)~="table" then battler={};facade[side]=battler end
+  -- A stable presentation wrapper can exist before the native sendout has
+  -- published its Pokemon, and again between replacements. Mark only our
+  -- wrapper, never the real/save mon: an empty slot is not an invalid species.
+  battler.__cbeGen2Slot=true
   battler.mon=mon
   battler.sprite=resolvedImage(facade,mon,side)
   battler.isPlayer=side=="player"
@@ -87,6 +91,14 @@ local function sync(facade)
   if not (facade and facade.__cbePresentation) then return facade end
   local model,view=facade._model,facade._view
   facade.game=(view and view.game) or (V.mod and V.mod.game)
+  -- Mt. Battle's Gen II launcher stamps the native model, while arena
+  -- acquisition consumes this facade. Carry the challenge's venue ownership,
+  -- floor number and persisted layout on every sync, including late launch
+  -- metadata. Direct assignments also clear stale values when removed.
+  facade.cbeMtBattleChallenge=model and model.cbeMtBattleChallenge
+  facade.cbeMtBattleLevelLock=model and model.cbeMtBattleLevelLock
+  facade.cbeMtBattleNumber=model and model.cbeMtBattleNumber
+  facade.cbeMtBattleSummitVariation=model and model.cbeMtBattleSummitVariation
   facade.kind=(model and model.wild) and "wild" or "trainer"
   facade.trainer=model and model.trainer or nil
   facade.oppClass=facade.trainer and (facade.trainer.classId or facade.trainer.class) or nil
@@ -198,6 +210,13 @@ function C.prepare(value)
     return facade
   end
   return value
+end
+
+-- Deliberately narrow: malformed native records (including an empty mon
+-- table) must still fail identity validation. Only a known facade slot whose
+-- current native mon is genuinely absent can bypass model preparation.
+function C.isEmptyBattler(battler)
+  return type(battler)=="table" and battler.__cbeGen2Slot==true and battler.mon==nil
 end
 
 function C.sync(value) return sync(C.prepare(value)) end

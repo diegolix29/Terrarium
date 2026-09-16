@@ -345,6 +345,10 @@ end
 local function engage(ow, pet)
   local Game = game()
   if ow.transitioning or ow.engaging then return end
+  -- Safety check: ensure pet has a valid level before starting battle
+  if not pet or not pet.species or not pet.level then
+    return
+  end
   local BattleState = require("src.battle.BattleState")
   local battle = BattleState.newWild(Game, pet.species, pet.level)
   if battle.dead then return end

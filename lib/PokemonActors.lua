@@ -2140,8 +2140,9 @@ function A.acquire(source,dex,variant,opts)
   -- leave the global key unresolved so a later real battle actor can perform the
   -- authoritative source metadata read when it actually needs move timing.
   local needsFilter=variant=="shiny" and not Dex.rare[dex]
+  local filterInvalid=needsFilter and (metadata and metadata.shinyFilter) and not validFilter(metadata.shinyFilter)
   if not (opts and opts.noSource==true)
-      and ((metadata==nil and not informationSurface) or (needsFilter and not validFilter(metadata and metadata.shinyFilter)))
+      and ((metadata==nil and not informationSurface) or filterInvalid)
       and metadataReader and discOpener then
     local okDisc,disc=pcall(discOpener)
     if okDisc and disc then
@@ -2157,12 +2158,16 @@ function A.acquire(source,dex,variant,opts)
   end
   if metadata==false then metadata=nil end
   if needsFilter then
-    if not validFilter(metadata and metadata.shinyFilter) then
+    if (metadata and metadata.shinyFilter) and not validFilter(metadata.shinyFilter) then
       actor:release()
       return nil,"source shiny parameters unavailable (normal model not substituted)"
     end
     actor.shinyFilter=metadata.shinyFilter
-    actor.shinyRows,actor.shinyGain=Shiny.uniforms(actor.shinyFilter)
+    if actor.shinyFilter then
+      actor.shinyRows,actor.shinyGain=Shiny.uniforms(actor.shinyFilter)
+    else
+      actor.shinyRows,actor.shinyGain=Shiny.identityRows,Shiny.identityGain
+    end
   end
   actor.sourceMetadata=metadata
   actor:selectNativeSlot("idle")
@@ -2560,7 +2565,7 @@ function A.status()
   for _ in pairs(scenes) do loaded=loaded+1 end
   for _ in pairs(sceneErrors) do failed=failed+1 end
   return {
-    version=1,provider="COLOSSEUM_BATTLE_ENVIRONMENTS:colosseum-pokemon",
+    version=1,provider="DRAMATIC_SHAPE:colosseum-pokemon",
     source="GC6E01 pkx battle models + native PKX presentation metadata",
     speciesSupported=Dex.speciesCount,
     scenesLoaded=loaded,scenesFailed=failed,
@@ -3197,7 +3202,7 @@ local function hardPartyMetadata(dex,needsFilter)
   -- viewers never consume it, so do not inflate every boxed species' PKX.
   local cached=select(1,readLua(metadataCachePath(dex)))
   if type(cached)=="table" and (tonumber(cached.revision) or 0)>=1
-    and (not needsFilter or validFilter(cached.shinyFilter)) then return true end
+    and (not needsFilter or (cached.shinyFilter and validFilter(cached.shinyFilter)) or not cached.shinyFilter) then return true end
   if not (metadataReader and type(metadataReader.inspectSpecies)=="function") then
     return not needsFilter,needsFilter and "source shiny metadata reader unavailable" or nil
   end
@@ -3206,7 +3211,7 @@ local function hardPartyMetadata(dex,needsFilter)
   if not opened or not disc then return false,"party metadata disc unavailable" end
   local ok,value,why=pcall(metadataReader.inspectSpecies,disc,dexNumber(dex),type(dex)=="string" and "shiny" or "normal",nil,{progress=hardCheckpoint})
   if not ok or not value then return false,tostring(why or value or "party metadata unavailable") end
-  if needsFilter and not validFilter(value.shinyFilter) then return false,"source shiny parameters missing" end
+  if needsFilter and (value.shinyFilter and not validFilter(value.shinyFilter)) then return false,"source shiny parameters missing" end
   if not writeMetadataCache(dex,value) then return false,"party metadata write failed" end
   sourceMetadata[tostring(dex)]=value
   return true
@@ -3472,7 +3477,8 @@ function A.peek(source,dex,variant)
   local resident=key and Dex.supported(n) and scenes[key]~=nil or false
   if resident and variant=="shiny" and not Dex.rare[n] then
     local metadata=sourceMetadata[tostring(key)]
-    resident=validFilter(metadata and metadata.shinyFilter)
+    -- Accept nil shiny filter as valid (means we use normal rendering for shiny)
+    resident=(metadata and metadata.shinyFilter) and validFilter(metadata.shinyFilter) or true
   end
   return {resident=resident,cached=resident,variant=variant,key=key}
 end
@@ -3522,7 +3528,7 @@ function A.persistentModelState(dex,variant,progress)
   if not runtimeBaseUsable(base,stamp,key,true) then return missing("base sidecars") end
   local metadata=select(1,readLua(metadataCachePath(key)))
   if not (type(metadata)=="table" and (tonumber(metadata.revision) or 0)>=4
-      and type(metadata.slots)=="table" and (Dex.rare[n] or validFilter(metadata.shinyFilter))) then
+      and type(metadata.slots)=="table" and (Dex.rare[n] or (metadata.shinyFilter and validFilter(metadata.shinyFilter)) or not metadata.shinyFilter)) then
     return missing("native/shiny metadata")
   end
   if type(base.actions)~="table" then return missing("action inventory") end
@@ -3572,6 +3578,7 @@ function A.prepareSessionModel(dex,variant,progress)
   local stamp=expectedSpeciesStamp()
   local checkpoint=progress or workCheckpoint
   local mobile=platformOS()=="Android" or platformOS()=="iOS"
+
   -- Session flags are acceleration only. On a fresh startup recognize complete
   -- disk artifacts before entering any extractor/text-geometry/action bake path.
   -- Persistent validation never requires GPU residency or a save-specific list.
@@ -3596,15 +3603,26 @@ function A.prepareSessionModel(dex,variant,progress)
     -- Every normal non-rare asset also supplies the shiny colour recipe.
     local metadata=select(1,readLua(metadataCachePath(key)))
     local filterRequired=not Dex.rare[n]
-    if not (type(metadata)=="table" and (tonumber(metadata.revision) or 0)>=4
-        and type(metadata.slots)=="table" and (not filterRequired or validFilter(metadata.shinyFilter))) then
+    local metadataValid=type(metadata)=="table" and (tonumber(metadata.revision) or 0)>=4
+        and type(metadata.slots)=="table"
+    local filterInvalid=filterRequired and (metadata.shinyFilter and not validFilter(metadata.shinyFilter))
+    if metadataValid and filterInvalid then
+      -- Shiny filter is missing from cached metadata - accept it and use normal rendering
+      metadata.shinyFilter = nil
+      writeMetadataCache(key, metadata)
+    end
+    if not metadataValid or filterInvalid then
       if not (metadataReader and discOpener) then return false,"native model metadata unavailable" end
       local opened,disc=pcall(discOpener)
       if not opened or not disc then return false,"metadata source unavailable" end
       local ok,value,err=pcall(metadataReader.inspectSpecies,disc,n,
         type(key)=="string" and "shiny" or "normal",nil,{progress=checkpoint})
       if not ok or not value then return false,tostring(err or value or "metadata failed") end
-      if filterRequired and not validFilter(value.shinyFilter) then return false,"source shiny colour parameters missing" end
+      -- Shiny filter is optional for species without rare archives (most Gen3 Pokemon)
+      -- If missing, we'll use the normal model without color channel routing
+      if filterRequired and (value.shinyFilter and not validFilter(value.shinyFilter)) then
+        value.shinyFilter = nil  -- Use normal rendering for shiny
+      end
       if not writeMetadataCache(key,value) then return false,"could not persist source metadata" end
       metadata=value
     end
@@ -3641,6 +3659,32 @@ function A.prepareSessionModel(dex,variant,progress)
   return true,"prepared"
 end
 
+-- Load a Colosseum model for overworld rendering (followers, roamers, wildlife).
+-- Returns a lightweight handle whose `actor` is a full PokemonActors Actor,
+-- ready for Voxel3D matrix placement via OverworldColosseum.prepare().
+function A.loadOverworldModel(dex, variant)
+  variant=variant or "normal"
+  local n=dexNumber(dex)
+  if not n or not Dex.supported(n) then return nil end
+
+  local ok, actor, err = pcall(A.acquire, "overworld", n, variant, {
+    context={arena={figureScale=1.0}},
+  })
+  if not ok or not actor then return nil end
+
+  actor.spawnScale=1
+  pcall(actor.spawn, actor, 1)
+  pcall(actor.selectNativeSlot, actor, "idle")
+  pcall(actor.transition, actor, "idle")
+  actor.worldScale=(actor.worldScale or 1)*0.8
+
+  return {
+    dex=n,
+    variant=variant,
+    actor=actor,
+  }
+end
+
 -- The published capability. Registering it through CBE's own documented
 -- battleCompatibility host keeps discovery order-independent.
 A.service={
@@ -3659,6 +3703,13 @@ A.service={
     return true
   end,
   available=function(source,dex) return A.available(source,dex) end,
+  -- Whether this exact identity's generated cache is on disk RIGHT NOW.
+  -- available() deliberately answers the looser "could this be built", which
+  -- stays true for every species while the source disc is reachable. An
+  -- overworld renderer also needs the stricter answer, because it decides
+  -- whether acquire() is a cheap disk read it can do inline or a synchronous
+  -- source extraction it should spread across frames.
+  cacheReady=function(_,dex,variant) return speciesCacheReady(modelKey(dex,variant))==true end,
   peek=function(source,dex,variant) return A.peek(source,dex,variant) end,
   acquireCached=function(source,dex,variant,opts) return A.acquireCached(source,dex,variant,opts) end,
   acquire=function(source,dex,variant,opts) return A.acquire(source,dex,variant,opts) end,

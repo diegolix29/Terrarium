@@ -89,14 +89,54 @@ BattleScene.SHADOW_ALPHA = 0.68
 -- Which rung of the sky ramp an indoor void is painted with.
 local INDOOR_SHADE = 4
 
+-- ------- THE SURFACE THE BATTLE IS ACTUALLY LAID OUT IN
+--
+-- GB_W x GB_H is the Game Boy's screen and it used to be the only answer.  It
+-- is not any more: a Gen 3 cache fights on Emerald's own 240x160 surface
+-- (src/battle/Gen3Battle.lua), which BattleState:uiSize asks the renderer for
+-- and Renderer:endFrame then composites -- letterbox origin
+-- floor((p - ui*S)/2) -- in the surface's OWN dimensions.
+--
+-- Computing that origin from 160x144 while the renderer computes it from
+-- 240x160 is the whole of the reported bug.  At 1024x768 the two answers are
+-- (192,96) and (32,64): every frosted panel, every snapped HUD band and the
+-- text box's glass were placed 160 px right and 32 px down from the thing
+-- they were supposed to be under, and the widening in letterboxFov was 1.333
+-- instead of 1.200 -- an 11% too-wide lens on top of it.
+--
+-- So the frame is ASKED FOR rather than assumed, and it is asked of
+-- Renderer:uiSize -- the same field endFrame reads -- so the two cannot
+-- disagree by construction.  On Gen 1, Gen 2 and Prism uiSize answers
+-- 160x144, which is GB_W x GB_H, so every number below is bit-identical.
+--
+-- NOT a rename of GB_W / GB_H.  Those still mean the Game Boy's frame and
+-- there are two places that genuinely want exactly that and must not follow
+-- the surface: the billboard TEXTURE canvas (OverworldBattle.texCanvasFor is
+-- 160x144 with the pic forced to TEX_AX/TEX_AY, and monMatrix below divides
+-- by those same dimensions to hang the card), and the move-animation layer,
+-- whose OAM frames are authored in the original 160-pixel space whatever
+-- surface they are finally shifted into.
+function BattleScene.surface()
+  local Renderer = require("src.render.Renderer")
+  if Renderer and Renderer.uiSize then
+    local ok, w, h = pcall(Renderer.uiSize, Renderer)
+    if ok and type(w) == "number" and type(h) == "number"
+       and w > 0 and h > 0 then
+      return math.floor(w), math.floor(h)
+    end
+  end
+  return BattleScene.GB_W, BattleScene.GB_H
+end
+
 -- ------- where the GB frame sits inside the window
 function BattleScene.letterbox()
   local Renderer = require("src.render.Renderer")
   local pw, ph = BattleScene.pixelSize()
   local s = Renderer:fitScale()
-  return math.floor((pw - BattleScene.GB_W * s) / 2),
-         math.floor((ph - BattleScene.GB_H * s) / 2),
-         s, pw, ph
+  local sw, sh = BattleScene.surface()
+  return math.floor((pw - sw * s) / 2),
+         math.floor((ph - sh * s) / 2),
+         s, pw, ph, sw, sh
 end
 
 function BattleScene.pixelSize()
@@ -108,7 +148,9 @@ function BattleScene.pixelSize()
 end
 
 function BattleScene.letterboxFov(fovGB, ph, s)
-  local span = BattleScene.GB_H * s
+  -- the letterbox's height in framebuffer pixels, which is the SURFACE's
+  -- rows at the fit scale -- 144 on a Game Boy screen, 160 on Emerald's
+  local span = select(2, BattleScene.surface()) * s
   if span <= 0 then return fovGB end
   return 2 * math.atan(math.tan(fovGB / 2) * ph / span)
 end
@@ -134,10 +176,12 @@ end
 
 local function monMatrix(tex, x, groundY, z, mirror)
   local k = BattleBillboard.FULL_W / BattleBillboard.FULL_PIC
-  local w = BattleScene.GB_W * k
-  local h = BattleScene.GB_H * k
-  local ox = -((tex.ax / BattleScene.GB_W) - 0.5) * w
-  local oy = -((BattleScene.GB_H - tex.ay) / BattleScene.GB_H) * h
+  local CW = tex.cw or BattleScene.GB_W
+  local CH = tex.ch or BattleScene.GB_H
+  local w = CW * k
+  local h = CH * k
+  local ox = -((tex.ax / CW) - 0.5) * w
+  local oy = -((CH - tex.ay) / CH) * h
   local yaw = BattleBillboard.yawToward(x, z, Voxel3D.eye)
   local card = Mat4.mul(Mat4.translate(ox, oy, 0), Mat4.scale(w, h, 1))
   if mirror then card = Mat4.mul(Mat4.scale(-1, 1, 1), card) end
@@ -379,7 +423,7 @@ function BattleScene.render(state, arena, textures, token)
     nbMesh, water, nbWater = {}, nil, {}
   end
 
-  local lx, ly, s, pw, ph = BattleScene.letterbox()
+  local lx, ly, s, pw, ph, sw, sh = BattleScene.letterbox()
   if not (pw > 0 and ph > 0 and s > 0) then return nil end
 
   local palette = paletteFor(state, host)
@@ -399,7 +443,7 @@ function BattleScene.render(state, arena, textures, token)
   cam.fov = BattleScene.letterboxFov(cam.fov, ph, s)
 
   local cx, cy = arena.mid[1], arena.mid[2]
-  local vh = (capFrameH or BattleCam.frameH(arena)) * ph / (BattleScene.GB_H * s)
+  local vh = (capFrameH or BattleCam.frameH(arena)) * ph / (select(2, BattleScene.surface()) * s)
   local vw = vh * pw / ph
 
   Voxel3D.camera = cam

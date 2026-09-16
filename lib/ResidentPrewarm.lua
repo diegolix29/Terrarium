@@ -30,6 +30,12 @@ local epoch=0
 local stats={queued=0,completed=0,requeued=0,failed=0,pumps=0,lastLabel=nil,lastMs=0,totalMs=0,maxMs=0}
 local hardSerial=0
 local hard={running=false,total=0,done=0,failed=0,stage="idle",last=nil,completed=false}
+local deferredRegistryMeta={}
+local HARD_CACHE_REUSE_CONTRACT="hard-cache-plan-v1"
+local HARD_CACHE_CATALOG_MARKER="build/hard_cache_catalog_v3.complete"
+local HARD_CACHE_CATALOG_151_MARKER="build/hard_cache_catalog_151_v1.complete"
+local HARD_CACHE_CATALOG_251_MARKER="build/hard_cache_catalog_251_v1.complete"
+local HARD_CACHE_FAILURE_PATH="build/hard_cache_last_failure_v1.txt"
 
 -- Information-viewer coordination. 3D menu surfaces are latency-sensitive: a
 -- normal startup/prewarm job that happens to land while the user is browsing a
@@ -38,7 +44,8 @@ local hard={running=false,total=0,done=0,failed=0,stage="idle",last=nil,complete
 -- the lease is active the scheduler runs only a specifically requested
 -- selected information-model job in cooperative slices (including a first
 -- source-backed shiny preparation). Unrelated work stays queued for the next
--- quiet overworld window; the UI shows its resolved sprite in the meantime.
+-- quiet overworld window; the selected Colosseum surface shows its explicit
+-- preparation state in the meantime rather than silently switching providers.
 local viewerUntil=0
 local viewerReason=nil
 local informationSerial=0
@@ -76,6 +83,21 @@ local function addFront(key,label,run,kind,viewerSafe,infoTag,infoDex)
   return true
 end
 
+function S.deferInfoRegistrySave(extra)
+  if not (GeneratedAssets and type(GeneratedAssets.saveInfoRegistry)=="function") then return false end
+  if type(extra)=="table" then for k,v in pairs(extra) do deferredRegistryMeta[k]=v end end
+  if queued["generated-info-registry-save"] then return true end
+  add("generated-info-registry-save","cache-registry-save",function()
+    local meta=deferredRegistryMeta;deferredRegistryMeta={}
+    local ok,saved=pcall(GeneratedAssets.saveInfoRegistry,meta)
+    if not ok or saved==false then error(saved or "generated registry save failed") end
+    return false
+  end,"registry")
+  -- Never turn a battle-boundary repair into an immediate registry serialization.
+  -- The scheduler's ordinary cooldown places this on a later stable frame.
+  local now=clockNow();nextAt=math.max(nextAt or 0,(now or 0)+(ANDROID_RUNTIME and .10 or .03))
+  return true
+end
 local function arenaWarmContext(game)
   return {game=game,battle=nil,phase="resident-prewarm",progress=1,
     services={cbeStandalone=true,androidResidentWarm=ANDROID_RUNTIME,coordinatedPrewarm=true}}
@@ -156,7 +178,7 @@ local function hardModuleStatus()
   local p=hard.pokemonQueued and PokemonActors and PokemonActors.hardCacheStatus and PokemonActors.hardCacheStatus() or {}
   local w=hard.wazaQueued and WazaHandlers and WazaHandlers.hardCacheStatus and WazaHandlers.hardCacheStatus() or {}
   local mp=MoveFXExtractor and MoveFXExtractor.status and MoveFXExtractor.status() or {}
-  return p,w,tonumber(mp.pending) or 0
+  return p,w,hard.movefxQueued and (tonumber(mp.pending) or 0) or 0
 end
 
 local function pruneHardJobs()
@@ -289,48 +311,162 @@ function S.hardCacheRunning()
   return hard.running==true
 end
 
+-- Compatibility helper for callers that want to publish a completed 386 model
+-- catalog. The catalog contract is deliberately body + authored idle; battle
+-- action families remain exact/on-demand so releases never force a global action
+-- migration or duplicate every possible animation on disk.
+function S.certifyFullCatalogCache(game)
+  if type(game)~="table" or not (GeneratedAssets and PokemonActors
+      and type(PokemonActors.hardCacheSignature)=="function") then return false,"cache certificate unavailable" end
+  local ok,pokemonSignature=pcall(PokemonActors.hardCacheSignature,game,"catalog")
+  if not ok or not pokemonSignature then return false,"Pokemon cache signature unavailable" end
+  local exactSignature=HARD_CACHE_REUSE_CONTRACT.."|scope=catalog|pokemon="..tostring(pokemonSignature).."|movefx=catalog-models-only"
+  local body="cbe-hard-cache=5\nsource=GC6E01\npokemon-extractor=38\nshiny=owned-persistent-hypothetical-on-demand\nscope=catalog\nmode=normal-catalog-001-386-base-authored-idle\n"
+  local written=type(GeneratedAssets.write)=="function" and GeneratedAssets.write(HARD_CACHE_CATALOG_MARKER,body)
+  if not written then return false,"full catalog marker write failed" end
+  local meta={hardCache="complete",revision=1,hardCache_catalog="complete",
+    hardCache_catalogContract=HARD_CACHE_REUSE_CONTRACT,hardCache_catalogSignature=exactSignature}
+  local saved=type(GeneratedAssets.saveInfoRegistry)=="function" and select(1,GeneratedAssets.saveInfoRegistry(meta))
+  if not saved then
+    if type(GeneratedAssets.delete)=="function" then GeneratedAssets.delete(HARD_CACHE_CATALOG_MARKER) end
+    return false,"full catalog registry save failed"
+  end
+  if type(GeneratedAssets.delete)=="function" then GeneratedAssets.delete(HARD_CACHE_FAILURE_PATH) end
+  return true,"certified"
+end
+S.certifyFullBattleCache=S.certifyFullCatalogCache
+
 function S.queueHardCache(game,scope)
-  scope=scope=="team" and "team" or "full"
-  local marker=scope=="team" and "build/hard_cache_team_v1.complete" or "build/hard_cache_v5.complete"
+  local catalogLimits={catalog151=151,catalog251=251,catalog=386}
+  scope=(scope=="team" or scope=="full" or catalogLimits[scope]) and scope or "full"
+  local catalogScope=catalogLimits[scope]~=nil
+  local catalogLimit=catalogLimits[scope]
+  local marker=scope=="team" and "build/hard_cache_team_v1.complete"
+    or (scope=="catalog151" and HARD_CACHE_CATALOG_151_MARKER)
+    or (scope=="catalog251" and HARD_CACHE_CATALOG_251_MARKER)
+    or (scope=="catalog" and HARD_CACHE_CATALOG_MARKER)
+    or "build/hard_cache_v5.complete"
   if type(game)~="table" then return 0,"game unavailable" end
   -- Repeated clicks do not throw away a running cache job.
   if hard.running and gameRef==game then return hard.total,"already-running" end
+
+  local modelsEnabled=true
+  if BattleSettings and type(BattleSettings.pokemonModelsEnabled)=="function" then
+    local ok,on=pcall(BattleSettings.pokemonModelsEnabled,game);if ok and on==false then modelsEnabled=false end
+  end
+  local pokemonSignature
+  if not modelsEnabled then pokemonSignature="models-disabled"
+  elseif PokemonActors and type(PokemonActors.hardCacheSignature)=="function" then
+    local ok,value=pcall(PokemonActors.hardCacheSignature,game,scope);if ok then pokemonSignature=value end
+  end
+  local moveSignature=catalogScope and "catalog-models-only" or nil
+  if not catalogScope and MoveFXExtractor and type(MoveFXExtractor.partySignature)=="function" then
+    local ok,value=pcall(MoveFXExtractor.partySignature,game,6);if ok then moveSignature=value end
+  end
+  local exactSignature=(pokemonSignature and moveSignature) and
+    (HARD_CACHE_REUSE_CONTRACT.."|scope="..scope.."|pokemon="..tostring(pokemonSignature).."|movefx="..tostring(moveSignature)) or nil
+  local scopeKey="hardCache_"..scope
+  local registryMeta=GeneratedAssets and type(GeneratedAssets.registryMeta)=="function" and GeneratedAssets.registryMeta() or {}
+  -- A completion proof written by this exact cache-plan contract can be reused
+  -- across app sessions and mod releases. Older markers deliberately miss the
+  -- scoped signature and therefore run the normal validators once before being
+  -- promoted. Runtime payload reads remain authoritative if external storage is
+  -- damaged later; this shortcut never changes a source/extractor cache epoch.
+  local signatureMatches=exactSignature and registryMeta[scopeKey]=="complete"
+    and registryMeta[scopeKey.."Contract"]==HARD_CACHE_REUSE_CONTRACT
+    and registryMeta[scopeKey.."Signature"]==exactSignature
+  local markerReady=false
+  if signatureMatches and GeneratedAssets then
+    -- The marker is the one object we revalidate authoritatively. A failed
+    -- registry transaction can leave an older registry file on disk after its
+    -- marker was retracted; trusting that stale positive row would defeat the
+    -- transaction. One metadata call is still O(1) and replaces the old full
+    -- cache walk on a successful repeat.
+    if type(GeneratedAssets.revalidateInfo)=="function" then
+      local info=GeneratedAssets.revalidateInfo(marker)
+      markerReady=type(info)=="table" and (info.type==nil or info.type=="file")
+    elseif type(GeneratedAssets.exists)=="function" then markerReady=GeneratedAssets.exists(marker) end
+  end
+  if signatureMatches and markerReady then
+    S.cancelHardCache();hardSerial=hardSerial+1;gameRef=game
+    local now=clockNow()
+    hard={running=false,paused=false,scope=scope,total=0,done=0,failed=0,stage="ready",last="reused exact persisted cache plan",
+      completed=true,reused=true,startedAt=now,finishedAt=now,jobs=0,moveDone=0,moveTotal=0,moveUnavailable=0,
+      signature=exactSignature,registryTrusted=0,registryDeferred=false}
+    return 0,"reused"
+  end
   S.cancelHardCache();hardSerial=hardSerial+1;gameRef=game
   hard={running=true,paused=false,scope=scope,total=0,done=0,failed=0,stage="party",last=nil,completed=false,
-    startedAt=clockNow(),jobs=0,moveDone=0,moveTotal=0,moveUnavailable=0}
+    startedAt=clockNow(),jobs=0,moveDone=0,moveTotal=0,moveUnavailable=0,signature=exactSignature}
   local tag=tostring(hardSerial)
   if GeneratedAssets and GeneratedAssets.delete then
     -- A previous completion marker must not survive a failed refresh. No
     -- generated model, action, arena, or source-import data is cleared here.
+    GeneratedAssets.delete(HARD_CACHE_FAILURE_PATH)
     GeneratedAssets.delete(marker)
   end
   local function finalize()
     local ps,ws=hardModuleStatus()
-    local errors=hard.failed+(tonumber(ps.failed) or 0)+(tonumber(ws.failed) or 0)
+    local rowFailed=(tonumber(ps.failed) or 0)+(tonumber(ws.failed) or 0)
+    local errors=hard.failed+rowFailed
+    hard.rowFailed=rowFailed
+    if (tonumber(ws.failed) or 0)>0 then hard.lastFailed=ws.lastFailed or ws.last;hard.lastError=ws.lastError or hard.lastError
+    elseif (tonumber(ps.failed) or 0)>0 then hard.lastFailed=ps.lastFailed or ps.last;hard.lastError=ps.lastError or hard.lastError end
     if (tonumber(ps.pending) or 0)+(tonumber(ws.pending) or 0)>0 then errors=errors+1 end
     hard.stage="register"
-    local saved=false
-    if GeneratedAssets and type(GeneratedAssets.saveInfoRegistry)=="function" then
-      saved=select(1,GeneratedAssets.saveInfoRegistry({hardCache=errors==0 and "complete" or "partial",revision=1}))
-    end
-    if not saved then hard.failed=hard.failed+1;errors=errors+1 end
     local written=false
     if errors==0 and GeneratedAssets and type(GeneratedAssets.write)=="function" then
       written=GeneratedAssets.write(marker,
-        "cbe-hard-cache=5\nsource=GC6E01\npokemon-extractor=37\nshiny-source-contract=1\nscope="..scope.."\nmode=party-storage-native-shiny-source-actions-movefx-registry\n")
-      if not written then hard.failed=hard.failed+1;errors=errors+1 end
+        "cbe-hard-cache=5\nsource=GC6E01\npokemon-extractor=38\nshiny=owned-persistent-hypothetical-on-demand\nscope="..scope.."\nmode="
+          ..(scope=="catalog" and "normal-catalog-001-386-base-authored-idle"
+            or (catalogScope and ("normal-catalog-001-"..tostring(catalogLimit).."-base-authored-idle") or "party-storage-native-actions-movefx-registry")).."\n")
+      if not written then hard.failed=hard.failed+1;errors=errors+1;hard.lastFailed="completion-marker";hard.lastError="hard-cache completion marker write failed" end
+    end
+    -- Commit the marker BEFORE serializing the registry so the next launcher
+    -- can answer the marker existence check from the same persisted positive
+    -- metadata set. If registry persistence fails, retract the new marker: a
+    -- completion proof and its fast-reuse index are one transaction.
+    local meta={hardCache=(errors==0 and written) and "complete" or "partial",revision=1}
+    meta[scopeKey]=(errors==0 and written) and "complete" or "partial"
+    meta[scopeKey.."Contract"]=HARD_CACHE_REUSE_CONTRACT
+    if exactSignature then meta[scopeKey.."Signature"]=exactSignature end
+    local saved=false
+    if GeneratedAssets and type(GeneratedAssets.saveInfoRegistry)=="function" then
+      saved=select(1,GeneratedAssets.saveInfoRegistry(meta))
+    end
+    if not saved then
+      if written and GeneratedAssets and type(GeneratedAssets.delete)=="function" then GeneratedAssets.delete(marker);written=false end
+      hard.failed=hard.failed+1;errors=errors+1;hard.lastFailed="cache-registry";hard.lastError="hard-cache registry save failed"
     end
     hard.done=(tonumber(ps.done) or 0)+(tonumber(ws.done) or 0)+(hard.registryIndex or 0)+hard.moveDone
     hard.running=false;hard.completed=errors==0 and not not written
     hard.stage=hard.completed and "ready" or "failed"
     hard.finishedAt=clockNow()
+    if GeneratedAssets then
+      if hard.completed and type(GeneratedAssets.delete)=="function" then
+        GeneratedAssets.delete(HARD_CACHE_FAILURE_PATH)
+      elseif not hard.completed and type(GeneratedAssets.write)=="function" then
+        local attempted=math.min(tonumber(hard.total) or 0,(tonumber(hard.done) or 0)+(tonumber(hard.rowFailed) or 0))
+        GeneratedAssets.write(HARD_CACHE_FAILURE_PATH,table.concat({
+          "cbe-hard-cache-failure=1",
+          "scope="..tostring(scope),
+          "attempted="..tostring(attempted),
+          "done="..tostring(hard.done or 0),
+          "total="..tostring(hard.total or 0),
+          "failed="..tostring((tonumber(ps.failed) or 0)+(tonumber(ws.failed) or 0)+hard.failed),
+          "last="..tostring(hard.lastFailed or hard.last or "unknown"),
+          "reason="..tostring(hard.lastError or "unknown"),
+          "",
+        },"\n"))
+      end
+    end
     return false
   end
   local function hardJob(key,label,run)
     hard.jobs=hard.jobs+1
     add(key..":"..tag,label,function()
       local ok,again=pcall(run)
-      if not ok then hard.failed=hard.failed+1;hard.last=tostring(again) end
+      if not ok then hard.failed=hard.failed+1;hard.last=tostring(again);hard.lastFailed=label;hard.lastError=tostring(again) end
       if ok and again==true then return true end
       hard.jobs=hard.jobs-1
       if hard.jobs==0 then
@@ -341,18 +477,15 @@ function S.queueHardCache(game,scope)
     end,"hard-cache")
   end
   local pokemonCount=0
-  local modelsEnabled=true
-  if BattleSettings and type(BattleSettings.pokemonModelsEnabled)=="function" then
-    local ok,on=pcall(BattleSettings.pokemonModelsEnabled,game);if ok and on==false then modelsEnabled=false end
-  end
   if modelsEnabled and PokemonActors and type(PokemonActors.queueHardCache)=="function" then
     local ok,n=pcall(PokemonActors.queueHardCache,game,scope)
     hard.pokemonQueued=true
     if ok then pokemonCount=tonumber(n) or 0 else hard.failed=hard.failed+1 end
   end
-  if MoveFXExtractor and type(MoveFXExtractor.queueParty)=="function" then
+  if not catalogScope and MoveFXExtractor and type(MoveFXExtractor.queueParty)=="function" then
     local ok,r=pcall(MoveFXExtractor.queueParty,game,6)
     if ok and type(r)=="table" then
+      hard.movefxQueued=true
       local st=MoveFXExtractor.status and MoveFXExtractor.status() or {}
       hard.moveTotal=tonumber(st.pending) or tonumber(r.queued) or 0
       -- Unsupported source moves are allowed to retain their existing visual
@@ -362,23 +495,16 @@ function S.queueHardCache(game,scope)
   end
   hard.total=pokemonCount+hard.moveTotal
 
-  hard.registryPaths={};hard.registryIndex=0
-  if scope=="full" and GeneratedAssets and type(GeneratedAssets.read)=="function" then
-    local raw=GeneratedAssets.read("build/generated_paths.lua")
-    if type(raw)=="string" then
-      local chunk=load(raw,"@generated/build/generated_paths.lua")
-      local ok,paths=false,nil
-      if chunk then ok,paths=pcall(chunk) end
-      if ok and type(paths)=="table" then
-        local seen={}
-        for _,path in ipairs(paths) do
-          if type(path)=="string" and path~="" and not seen[path] then
-            seen[path]=true;hard.registryPaths[#hard.registryPaths+1]=path
-          end
-        end
-      else hard.failed=hard.failed+1 end
-    end
-  end
+  hard.registryPaths={};hard.registryIndex=0;hard.registryTrusted=0
+  -- Registry population is an acceleration layer, never cache correctness.
+  -- Android has long deferred the global generated_paths.lua walk because the
+  -- Java/native metadata bridge made it prohibitively expensive. Apply the same
+  -- logical policy everywhere: assets touched by actual hard-cache/runtime work
+  -- enter GeneratedAssets automatically, while untouched arena/trainer/audio
+  -- files pay one authoritative lookup only if/when they are really used.
+  -- This removes an O(all generated assets) first-run/full-cache tax on desktop
+  -- too, without changing a single source/build completion condition.
+  hard.registryDeferred=scope~="team"
   hard.total=hard.total+#hard.registryPaths
   if #hard.registryPaths>0 then
     hardJob("hard-register-paths","hard-cache:asset-registry",function()
@@ -386,9 +512,16 @@ function S.queueHardCache(game,scope)
       local deadline=clockNow()+(ANDROID_RUNTIME and 0.002 or 0.004)
       local stop=math.min(#hard.registryPaths,hard.registryIndex+(ANDROID_RUNTIME and 64 or 128))
       for i=hard.registryIndex+1,stop do
-        -- Keep authoritative validation, but no 240/900ms sleep per tiny batch.
-        if GeneratedAssets.revalidateInfo then GeneratedAssets.revalidateInfo(hard.registryPaths[i])
-        elseif GeneratedAssets.info then GeneratedAssets.info(hard.registryPaths[i]) end
+        -- The persisted positive registry is already the runtime source of truth
+        -- for cheap existence/size checks. Re-crossing mod.cache.info for every
+        -- known path is needless on desktop and can dominate a repeat Hard Cache
+        -- Save on mobile. Host-probe only paths not already positively registered;
+        -- actual cache reads remain authoritative and self-invalidate stale rows.
+        local path=hard.registryPaths[i]
+        local trusted=GeneratedAssets.registered and GeneratedAssets.registered(path)
+        if trusted then hard.registryTrusted=(hard.registryTrusted or 0)+1
+        elseif GeneratedAssets.revalidateInfo then GeneratedAssets.revalidateInfo(path)
+        elseif GeneratedAssets.info then GeneratedAssets.info(path) end
         hard.registryIndex=i
         if i%8==0 and clockNow()>=deadline then break end
       end
@@ -404,31 +537,35 @@ function S.queueHardCache(game,scope)
       return (tonumber(out.pending) or 0)>0
     end)
   end
-  hardJob("hard-movefx","hard-cache:movefx",function()
-    hard.stage="movefx"
-    if not hard.movesFinished and MoveFXExtractor and type(MoveFXExtractor.pumpPrefetch)=="function" then
-      local out=MoveFXExtractor.pumpPrefetch(1)
-      if type(out)~="table" then error("MoveFX hard-cache worker returned no status") end
-      hard.moveDone=math.min(hard.moveTotal,hard.moveDone+(tonumber(out.processed) or 0))
-      hard.moveUnavailable=hard.moveUnavailable+(tonumber(out.failed) or 0)
-      if (tonumber(out.pending) or 0)>0 then return true end
-    end
-    hard.movesFinished=true
-    if not hard.wazaQueued then
-      hard.wazaQueued=true
-      if WazaHandlers and type(WazaHandlers.queueHardCacheSpecs)=="function" then
-        local specs=MoveFXExtractor and type(MoveFXExtractor.partySpecs)=="function" and MoveFXExtractor.partySpecs(game,6) or {}
-        hard.total=hard.total+(tonumber(WazaHandlers.queueHardCacheSpecs(specs)) or 0)
+  if not catalogScope then
+    hardJob("hard-movefx","hard-cache:movefx",function()
+      hard.stage="movefx"
+      if not hard.movesFinished and MoveFXExtractor and type(MoveFXExtractor.pumpPrefetch)=="function" then
+        local out=MoveFXExtractor.pumpPrefetch(1)
+        if type(out)~="table" then error("MoveFX hard-cache worker returned no status") end
+        hard.moveDone=math.min(hard.moveTotal,hard.moveDone+(tonumber(out.processed) or 0))
+        hard.moveUnavailable=hard.moveUnavailable+(tonumber(out.failed) or 0)
+        if (tonumber(out.pending) or 0)>0 then return true end
       end
-    end
-    hard.stage="waza"
-    if WazaHandlers and type(WazaHandlers.pumpHardCache)=="function" then
-      local out=WazaHandlers.pumpHardCache(1)
-      if type(out)~="table" then error("Waza hard-cache worker returned no status") end
-      return (tonumber(out.pending) or 0)>0
-    end
-    return false
-  end)
+      hard.movesFinished=true
+      if not hard.wazaQueued then
+        hard.wazaQueued=true
+        if WazaHandlers and type(WazaHandlers.queueHardCacheSpecs)=="function" then
+          local specs=MoveFXExtractor and type(MoveFXExtractor.partySpecs)=="function" and MoveFXExtractor.partySpecs(game,6) or {}
+          hard.total=hard.total+(tonumber(WazaHandlers.queueHardCacheSpecs(specs)) or 0)
+        end
+      end
+      hard.stage="waza"
+      if WazaHandlers and type(WazaHandlers.pumpHardCache)=="function" then
+        local out=WazaHandlers.pumpHardCache(1)
+        if type(out)~="table" then error("Waza hard-cache worker returned no status") end
+        return (tonumber(out.pending) or 0)>0
+      end
+      return false
+    end)
+  elseif hard.jobs==0 then
+    add("hard-finalize:"..tag,"hard-cache:register",finalize,"hard-cache")
+  end
   nextAt=clockNow()
   return hard.total
 end
@@ -536,6 +673,7 @@ function S.pump(game,viewerOnly)
       stats.failed=stats.failed+1
       if row.kind=="hard-cache" then
         hard.failed=hard.failed+1;hard.running=false;hard.completed=false;hard.stage="failed";hard.last=tostring(again)
+        hard.lastFailed=row.label;hard.lastError=tostring(again)
         pruneHardJobs()
       end
     elseif again==true then
@@ -555,12 +693,27 @@ function S.pump(game,viewerOnly)
   return lastOk,#queue,lastLabel,totalMs
 end
 
+-- Leaving an information screen must not leave its suspended decoder holding
+-- the source lock while a battle waits on the shared model queue. Retire ONLY
+-- viewer jobs/leases; retain background catalog, arena and registry work.
+function S.cancelViewer()
+  if PokemonActors and PokemonActors.cancelInformation then PokemonActors.cancelInformation() end
+  local kept={}
+  for _,row in ipairs(queue) do
+    if row.kind=="information" or row.kind=="information-idle" then queued[row.key]=nil
+    else kept[#kept+1]=row end
+  end
+  queue=kept;informationQueued={};informationDesired={};informationErrors={}
+  informationActiveKey=nil;viewerUntil=0;viewerReason=nil
+  return true
+end
+
 function S.cancel()
   if PokemonActors and PokemonActors.cancelInformation then PokemonActors.cancelInformation() end
   if PokemonActors and type(PokemonActors.cancelHardCache)=="function" then pcall(PokemonActors.cancelHardCache) end
   if WazaHandlers and type(WazaHandlers.cancelHardCache)=="function" then pcall(WazaHandlers.cancelHardCache) end
   hard.running=false
-  informationActiveKey=nil;informationErrors={}
+  informationActiveKey=nil;informationErrors={};deferredRegistryMeta={}
   if PokemonActors and PokemonActors.cancelSourceWork then PokemonActors.cancelSourceWork() end
   queue={};queued={};informationQueued={};informationDesired={};gameRef=nil;nextAt=0;viewerUntil=0;viewerReason=nil
   if PokemonActors and type(PokemonActors.cancelPartyPrewarm)=="function" then pcall(PokemonActors.cancelPartyPrewarm) end
@@ -576,14 +729,23 @@ function S.status()
   local registryPending=math.max(0,#(hard.registryPaths or {})-(tonumber(hard.registryIndex) or 0))
   local hardPending=(tonumber(ps.pending) or 0)+(tonumber(ws.pending) or 0)+movePending+registryPending
   local hardDone=(tonumber(ps.done) or 0)+(tonumber(ws.done) or 0)+(tonumber(hard.registryIndex) or 0)+(tonumber(hard.moveDone) or 0)
+  local rowFailed=(tonumber(ps.failed) or 0)+(tonumber(ws.failed) or 0)
+  local failed=rowFailed+(tonumber(hard.failed) or 0)
+  local attempted=math.min(tonumber(hard.total) or 0,hardDone+rowFailed)
+  local lastFailed,lastError=hard.lastFailed,hard.lastError
+  if (tonumber(ws.failed) or 0)>0 then lastFailed,lastError=ws.lastFailed or ws.last,lastError or ws.lastError
+  elseif (tonumber(ps.failed) or 0)>0 then lastFailed,lastError=ps.lastFailed or ps.last,lastError or ps.lastError end
   local now=clockNow()
   return {pending=#queue,nextAt=nextAt,android=ANDROID_RUNTIME,interval=INTERVAL,startDelay=START_DELAY,
     lastLabel=stats.lastLabel,lastMs=stats.lastMs,totalMs=stats.totalMs,maxMs=stats.maxMs,
     queued=stats.queued,completed=stats.completed,requeued=stats.requeued,failed=stats.failed,pumps=stats.pumps,labels=labels,
     informationViewer={active=(now or 0)<(viewerUntil or 0),untilTime=viewerUntil,reason=viewerReason,serial=informationSerial},
-    hardCache={running=hard.running,paused=hard.paused==true,scope=hard.scope,pending=hardPending,total=hard.total,done=hardDone,failed=(tonumber(ps.failed) or 0)+(tonumber(ws.failed) or 0)+hard.failed,stage=hard.stage,last=hard.last,completed=hard.completed,
+    hardCache={running=hard.running,paused=hard.paused==true,scope=hard.scope,pending=hardPending,total=hard.total,done=hardDone,attempted=attempted,failed=failed,rowFailed=rowFailed,stage=hard.stage,last=hard.last,
+      lastFailed=lastFailed,lastError=lastError,retried=(tonumber(ps.retried) or 0)+(tonumber(ws.retried) or 0),completed=hard.completed,
       elapsed=hard.startedAt and math.max(0,(hard.finishedAt or now)-hard.startedAt) or 0,
-      moveUnavailable=hard.moveUnavailable or 0,cpuSliceMs=ANDROID_RUNTIME and 3 or 6}}
+      moveUnavailable=hard.moveUnavailable or 0,registryTrusted=hard.registryTrusted or 0,
+      registryDeferred=hard.registryDeferred==true,reused=hard.reused==true,
+      cpuSliceMs=ANDROID_RUNTIME and 3 or 6}}
 end
 
 return S

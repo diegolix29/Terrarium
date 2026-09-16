@@ -67,6 +67,7 @@ local POSES = [====[local function posesOf(state, spriteColors)
   -- Claim Wilds' emergency 2D bodies before its overlay gets a chance to draw
   -- a second copy.  This function is non-throwing in v0.1.16.
   OverworldStadium.safeClaimWilds(state)
+  OverworldColosseum.safeClaimWilds(state)
 
   local colors = spriteColors(state.map)
   local posed = {}
@@ -188,7 +189,8 @@ local function patchCastLoop(source)
         PlayerModel.draw(p.px, p.py, p.gh + (p.lift or 0), viewFacing(p), p.flip)
       -- safeDraw never throws.  Returning false means this one entity uses
       -- Dramatic Shape's original 2D card for this frame.
-      elseif not OverworldStadium.safeDraw(p) and p.sprite then
+      elseif not OverworldColosseum.safeDraw(p)
+          and not OverworldStadium.safeDraw(p) and p.sprite then
         drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
                    p.colors, p.lift, yaw)
       end
@@ -210,7 +212,8 @@ local function patchPrepare(source)
   local insertion = [====[
   -- Skin Stadium overworld models once.  Main eye, reflection and shadow
   -- passes consume the prepared geometry.  This call is deliberately safe.
-  OverworldStadium.safePrepare(posed)]====]
+  OverworldStadium.safePrepare(posed)
+  OverworldColosseum.safePrepare(posed)]====]
   return source:sub(1, b) .. insertion .. source:sub(b + 1)
 end
 
@@ -228,6 +231,7 @@ local function patchShadowBestEffort(source)
   -- Stadium overworld geometry is outside the sprite-card flag.
   for _, p in ipairs(posed or {}) do
     if p.stadiumMon then OverworldStadium.safeCast(p, ShadowMap) end
+    if p._colosseumActor then OverworldColosseum.safeCast(p, ShadowMap) end
   end]====]
   return source:sub(1, b) .. insert .. source:sub(b + 1), true
 end
@@ -245,7 +249,8 @@ function M.install(ds, BaseV, namespace, Stadium)
   -- Required bridge and table identity. These are tiny, stable declarations.
   source, err = insertAfterOnce(source,
     'local Pokedex = V.require("Pokedex")',
-    '\nlocal OverworldStadium = assert(V.OverworldStadium, "STADIUM_OVERWORLD_MODELS: Stadium bridge missing")',
+    '\nlocal OverworldStadium = assert(V.OverworldStadium, "STADIUM_OVERWORLD_MODELS: Stadium bridge missing")' ..
+    '\nlocal OverworldColosseum = assert(V.OverworldColosseum, "COLOSSEUM_OVERWORLD_MODELS: Colosseum bridge missing")',
     "Pokedex module bridge")
   if not source then
     -- Some DS revisions do not require Pokedex from VoxelScene. Put the bridge
@@ -253,7 +258,8 @@ function M.install(ds, BaseV, namespace, Stadium)
     local originalSource = readInstalled(BaseV, "lib/VoxelScene.lua")
     source = originalSource
     source, err = insertAfterOnce(source, "local V = ...",
-      '\nlocal OverworldStadium = assert(V.OverworldStadium, "STADIUM_OVERWORLD_MODELS: Stadium bridge missing")',
+      '\nlocal OverworldStadium = assert(V.OverworldStadium, "STADIUM_OVERWORLD_MODELS: Stadium bridge missing")' ..
+      '\nlocal OverworldColosseum = assert(V.OverworldColosseum, "COLOSSEUM_OVERWORLD_MODELS: Colosseum bridge missing")',
       "namespace module bridge")
     if not source then return false, err end
   end

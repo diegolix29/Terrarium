@@ -303,7 +303,7 @@ local function dexScreen()
     end
     if not (fbo and VRGL.copyFrontToCanvas(fbo, ww, wh)) then return nil end
     local BattleScene = V.require("BattleScene")
-    local lx, ly, s = BattleScene.letterbox()
+    local lx, ly, s = select(1, BattleScene.letterbox())
     return { dexCanvas,
              lx / ww, ly / wh,
              (lx + BattleScene.GB_W * s) / ww,
@@ -578,7 +578,7 @@ local function updateQuad(worldUp, fp)
   local copied = false
   pcall(function()
     local BattleScene = V.require("BattleScene")
-    local lx, ly, s = BattleScene.letterbox()
+    local lx, ly, s = select(1, BattleScene.letterbox())
     local wpx = math.ceil(BattleScene.GB_W * s)
     local hpx = math.ceil(BattleScene.GB_H * s)
     local sx = math.max(0, math.floor(lx))

@@ -1,7 +1,9 @@
 -- GENERATED FILE -- do not hand-edit.
 -- Produced by work/tools/parse_ability_data.py from
 -- references/Pokemon_Colosseum_Abilities_First_251.txt (species mapping)
--- plus hand-authored mechanical metadata for each of the 62 abilities.
+-- plus hand-authored mechanical metadata for each currently implemented
+-- ability. GC6E01 numeric identities for the complete retail 1..77 bank live
+-- in `byNumeric` below; source-known but unresolved mechanics stay out of byId.
 local AbilityData = {}
 
 AbilityData.bySpecies = {
@@ -288,13 +290,20 @@ AbilityData.byId = {
   LIQUID_OOZE = {display="Liquid Ooze", category="drain_punish", excludeEffect="DREAM_EATER_EFFECT"},
   MAGMA_ARMOR = {display="Magma Armor", category="status_veto", status="FRZ"},
   MAGNET_PULL = {display="Magnet Pull", category="trap_block", trapType="STEEL"},
+  MARVEL_SCALE = {display="Marvel Scale", category="status_defense_boost", multiplier=1.5},
   NATURAL_CURE = {display="Natural Cure", category="switch_out_cure"},
   OBLIVIOUS = {display="Oblivious", category="infatuation_veto"},
   OVERGROW = {display="Overgrow", category="low_hp_power", moveType="GRASS", multiplier=1.5, threshold=0.3333333333333333},
   OWN_TEMPO = {display="Own Tempo", category="confusion_veto"},
   PICKUP = {display="Pickup", category="no_battle_effect"},
+  PLUS = {display="Plus", category="field_partner_special_boost", partnerAbility="MINUS", multiplier=1.5},
   POISON_POINT = {display="Poison Point", category="contact_reactive", effect="PSN", chance=0.3333333333333333},
   PRESSURE = {display="Pressure", category="pp_cost", extra=1},
+  -- GC6E01 damage setup treats ability 0x4A (Pure Power) in the exact same
+  -- pre-formula Attack-double branch as 0x25 (Huge Power).
+  PURE_POWER = {display="Pure Power", category="flat_stat_double", stat="attack"},
+  MINUS = {display="Minus", category="field_partner_special_boost", partnerAbility="PLUS", multiplier=1.5},
+  ROUGH_SKIN = {display="Rough Skin", category="contact_damage", fraction=0.0625},
   ROCK_HEAD = {display="Rock Head", category="recoil_veto", excludeEffects={"SHADOW_RUSH", "STRUGGLE"}},
   RUN_AWAY = {display="Run Away", category="wild_escape"},
   SAND_STREAM = {display="Sand Stream", category="switch_in_weather", weather="sandstorm", turns="infinite"},
@@ -321,6 +330,39 @@ AbilityData.byId = {
   VOLT_ABSORB = {display="Volt Absorb", category="type_absorb_heal", moveType="ELECTRIC", healFraction=0.25},
   WATER_ABSORB = {display="Water Absorb", category="type_absorb_heal", moveType="WATER", healFraction=0.25},
   WATER_VEIL = {display="Water Veil", category="status_veto", status="BRN"},
+  WHITE_SMOKE = {display="White Smoke", category="stat_veto", stat="ALL"},
+  -- GC6E01 ability 0x19: ordinary damaging hits pass only when their final
+  -- type multiplier is super-effective (>10 on both supported host kernels).
+  -- Status moves are not vetoed. Move/effect-specific retail exceptions remain
+  -- isolated at their own source-backed handlers rather than guessed here.
+  WONDER_GUARD = {display="Wonder Guard", category="wonder_guard"},
+}
+
+-- Retail GC6E01 PokemonStats stores numeric Gen-III ability ids for all 386
+-- species. Keep this canonical id map separate from `byId`: an id can be
+-- source-known while its runtime mechanic is still deliberately unsupported.
+-- Abilities.resolve uses the numeric map to select the retail slot first, then
+-- returns it only when `byId[name]` has an implemented mechanic/declared effect.
+AbilityData.byNumeric = {
+  [1]="STENCH",[2]="DRIZZLE",[3]="SPEED_BOOST",[4]="BATTLE_ARMOR",
+  [5]="STURDY",[6]="DAMP",[7]="LIMBER",[8]="SAND_VEIL",[9]="STATIC",
+  [10]="VOLT_ABSORB",[11]="WATER_ABSORB",[12]="OBLIVIOUS",[13]="CLOUD_NINE",
+  [14]="COMPOUNDEYES",[15]="INSOMNIA",[16]="COLOR_CHANGE",[17]="IMMUNITY",
+  [18]="FLASH_FIRE",[19]="SHIELD_DUST",[20]="OWN_TEMPO",[21]="SUCTION_CUPS",
+  [22]="INTIMIDATE",[23]="SHADOW_TAG",[24]="ROUGH_SKIN",[25]="WONDER_GUARD",
+  [26]="LEVITATE",[27]="EFFECT_SPORE",[28]="SYNCHRONIZE",[29]="CLEAR_BODY",
+  [30]="NATURAL_CURE",[31]="LIGHTNINGROD",[32]="SERENE_GRACE",[33]="SWIFT_SWIM",
+  [34]="CHLOROPHYLL",[35]="ILLUMINATE",[36]="TRACE",[37]="HUGE_POWER",
+  [38]="POISON_POINT",[39]="INNER_FOCUS",[40]="MAGMA_ARMOR",[41]="WATER_VEIL",
+  [42]="MAGNET_PULL",[43]="SOUNDPROOF",[44]="RAIN_DISH",[45]="SAND_STREAM",
+  [46]="PRESSURE",[47]="THICK_FAT",[48]="EARLY_BIRD",[49]="FLAME_BODY",
+  [50]="RUN_AWAY",[51]="KEEN_EYE",[52]="HYPER_CUTTER",[53]="PICKUP",
+  [54]="TRUANT",[55]="HUSTLE",[56]="CUTE_CHARM",[57]="PLUS",[58]="MINUS",
+  [59]="FORECAST",[60]="STICKY_HOLD",[61]="SHED_SKIN",[62]="GUTS",
+  [63]="MARVEL_SCALE",[64]="LIQUID_OOZE",[65]="OVERGROW",[66]="BLAZE",
+  [67]="TORRENT",[68]="SWARM",[69]="ROCK_HEAD",[70]="DROUGHT",
+  [71]="ARENA_TRAP",[72]="VITAL_SPIRIT",[73]="WHITE_SMOKE",[74]="PURE_POWER",
+  [75]="SHELL_ARMOR",[76]="CACOPHONY",[77]="AIR_LOCK",
 }
 
 AbilityData.contactMoves = {

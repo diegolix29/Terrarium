@@ -271,13 +271,25 @@ end
 -- engine's placement helpers pin the bottom edge and the centre), and they
 -- are what BattleCam is solved to put the two arena cells under.
 --
+-- For Gen 3 games (240x160), these positions need to scale proportionally.
+--
 -- Which makes the pin a subtraction: whatever the drift has done to the
 -- camera this frame, each pic moves by its own cell's projected position
 -- minus its anchor. At the middle of the drift that is zero.
-OverworldBattle.ANCHOR = {
-  player = { 26, 96 },
-  enemy = { 124, 56 },
-}
+local function getAnchors()
+  local BattleScene = V.require("BattleScene")
+  local sw, sh = BattleScene.surface()
+  -- Scale proportionally from 160x144 to the actual surface size
+  -- Gen 1/2 (160x144): player={26,96}, enemy={124,56}
+  -- Gen 3 (240x160): player={39,107}, enemy={186,62}
+  local px = math.floor(26 * sw / 160)
+  local py = math.floor(96 * sh / 144)
+  local ex = math.floor(124 * sw / 160)
+  local ey = math.floor(56 * sh / 144)
+  return { player = { px, py }, enemy = { ex, ey } }
+end
+
+OverworldBattle.ANCHOR = getAnchors()
 
 -- ------- how big a mon is
 --
@@ -291,10 +303,28 @@ OverworldBattle.SLOT_W = { front = 56, back = 32 }
 -- The two HUD blocks, as the pixel spans DrawEnemyHUDAndHPBar and
 -- DrawPlayerHUDAndHPBar actually reach. Neither overlaps its side's pic at
 -- the anchors above.
-OverworldBattle.HUD_RECT = {
-  enemy = { 8, 0, 80, 32 },
-  player = { 72, 56, 88, 40 },
-}
+-- For Gen 3 games (240x160), these HUD rectangles need to scale proportionally.
+local function getHudRects()
+  local BattleScene = V.require("BattleScene")
+  local sw, sh = BattleScene.surface()
+  -- Scale proportionally from 160x144 to the actual surface size
+  -- Gen 1/2 (160x144): enemy={8,0,80,32}, player={72,56,88,40}
+  -- Gen 3 (240x160): enemy={12,0,120,35}, player={108,62,132,44}
+  local ex = math.floor(8 * sw / 160)
+  local ey = math.floor(0 * sh / 144)
+  local ew = math.floor(80 * sw / 160)
+  local eh = math.floor(32 * sh / 144)
+  local px = math.floor(72 * sw / 160)
+  local py = math.floor(56 * sh / 144)
+  local pw = math.floor(88 * sw / 160)
+  local ph = math.floor(40 * sh / 144)
+  return {
+    enemy = { ex, ey, ew, eh },
+    player = { px, py, pw, ph },
+  }
+end
+
+OverworldBattle.HUD_RECT = getHudRects()
 
 -- ------- the box at the bottom, on the same glass
 --
@@ -331,9 +361,14 @@ OverworldBattle.TEXT_RECT = {
 
 -- How far apart the two anchors are: the spacing every move animation was
 -- authored against, and so the yardstick the live pair is measured with.
-OverworldBattle.ANCHOR_SPAN = math.sqrt(
-  (OverworldBattle.ANCHOR.enemy[1] - OverworldBattle.ANCHOR.player[1]) ^ 2
-  + (OverworldBattle.ANCHOR.enemy[2] - OverworldBattle.ANCHOR.player[2]) ^ 2)
+function OverworldBattle.anchorSpan()
+  local anchors = getAnchors()
+  return math.sqrt(
+    (anchors.enemy[1] - anchors.player[1]) ^ 2
+    + (anchors.enemy[2] - anchors.player[2]) ^ 2)
+end
+
+OverworldBattle.ANCHOR_SPAN = OverworldBattle.anchorSpan()
 
 -- The effects layer's scale for this shot: how far apart the two mons
 -- actually are on screen, over how far apart the slots they were authored
@@ -349,7 +384,7 @@ function OverworldBattle.animScale(shot, px, py)
   local dx, dy = shot.enemy[1] - px, shot.enemy[2] - py
   local span = math.sqrt(dx * dx + dy * dy)
   if not (span > 1) then return 1 end
-  local k = span / OverworldBattle.ANCHOR_SPAN
+  local k = span / OverworldBattle.anchorSpan()
   return math.max(OverworldBattle.ANIM_SCALE_MIN,
                   math.min(OverworldBattle.ANIM_SCALE_MAX, k))
 end
@@ -408,14 +443,15 @@ OverworldBattle.HUD_BAND = {
 -- which is the whole cost of the snap and is invisible.
 function OverworldBattle.snapRects(shot)
   local s = shot.scale
-  local e, p = OverworldBattle.HUD_RECT.enemy, OverworldBattle.HUD_RECT.player
+  local rects = getHudRects()
+  local e, p = rects.enemy, rects.player
   local ex = -e[1] * s                       -- foe: panel's left edge to 0
   local px = shot.pw - (p[1] + p[3]) * s     -- player: right edge to the far side
-  local rects = {
+  local out = {
     enemy = { ex + e[1] * s, shot.ly + e[2] * s, e[3] * s, e[4] * s },
     player = { px + p[1] * s, shot.ly + p[2] * s, p[3] * s, p[4] * s },
   }
-  return rects, { enemy = ex, player = px }
+  return out, { enemy = ex, player = px }
 end
 
 -- A rect measured in the GB frame, in WORLD-canvas pixels: where the letterbox
@@ -841,7 +877,7 @@ function OverworldBattle.worldAnim()
   if not host then return nil end
   local groundY = BattleScene.groundY(host, session.arena)
   local model = BattleScene.fxCard(session.arena, groundY,
-                                   OverworldBattle.ANCHOR)
+                                   getAnchors())
   if not model then return nil end
   return tex, model
 end
@@ -1012,10 +1048,22 @@ end
 -- carries the artwork's own pixels and the BILLBOARD does the sizing; and the
 -- placement, so the pic lands centred on a known column with its feet on a
 -- known row. That known point is what the quad is then hung from.
-local TEX_AX, TEX_AY = 80, 96          -- forced pic centre and baseline
-local TRAINER_AX, TRAINER_AY = 124, 56 -- the intro trainer pic's own slot
+--
+-- These coordinates need to be dynamic for Gen 3 games (240x160) vs Gen 1/2 (160x144)
+local function getTexCoords()
+  local BattleScene = V.require("BattleScene")
+  local sw, sh = BattleScene.surface()
+  -- Center of the surface and baseline (row where feet should be)
+  -- For 160x144: center=80, baseline=96
+  -- For 240x160: center=120, baseline=80
+  local tex_ax = sw / 2
+  local tex_ay = sh * 0.6  -- Baseline at 60% of height
+  return tex_ax, tex_ay
+end
 
-OverworldBattle.TEX_AX, OverworldBattle.TEX_AY = TEX_AX, TEX_AY
+local TRAINER_AX, TRAINER_AY = 124, 56 -- the intro trainer pic's own slot (Gen 1/2 only)
+
+OverworldBattle.TEX_AX, OverworldBattle.TEX_AY = getTexCoords()
 
 -- Which side is being rendered, or nil. The placement wrappers read it.
 local texturing = nil
@@ -1137,7 +1185,7 @@ function OverworldBattle.sideTexture(battle, side)
   g.setBlendMode(prevBlend or "alpha", prevAlpha)
   if not ok then error(err, 0) end
 
-  local ax, ay = TEX_AX, TEX_AY
+  local ax, ay = getTexCoords()
   local trainer = false
   -- The intro trainer pic draws itself straight into its own 7x7 slot rather
   -- than through the placement helpers, so it is hung from that slot instead.
@@ -1267,14 +1315,16 @@ function OverworldBattle.install()
   function BattleState.backPlacement(w, h, pad, padL, scale)
     local x, y, s = innerBack(w, h, pad, padL, scale)
     if not texturing then return x, y, s end
-    return TEX_AX - w * scale / 2, TEX_AY - (h - pad) * scale, s
+    local tex_ax, tex_ay = getTexCoords()
+    return tex_ax - w * scale / 2, tex_ay - (h - pad) * scale, s
   end
 
   local innerFront = BattleState.frontPlacement
   function BattleState.frontPlacement(ex, ey, w, h, scale)
     local x, y, s = innerFront(ex, ey, w, h, scale)
     if not texturing then return x, y, s end
-    return TEX_AX - w * scale / 2, TEX_AY - h * scale, s
+    local tex_ax, tex_ay = getTexCoords()
+    return tex_ax - w * scale / 2, tex_ay - h * scale, s
   end
 
   -- ------- the shiny arrival sparkle, on every rung this file draws
@@ -1410,7 +1460,7 @@ function OverworldBattle.install()
     -- the air beside the one it was aimed at. Scaling about the same
     -- midpoint keeps every authored offset the same fraction of the gap it
     -- was authored as.
-    local a = OverworldBattle.ANCHOR
+    local a = getAnchors()
     -- BACK SPRITES leaves the player's mon exactly where the GB put it, so that side
     -- contributes no movement at all and the pair's centre has gone half as
     -- far as the foe's mark did.
@@ -1624,7 +1674,7 @@ function OverworldBattle.drawHudPanels(battle)
   end
   local slide = (battle.introSlide or 0) * 4
   local enemy, player = OverworldBattle.hudLive(battle, slide)
-  local rect = OverworldBattle.HUD_RECT
+  local rect = getHudRects()
   local live = {}
   if enemy then live.enemy = rect.enemy end
   if player then live.player = rect.player end

@@ -23,17 +23,25 @@ function A.ready(screen,generation)
  else
   if screen.phase~='resolving' and screen.phase~='intro' then return nil end
   if not screen.message or (screen.messageTimer or 0)<=0 or (screen.messageDelay or 0)>0 or screen.waitSfx then return nil end
-  if screen.typedText~=screen.message or (screen.typer and not screen.typer:done()) then return nil end
+  -- Older/current Gen2 BattleState revisions draw the completed message
+  -- directly and expose no typer fields at all. Newer text runtimes may expose
+  -- typedText/typer; only then is their completion state an additional gate.
+  -- Treating absent fields as an unfinished typer deadlocks every Gen2 native
+  -- PromptButton on hosts that never had that API.
+  if screen.typedText~=nil or screen.typer~=nil then
+    if screen.typedText~=screen.message or (screen.typer and not screen.typer:done()) then return nil end
+  end
   if screen.anim and not (screen.anim:done() and screen.anim.keepSprites) then return nil end
   if screen.hpAnim or screen.faintSlide or screen.backpicSlide then return nil end
   return screen.message,screen.typer,'end'
  end
 end
 function A.update(screen,generation,dt)
- local t=love and love.timer and love.timer.getTime and love.timer.getTime()
  local st=A.states[screen] or {};A.states[screen]=st
- local elapsed=t and math.max(0,math.min(.1,t-(st.time or t))) or math.max(0,math.min(.1,dt or 0))
- st.time=t
+ -- The host calls this from its deterministic fixed step. Counting that dt lets
+ -- auto-progress scale with BATTLE SPEED instead of becoming a wall-clock text
+ -- bottleneck while every other battle subsystem is accelerated.
+ local elapsed=math.max(0,math.min(.1,tonumber(dt) or 0))
  local key,page,kind=A.ready(screen,generation)
  if not key then st.key=nil;st.age=0;return false end
  if key~=st.key or page~=st.page or kind~=st.kind then st.key=key;st.page=page;st.kind=kind;st.age=0 end

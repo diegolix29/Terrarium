@@ -1,6 +1,8 @@
--- Optional ability hooks over the supplied native Gen I engine. Battler and
--- party identities stay native; OFF delegates to the pre-existing methods.
--- This forward port does not claim complete Gen III arithmetic or move parity.
+-- Optional GC6E01 ability hooks over the supplied native Gen I engine. Battler
+-- and party identities stay native; OFF delegates to the pre-existing methods.
+-- Source-proven formula inputs (stat/power/accuracy order) are inserted before
+-- the host's native calculation; categories with unresolved retail seams remain
+-- deliberately fail-closed/isolated rather than being called complete parity.
 local V=... or {}
 local unpack=unpack or table.unpack
 local function pack(...)return {n=select('#',...),...}end
@@ -13,9 +15,6 @@ local installed=false
 -- trigger functions never call req() themselves.
 local StatusRegistry, MoveEffects
 
-local function gameOf(battle)
-  return battle and (battle.game or (battle.host and battle.host.game))
-end
 
 local function enabled(battle)
   return Abilities.enabledBattle(battle)
@@ -40,6 +39,13 @@ local function hasAbility(battle, battler, id)
   return abilityOf(battle, battler)==id
 end
 
+local function fieldHasAbility(battle,id)
+  for _,value in ipairs(Abilities.actives(battle) or {}) do
+    if abilityOf(battle,value)==id then return true end
+  end
+  return false
+end
+
 -- ---------------------------------------------------------------------
 -- category tables, driven by AbilityData so a data fix doesn't need a
 -- code change
@@ -61,9 +67,12 @@ for id,meta in pairs(Abilities.data.byId) do
 end
 
 local CONTACT_REACTIVE={}  -- id -> {effect=status or "RANDOM_MINOR", chance=, options=}
+local CONTACT_DAMAGE={}    -- id -> max-HP recoil fraction (Rough Skin)
 for id,meta in pairs(Abilities.data.byId) do
   if meta.category=="contact_reactive" and meta.effect~="ATTRACT" then
     CONTACT_REACTIVE[id]={effect=meta.effect, chance=meta.chance, options=meta.options}
+  elseif meta.category=="contact_damage" then
+    CONTACT_DAMAGE[id]=meta.fraction or (1/16)
   end
 end
 
@@ -76,8 +85,20 @@ local PHYSICAL_TYPES={NORMAL=true,FIGHTING=true,FLYING=true,POISON=true,GROUND=t
   ROCK=true,BUG=true,GHOST=true,STEEL=true}
 local function isPhysical(move)
   if not move then return false end
-  if move.category then return move.category=="physical" end
+  -- GC6E01 is a Gen-III battle engine: physical/special is owned by TYPE,
+  -- never by the per-move category field introduced in later generations.
   return PHYSICAL_TYPES[move.type]==true
+end
+
+local function shallow(t)
+  local out={}
+  for k,v in pairs(t or {}) do out[k]=v end
+  return out
+end
+
+local function isBurnStatus(status)
+  local s=status and tostring(status):upper() or ""
+  return s=="BRN" or s=="BURN"
 end
 
 -- ---------------------------------------------------------------------
@@ -118,6 +139,70 @@ local function installDamage(BattleState, Damage)
       end
     end
 
+    -- GC6E01 fn_80213E74 applies these abilities to the formula INPUTS, not to
+    -- the final HP damage.  That distinction is visible whenever integer floors,
+    -- stat stages, screens, STAB/type rows or the random roll are involved.
+    -- Keep the native host formula authoritative and feed it a detached view of
+    -- the exact source-side stat/power mutations.
+    local calcUser,calcTarget,calcMove=user,target,move
+    local needUserCopy=false
+    local mon=user and user.mon
+    local physical=isPhysical(move)
+    if physical and (atkAbility=="HUGE_POWER" or atkAbility=="PURE_POWER" or atkAbility=="HUSTLE"
+        or (atkAbility=="GUTS" and mon and mon.status)) then
+      needUserCopy=true
+    end
+    local thickFat=false
+    if defAbility then
+      local meta=Abilities.meta(defAbility)
+      if meta and meta.category=="type_damage_half" then
+        for _,t in ipairs(meta.moveTypes or {}) do if t==moveType then thickFat=true;break end end
+      end
+    end
+    if thickFat then needUserCopy=true end
+    if needUserCopy then
+      calcUser=shallow(user);calcUser.curStats=shallow(user and user.curStats)
+      if physical then
+        local attack=tonumber(calcUser.curStats.attack)
+        if attack then
+          if atkAbility=="HUGE_POWER" or atkAbility=="PURE_POWER" then attack=attack*2
+          elseif atkAbility=="HUSTLE" then attack=math.floor(attack*150/100)
+          elseif atkAbility=="GUTS" and mon and mon.status then attack=math.floor(attack*150/100) end
+          calcUser.curStats.attack=attack
+        end
+        -- In retail, Guts both boosts Attack and exempts the holder from the
+        -- later burn Attack-halving branch.  The Red host's burn penalty is read
+        -- only from attacker.mon.status inside Damage.compute, so detach just
+        -- that status for the one formula call instead of mutating the real mon.
+        if atkAbility=="GUTS" and mon and isBurnStatus(mon.status) then
+          calcUser.mon=shallow(mon);calcUser.mon.status=nil
+        end
+      end
+      if thickFat and calcUser.curStats.special then
+        calcUser.curStats.special=math.floor(calcUser.curStats.special/2)
+      end
+    end
+    local partnerMeta=atkAbility and Abilities.meta(atkAbility)
+    if partnerMeta and partnerMeta.category=="field_partner_special_boost"
+        and fieldHasAbility(self,partnerMeta.partnerAbility) then
+      if calcUser==user then calcUser=shallow(user);calcUser.curStats=shallow(user and user.curStats) end
+      if calcUser.curStats and calcUser.curStats.special then
+        calcUser.curStats.special=math.floor(calcUser.curStats.special*(partnerMeta.multiplier or 1.5))
+      end
+    end
+    if physical and defAbility=="MARVEL_SCALE" and target and target.mon and target.mon.status then
+      calcTarget=shallow(target);calcTarget.curStats=shallow(target.curStats)
+      if calcTarget.curStats.defense then
+        calcTarget.curStats.defense=math.floor(calcTarget.curStats.defense*150/100)
+      end
+    end
+    local lowHpType=atkAbility and LOW_HP_TYPE[atkAbility]
+    if lowHpType and moveType==lowHpType and mon and mon.hp
+        and mon.hp<=math.floor(Abilities.maxHP(mon)/3)
+        and move and tonumber(move.power) and move.power>0 then
+      calcMove=shallow(move);calcMove.power=math.floor(move.power*150/100)
+    end
+
     -- Crit immunity (Battle Armor / Shell Armor): Damage.critRoll only
     -- receives the attacker, not the defender, so it can't check the
     -- holder's own ability. Force it to miss for the duration of this one
@@ -127,40 +212,31 @@ local function installDamage(BattleState, Damage)
     if critMeta and critMeta.category=="crit_immune" and Damage and Damage.critRoll then
       local origCrit=Damage.critRoll
       Damage.critRoll=function() return false end
-      local ok,a,b=pcall(origCompute, self, user, target, move, opts)
+      local ok,a,b=pcall(origCompute, self, calcUser, calcTarget, calcMove, opts)
       Damage.critRoll=origCrit
       if not ok then error(a) end
       dmg,info=a,b
     else
-      dmg,info=origCompute(self, user, target, move, opts)
+      dmg,info=origCompute(self, calcUser, calcTarget, calcMove, opts)
     end
     if not dmg or dmg<=0 then return dmg,info end
 
-    -- Defender-side flat halving (Thick Fat).
-    if defAbility then
-      local meta=Abilities.meta(defAbility)
-      if meta and meta.category=="type_damage_half" then
-        for _,t in ipairs(meta.moveTypes or {}) do
-          if t==moveType then dmg=math.max(1, math.floor(dmg/2)); break end
-        end
-      end
+    -- Wonder Guard (GC6E01 ability 0x19): the source-proven core check is made
+    -- against the resolved x10 type multiplier after the host formula has
+    -- established the actual matchup. Ordinary damaging hits that are not
+    -- super-effective are cancelled; status moves never reach this branch.
+    if defAbility=="WONDER_GUARD" and (tonumber(info and info.typeMult) or 10)<=10 then
+      local blocked=type(info)=="table" and shallow(info) or {}
+      blocked.ability=defAbility;blocked.wonderGuard=true;blocked.typeMult=0;blocked.immune=true
+      Abilities.message(self,"WONDER GUARD blocked the move!")
+      return 0,blocked
     end
 
-    -- Attacker-side power/attack multipliers.
+    -- Flash Fire's activation path is already source-owned, but its precise
+    -- boosted-damage insertion point is not yet recovered end-to-end.  Leave
+    -- that one isolated late modifier as explicitly unresolved rather than
+    -- contaminating the now-exact Huge Power/Hustle/Guts/low-HP/Thick Fat path.
     if atkAbility then
-      local lowHpType=LOW_HP_TYPE[atkAbility]
-      local mon=user.mon
-      if lowHpType and moveType==lowHpType and mon and mon.hp
-          and mon.hp<=math.floor(Abilities.maxHP(mon)/3) then
-        dmg=math.floor(dmg*1.5)
-      end
-      if atkAbility=="HUGE_POWER" and isPhysical(move) then
-        dmg=math.floor(dmg*2)
-      elseif atkAbility=="HUSTLE" and isPhysical(move) then
-        dmg=math.floor(dmg*1.5)
-      elseif atkAbility=="GUTS" and mon and mon.status and isPhysical(move) then
-        dmg=math.floor(dmg*1.5)
-      end
       local activeMeta=Abilities.meta(atkAbility)
       if activeMeta and activeMeta.category=="type_immune_boost" and activeMeta.moveType==moveType
           and Abilities.runtime(self,user.mon).flashFire then
@@ -170,33 +246,40 @@ local function installDamage(BattleState, Damage)
     return dmg,info
   end
 
-  -- Scale input accuracy while preserving the native/hooked accuracy decision.
-  -- Do not add a second roll that could overturn another mod's explicit veto.
-  local function combinedMultiplier(self, user, target, move)
-    local m=1
-    local atkAbility=abilityOf(self, user)
-    if atkAbility=="COMPOUNDEYES" then m=m*1.3
-    elseif atkAbility=="HUSTLE" and isPhysical(move) then m=m*0.8 end
-    local defAbility=abilityOf(self, target)
+  -- GC6E01 applies ability accuracy multipliers AFTER the attacker's Accuracy
+  -- and defender's Evasion stages, with an integer floor after each operation:
+  -- Compound Eyes x130%, Sand Veil x80%, then Hustle x80% for physical types.
+  -- Red exposes the post-stage value through Damage.accuracyThreshold, so wrap
+  -- only that threshold for this synchronous roll rather than scaling base move
+  -- accuracy ahead of the native stage math.
+  local function adjustThreshold(self,user,target,move,value)
+    value=math.floor(tonumber(value) or 0)
+    local atkAbility=abilityOf(self,user)
+    if atkAbility=="COMPOUNDEYES" then value=math.floor(value*130/100) end
+    local defAbility=abilityOf(self,target)
     if defAbility=="SAND_VEIL" then
-      local hasCloudNine=function(b) return hasAbility(self,b,"CLOUD_NINE") end
-      m=m*Weather.sandAccuracyMultiplier(self,1,hasCloudNine)
+      local hasCloudNine=function(b)return hasAbility(self,b,"CLOUD_NINE")end
+      if Weather.sandAccuracyMultiplier(self,1,hasCloudNine)<1 then value=math.floor(value*80/100) end
     end
-    return m
+    if atkAbility=="HUSTLE" and isPhysical(move) then value=math.floor(value*80/100) end
+    return value
   end
 
   local origAccuracy=BattleState.accuracyRoll
   BattleState.accuracyRoll=function(self,move,user,target)
     if not enabled(self) then return origAccuracy(self,move,user,target) end
-    local multiplier=combinedMultiplier(self,user,target,move)
-    -- Change only the move supplied to the existing native/hooked accuracy
-    -- path. No second RNG roll can turn a hook's veto into a hit.
-    if multiplier~=1 and type(move)=="table" and tonumber(move.accuracy) and move.accuracy>0 then
-      local adjusted={};for k,v in pairs(move) do adjusted[k]=v end
-      adjusted.accuracy=move.accuracy*multiplier
-      return origAccuracy(self,adjusted,user,target)
+    local atkAbility=abilityOf(self,user);local defAbility=abilityOf(self,target)
+    local active=atkAbility=="COMPOUNDEYES" or (atkAbility=="HUSTLE" and isPhysical(move))
+      or defAbility=="SAND_VEIL"
+    local threshold=Damage and Damage.accuracyThreshold
+    if not (active and threshold) then return origAccuracy(self,move,user,target) end
+    Damage.accuracyThreshold=function(ruleset,m,a,d)
+      return adjustThreshold(self,user,target,move,threshold(ruleset,m,a,d))
     end
-    return origAccuracy(self,move,user,target)
+    local result=pack(pcall(origAccuracy,self,move,user,target))
+    Damage.accuracyThreshold=threshold
+    if not result[1] then error(result[2],0) end
+    return unpack(result,2,result.n)
   end
 end
 
@@ -316,10 +399,16 @@ end
 --      own before/after HP diff is the most reliable proxy available.
 -- ---------------------------------------------------------------------
 
-local function triggerContact(battle, attacker, defender, moveId, dealt)
+local function triggerContact(battle, attacker, defender, moveId, moveDef, dealt)
   if not (dealt and dealt>0) then return end
-  if not Abilities.isContactMove(moveId) then return end
+  if not Abilities.isContactMove(moveId,moveDef) then return end
   local defAbility=abilityOf(battle, defender)
+  local fraction=defAbility and CONTACT_DAMAGE[defAbility]
+  if fraction and attacker and attacker.mon and (attacker.mon.hp or 0)>0 then
+    battle:applyDamage(attacker,math.max(1,math.floor(Abilities.maxHP(attacker.mon)*fraction)))
+    Abilities.message(battle,Abilities.displayName(defAbility).." hurt the attacker!")
+    return
+  end
   local reactive=defAbility and CONTACT_REACTIVE[defAbility]
   if not reactive then return end
   local roll=Abilities.random(battle)
@@ -342,7 +431,33 @@ local function installPerformMoveEffects(BattleState)
     local hadSub=target and target.substituteHP
     local beforePP=moveInst and moveInst.pp
     local source=self.__cbeAbilitySource;self.__cbeAbilitySource=user
+
+    -- GC6E01 hit-check handles Soundproof (ability 0x2B) after the move has
+    -- already been selected/paid for and announced, but before ordinary
+    -- accuracy, damage or effect execution. Red's performMove has exactly one
+    -- matching synchronous seam: `record.perform`, reached after PP debit +
+    -- announcement and before either the status or damaging pipeline.
+    -- Substitute only this one target's record for the duration of the call;
+    -- doubles dispatches each target separately, so a Soundproof holder cannot
+    -- suppress the same spread move against its non-Soundproof partner.
+    local moveDef=moveInst and type(self.moveDef)=="function" and self:moveDef(moveInst) or nil
+    local soundBlocked=target and target~=user and hasAbility(self,target,"SOUNDPROOF")
+      and Abilities.isSoundMove and Abilities.isSoundMove(moveDef)
+    local savedEffectRecord=rawget(self,"effectRecord")
+    if soundBlocked then
+      local resolve=self.effectRecord
+      self.effectRecord=function(battle,effect)
+        if moveDef and effect==moveDef.effect then
+          return {kind="full",perform=function()
+            if type(battle.cancelMoveAnim)=="function" then battle:cancelMoveAnim() end
+            Abilities.message(battle,"SOUNDPROOF blocked the move!")
+          end}
+        end
+        return resolve(battle,effect)
+      end
+    end
     local result=pack(pcall(orig,self,user,target,moveInst,isCalled))
+    if soundBlocked then self.effectRecord=savedEffectRecord end
     self.__cbeAbilitySource=source
     if not result[1] then error(result[2],0) end
     if target and moveInst then
@@ -354,7 +469,8 @@ local function installPerformMoveEffects(BattleState)
       end
       local after=target.mon and target.mon.hp
       if before and after and after<before and not hadSub and user and (user.mon.hp or 0)>0 then
-        triggerContact(self,user,target,moveInst.id,before-after)
+        local moveDef=self.data and self.data.moves and self.data.moves[moveInst.id]
+        triggerContact(self,user,target,moveInst.id,moveDef,before-after)
       end
     end
     return unpack(result,2,result.n)
@@ -408,6 +524,34 @@ local function installSwitchTrap(BattleState)
   end
 end
 
+-- Early Bird source proof: GC6E01's sleep-state update increments the sleep
+-- counter by `ability==0x30 ? 2 : 1` each attempted sleeping turn.  Red stores
+-- the inverse countdown, so the identical operation is one EXTRA decrement
+-- before its native sleep handler.  Keep both Red status paths covered: normal
+-- moves go through Status.beforeMove; recharge turns use preRechargeChecks.
+local function installEarlyBird(BattleState,StatusRegistry)
+  local function extraTick(battle,battler)
+    if not (battle and battler and battler.mon and enabled(battle)) then return end
+    if battler.mon.status=="SLP" and abilityOf(battle,battler)=="EARLY_BIRD" then
+      battler.sleepTurns=(battler.sleepTurns or 1)-1
+    end
+  end
+  local before=StatusRegistry and StatusRegistry.beforeMove
+  if before then
+    StatusRegistry.beforeMove=function(battler,rng,battle,selectedMoveId)
+      extraTick(battle,battler)
+      return before(battler,rng,battle,selectedMoveId)
+    end
+  end
+  local pre=BattleState.preRechargeChecks
+  if pre then
+    BattleState.preRechargeChecks=function(self,user,target)
+      extraTick(self,user)
+      return pre(self,user,target)
+    end
+  end
+end
+
 -- ---------------------------------------------------------------------
 -- Global installer
 -- ---------------------------------------------------------------------
@@ -417,6 +561,12 @@ function M.installGlobal(ctx)
   local req2=(ctx and ctx.engineRequire) or req
   local Damage=(ctx and ctx.Damage) or req2('src.battle.Damage')
   StatusRegistry=(ctx and ctx.StatusRegistry) or req2('src.battle.StatusRegistry')
+  local Status
+  if ctx then
+    Status=ctx.Status or (ctx.StatusRegistry and ctx.StatusRegistry.beforeMove and ctx.StatusRegistry)
+  else
+    Status=req2('src.battle.Status')
+  end
   MoveEffects=(ctx and ctx.MoveEffects) or req2('src.battle.MoveEffects')
   local BattleState=(ctx and ctx.BattleState) or req2('src.battle.BattleState')
   installDamage(BattleState, Damage)
@@ -425,6 +575,7 @@ function M.installGlobal(ctx)
   installEffectRecords(BattleState)
   installPerformMoveEffects(BattleState)
   installSwitchTrap(BattleState)
+  installEarlyBird(BattleState,Status)
   installed=true
   return true
 end

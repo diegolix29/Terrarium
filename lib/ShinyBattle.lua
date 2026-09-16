@@ -51,6 +51,10 @@ function ShinyBattle.install()
   if not Pokemon.dramaticShapeShiny then
     local inner = Pokemon.new
     function Pokemon.new(data, species, level, rng)
+      -- Safety check: ensure level is valid before constructing Pokemon
+      if level == nil then
+        level = 2 -- Default to level 2 if level is nil (level 1 is only for hatched eggs)
+      end
       local mon = inner(data, species, level, rng)
       -- pcall: a mon that fails to be decided is an ordinary mon, which is
       -- a blemish. A mon that fails to be BUILT is a broken game.

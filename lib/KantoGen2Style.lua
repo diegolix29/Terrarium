@@ -422,6 +422,8 @@ local function mapUsedTiles(ref)
   local used = {}
   local function addBlock(blockId)
     blockId = tonumber(blockId)
+    -- Gen3 tilesets don't have blocks field
+    if not ts.blocks then return end
     local block = blockId and ts.blocks[math.floor(blockId) + 1]
     if type(block) ~= "table" then return end
     for _, tile in ipairs(block) do
@@ -496,6 +498,8 @@ function M._mapTileFrequencies(ref)
   local counts = {}
   local function addBlock(blockId, weight)
     blockId = tonumber(blockId)
+    -- Gen3 tilesets don't have blocks field
+    if not ts.blocks then return end
     local block = blockId and ts.blocks[math.floor(blockId) + 1]
     if type(block) ~= "table" then return end
     weight = math.max(1, math.floor(tonumber(weight) or 1))

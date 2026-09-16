@@ -128,6 +128,11 @@ BattleBoxXY.PHASES = {
 
 function BattleBoxXY.covers(battle)
   if not (battle and BattleBoxXY.available()) then return false end
+  -- Check if external UI mod has taken control of the battle
+  -- Stadium Battle FX sets stadiumTrainerPortraitToken when it takes control
+  if battle and battle.stadiumTrainerPortraitToken then
+    return false -- Let external mod handle the UI
+  end
   return BattleBoxXY.PHASES[battle.phase] and true or false
 end
 

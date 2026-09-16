@@ -388,11 +388,11 @@ local function colosseumIconFrame(game,mon)
     local def=game.data.pokemon[mon.species]
     dex=def and tonumber(def.dex) or nil
   end
-  if not dex or dex<1 or dex>251 then return nil end
+  if not dex or dex<1 or dex>386 then return nil end
 
-  -- Every species in the base Gen 1 and Gen 2 Pokédex now has at least one
+  -- Every species in the base Gen 1, Gen 2, and Gen 3 Pokédex now has at least one
   -- authentic Colosseum frame. Preserve the extra animated Kanto frames where
-  -- supplied, and use frame one for the complete #001-#251 baseline.
+  -- supplied, and use frame one for the complete #001-#386 baseline.
   local count=COLOSSEUM_ICON_FRAMES[dex] or 1
   if count<=0 then
     -- This exact species is absent from the supplied Colosseum icon sheet.
@@ -2134,7 +2134,7 @@ function ColosseumUI.install(mod)
   modRef=mod
   local doublesSource=assert(mod:read("lib/DoublesUI.lua"),"Missing doubles UI module")
   ColosseumUI.doubles=assert(load(doublesSource,"@ColosseumUI/lib/DoublesUI.lua"))({
-    mod=mod,findCBE=function() return GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS") end,
+    mod=mod,findCBE=function() return GoldCompat.findLoadedMod("DRAMATIC_SHAPE") end,
     font=font,panel=consolePanel,selector=selector,plate=statusPlateShape,
     setUIColor=GoldCompat.setUIColor,
     displayCompat=assert(load(assert(mod:read("lib/DoublesDisplayCompat.lua"),
@@ -2171,7 +2171,7 @@ function ColosseumUI.install(mod)
 end
 
 function ColosseumUI.draw(game,presentationBattle,sourceBattle)
-  local provider=GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS")
+  local provider=GoldCompat.findLoadedMod("DRAMATIC_SHAPE")
   local boss=provider and provider.exports and provider.exports.bossIntro
   if boss and boss.version==1 and boss.active(sourceBattle or presentationBattle) then return true end
   if ColosseumUI.doubles and ColosseumUI.doubles.draw(game,sourceBattle or presentationBattle) then return true end
@@ -3480,6 +3480,8 @@ function GoldCompat.installBattlePredicateGuard(class,name,slot)
   if not (type(class)=="table" and type(class[name])=="function") then return false end
   local current=class[name]
   if current==State[slot] then return false end
+  local installedKey="__predicateGuardInstalled_"..slot
+  if GoldCompat[installedKey] then return false end
   local inner=current
   local wrapper=function(self,...)
     if GoldCompat.ownsNativeBattleLayer(self) then return false end
@@ -3487,13 +3489,18 @@ function GoldCompat.installBattlePredicateGuard(class,name,slot)
   end
   State[slot]=wrapper
   class[name]=wrapper
+  GoldCompat[installedKey]=true
   return true
 end
 
 function GoldCompat.installGen1HudDrawGuard()
   if type(BattleState.drawHUDs)~="function" then return false end
+  if GoldCompat.__gen1HudDrawGuardInstalled then return false end
   local current=BattleState.drawHUDs
-  if current==State.__colosseumGen1HudDrawGuard then return false end
+  if current==State.__colosseumGen1HudDrawGuard then
+    GoldCompat.__gen1HudDrawGuardInstalled=true
+    return false
+  end
   local inner=current
   local wrapper=function(self,...)
     if GoldCompat.ownsNativeBattleLayer(self) then
@@ -3512,6 +3519,7 @@ function GoldCompat.installGen1HudDrawGuard()
   end
   State.__colosseumGen1HudDrawGuard=wrapper
   BattleState.drawHUDs=wrapper
+  GoldCompat.__gen1HudDrawGuardInstalled=true
   return true
 end
 
@@ -4480,7 +4488,31 @@ local function installVerifiedOptions(mod)
       default=true,
     }
   end
-  mod.options:define(optionDefs)
+  
+  -- Check if options are already defined (by main.lua) and merge instead of replace
+  local existingOptions = mod.options and mod.options._defs
+  if existingOptions and type(existingOptions) == "table" and #existingOptions > 0 then
+    -- Merge UI options with existing options
+    for _, uiOption in ipairs(optionDefs) do
+      -- Check if this key already exists
+      local keyExists = false
+      for _, existing in ipairs(existingOptions) do
+        if existing.key == uiOption.key then
+          keyExists = true
+          break
+        end
+      end
+      -- Only add if key doesn't exist
+      if not keyExists then
+        table.insert(existingOptions, uiOption)
+      end
+    end
+    -- Redefine with merged options
+    mod.options:define(existingOptions)
+  else
+    -- No existing options, define normally
+    mod.options:define(optionDefs)
+  end
 
   if mod.log then
     mod.log:info("Colosseum Inspired UI Overhaul: options registered")
@@ -11655,14 +11687,14 @@ function DexUI.memoTypeLabel(def)
 end
 
 function GoldCompat.cbeAbilitiesBridge()
-  -- Kept as a GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS") call
+  -- Kept as a GoldCompat.findLoadedMod("DRAMATIC_SHAPE") call
   -- (not a direct modRef reference) deliberately: tests/AbilityBridgeTests.lua
   -- extracts this exact function's source text and re-evaluates it standalone
   -- with only a mocked GoldCompat table in scope, so it cannot see modRef (a
   -- file-local upvalue). findLoadedMod itself short-circuits this id to the
   -- live mod post-merge -- see its definition below.
-  local cbe=GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS")
-  if not cbe then cbe=GoldCompat.findLoadedMod("colosseum_battle_environments") end
+  local cbe=GoldCompat.findLoadedMod("DRAMATIC_SHAPE")
+  if not cbe then cbe=GoldCompat.findLoadedMod("dramatic_shape") end
   local bridge=cbe and cbe.exports and cbe.exports.abilities
   if type(bridge)=="table" and bridge.version==1 then return bridge end
   return nil
@@ -14183,8 +14215,8 @@ end
 function GoldCompat.findLoadedMod(id)
   -- The combined build owns CBE directly. The UI-only build must resolve
   -- the optional, separately installed provider rather than itself.
-  if modRef and modRef.id=="COLOSSEUM_OVERHAUL"
-      and (id=="COLOSSEUM_BATTLE_ENVIRONMENTS" or id=="colosseum_battle_environments") then
+  if modRef and (modRef.id=="COLOSSEUM_OVERHAUL" or modRef.id=="DRAMATIC_SHAPE")
+      and (id=="DRAMATIC_SHAPE" or id=="dramatic_shape" or id=="COLOSSEUM_BATTLE_ENVIRONMENTS") then
     return modRef
   end
   if not (modRef and type(modRef.find)=="function") then return nil end
@@ -14199,7 +14231,7 @@ function GoldCompat.findLoadedMod(id)
 end
 
 function GoldCompat.colosseumModelsSelected(game)
-  local provider=GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS")
+  local provider=GoldCompat.findLoadedMod("DRAMATIC_SHAPE")
   if not provider then return false end
   game=game or GoldCompat.game or (modRef and modRef.game)
   local options=game and game.save and game.save.colosseumBattle
@@ -14295,7 +14327,7 @@ function GoldCompat.cbeInformationModelService(game,mon,kind)
     return stable.api,stable.providerId,context,stable.owner
   end
 
-  local provider=GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS")
+  local provider=GoldCompat.findLoadedMod("DRAMATIC_SHAPE")
   local bridge=provider and provider.exports and provider.exports.informationModels
   local bridgeVersion=type(bridge)=="table" and tonumber(bridge.version or 0) or 0
 
@@ -14404,7 +14436,7 @@ function GoldCompat.cbeInformationModelService(game,mon,kind)
 end
 
 function GoldCompat.cbeInformationBridge()
-  local provider=GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS")
+  local provider=GoldCompat.findLoadedMod("DRAMATIC_SHAPE")
   local bridge=provider and provider.exports and provider.exports.informationModels
   if type(bridge)=="table" then return bridge end
   return nil
@@ -23883,7 +23915,7 @@ function GoldCompat.cbeBattleOwnership(state)
   end
 
   local ownership={battle=state.battle,world=false,trainer=false}
-  local provider=GoldCompat.findLoadedMod("COLOSSEUM_BATTLE_ENVIRONMENTS")
+  local provider=GoldCompat.findLoadedMod("DRAMATIC_SHAPE")
   if provider then
     local exports=provider.exports
     if type(exports)=="table" then
@@ -26552,11 +26584,13 @@ function GoldCompat.installTitleExperience(mod)
   end
   if assetPath and mod.content and mod.content.music
       and type(mod.content.music.register)=="function" then
-    local ok,err=pcall(mod.content.music.register,mod.content.music,
-      GoldCompat.titleMusicId,{file=assetPath})
-    State.titleMusicRegistered=ok and true or false
-    if not ok and mod.log then
-      mod.log:warn("Colosseum UI title music registration failed: "..tostring(err))
+    if not State.titleMusicRegistered then
+      local ok,err=pcall(mod.content.music.register,mod.content.music,
+        GoldCompat.titleMusicId,{file=assetPath})
+      State.titleMusicRegistered=ok and true or false
+      if not ok and mod.log then
+        mod.log:warn("Colosseum UI title music registration failed: "..tostring(err))
+      end
     end
   end
 

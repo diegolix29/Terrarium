@@ -48,14 +48,15 @@ SpriteProviders.STYLE = {
 
 -- Explicit style → provider try order (before black).
 -- Public "followers" maps to the followers_ex provider, then HGSS/PokeMMO.
+-- Modified to prioritize game sprites when built-in assets don't exist.
 local STYLE_CHAINS = {
   pokemmo = { "pokemmo", "pokedex" },
-  followers = { "followers_ex", "pokemmo", "pokedex" },
+  followers = { "pokedex", "pokemmo", "followers_ex" },  -- Prioritize game sprites first
   pokedex = { "pokedex" },
   -- Legacy aliases kept for direct resolve / old call sites.
-  auto = { "pokemmo", "pokedex" },
-  gold = { "pokemmo", "pokedex" },
-  followers_ex = { "followers_ex", "pokemmo", "pokedex" },
+  auto = { "pokedex", "pokemmo" },  -- Prioritize game sprites first
+  gold = { "pokedex", "pokemmo" },  -- Prioritize game sprites first
+  followers_ex = { "pokedex", "pokemmo", "followers_ex" },  -- Prioritize game sprites first
 }
 
 local VALID_STYLES = {

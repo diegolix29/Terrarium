@@ -1768,6 +1768,7 @@ end
 
 function ForeignGen1Map:tileAt(tx, ty)
   local blocks = self.tileset and self.tileset.blocks
+  -- Gen3 tilesets don't have blocks field
   if not blocks then return nil end
   local blockId = self:blockAt(math.floor(tx / 4), math.floor(ty / 4))
   local block = blocks[(tonumber(blockId) or 0) + 1]

@@ -33,15 +33,14 @@ local V = ...
 local Assets = require("src.render.Assets")
 local TileRenderer = require("src.render.TileRenderer")
 local PaletteFX = require("src.render.PaletteFX")
--- Water.tileRoll decides whether the hshift water roll runs under swell
--- (see Water.lua). Required here rather than pushed in: this file already
--- owns the animation clock, and Water has no reverse dependency on us.
-local Water = V.require("Water")
+local Gen3 = V.require("Gen3")
 
 local TerrainAtlas = {}
 
 local cache = {}
 local cacheData = {}    -- the pixels behind the atlases we baked ourselves
+-- one line per (map, atlas), so the branch is stated without a log flood
+local reported = {}
 local animated = {}     -- key -> one map's private, mutable animated atlas
                         -- false = given up on; nil = not built (or retrying)
 local attempts = {}     -- key -> consecutive failures, for the retry budget
@@ -82,10 +81,75 @@ end
 -- over. Returns the image and, when we baked it ourselves, its pixels.
 local function staticAtlas(map, colors)
   local renderer = map.renderer
+  -- GEN 3 FIRST, because `renderer.image` is nil on every Hoenn map -- a pair
+  -- has no sheet on disk to be the base of anything -- and a nil base here
+  -- means TerrainAtlas.forMap returns nil, Voxel3D.draw binds no texture, and
+  -- the world meshes perfectly and draws untextured.  The Gen 3 answer is the
+  -- two baked metatile sheets composited into one image (lib/Gen3.lua).
+  --
+  -- It also skips everything below on purpose.  The SGB rebake exists because
+  -- Game Boy art is four shades of grey and the colour arrives as a
+  -- screen-space remap that has no meaning once the ground is geometry.  Gen 3
+  -- art is already true colour, chosen per 8x8 tile out of sixteen 16-colour
+  -- palettes at bake time -- there is nothing left to remap and repainting it
+  -- through a four-colour world palette would throw the whole thing away.
+  if Gen3.mapIsGen3(map) then
+    local sheet = Gen3.atlas(map)
+    if sheet then return sheet, false end
+    return nil
+  end
   local base = renderer and renderer.image
   if not base then return nil end
-  -- already true color: RED++'s baked per-map atlas, or a mod's own art
-  if not colors or renderer.gbcAtlas or map.tileset.trueColor then
+  -- already true color: RED++'s baked per-map atlas, or a mod's own art.
+  --
+  -- `renderer.trueColor` rather than the tileset flag, because Gen 2 sets
+  -- it on a THIRD path: its tilesets carry a palette per tile graphic
+  -- (palMap/palColors, off the ROM), and TileRenderer.new bakes those into
+  -- renderer.image the same way RED++ bakes its own -- so the atlas in hand
+  -- is already the map's colour. Reading only the tileset flag missed that
+  -- and sent Johto down the SGB branch below, which repaints the RAW
+  -- greyscale art in one four-shade world palette: seven palettes thrown
+  -- away, and a route rendered in blue and white while the flat view beside
+  -- it was correct.
+  -- WHICH BRANCH THIS TOOK, once per map, because it decides the whole
+  -- picture and nothing said so.
+  --
+  -- The editor can copy art between tilesets now, and a borrowed tile lands
+  -- past the end of the original atlas. Its palette travels with it -- the
+  -- engine's own log confirms the bake gives tile 192 a green row -- and the
+  -- tile still drew in raw greys. Every branch below hands back a DIFFERENT
+  -- image, and until this line there was no way to tell from outside which
+  -- one the world was actually textured from.
+  do
+    local key = tostring(map.id) .. "|" .. tostring(map.tileset.image)
+    if reported[key] == nil then
+      reported[key] = true
+      -- EVERY FLAG, NOT THE FIRST ONE THAT MATCHED.
+      --
+      -- The first cut of this reported whichever condition short-circuited --
+      -- and `not colors` is tested first, so it printed "no palette" and hid
+      -- the one thing the question actually turned on: whether the engine's
+      -- Gen 2 bake had run and set `trueColor`. A diagnostic that answers a
+      -- different question than the one asked is worse than none, because it
+      -- reads like an answer.
+      local why = string.format(
+        "colors=%s gbcAtlas=%s trueColor=%s tileset.trueColor=%s -> %s",
+        colors and "yes" or "NIL",
+        renderer.gbcAtlas and "yes" or "no",
+        renderer.trueColor and "yes" or "no",
+        map.tileset.trueColor and "yes" or "no",
+        (not colors or renderer.gbcAtlas or renderer.trueColor
+         or map.tileset.trueColor) and "base (the engine's image)"
+          or "SGB rebake from the RAW sheet")
+      pcall(function()
+        require("src.core.Logger").warn(
+          "terrain atlas for %s: %s; tileset %s, atlas %s", tostring(map.id),
+          why, tostring(map.tileset.id), tostring(map.tileset.image))
+      end)
+    end
+  end
+  if not colors or renderer.gbcAtlas or renderer.trueColor
+     or map.tileset.trueColor then
     return base, false
   end
   if not (love.image and love.image.newImageData) then return base, false end
@@ -274,7 +338,12 @@ local function readback(image)
   local prev = love.graphics.getCanvas()
   local ok, data = pcall(function()
     local w, h = image:getDimensions()
-    local canvas = love.graphics.newCanvas(w, h)
+    -- dpiscale = 1, or this is not a copy. On a highdpi surface (Android,
+    -- iOS -- see conf.lua) newCanvas takes the surface's scale by default,
+    -- so the atlas would be drawn into a texture 2.75x its size and read
+    -- back magnified -- and every tile coordinate below, which counts in
+    -- eights from the top-left, would land somewhere between two tiles.
+    local canvas = love.graphics.newCanvas(w, h, { dpiscale = 1 })
     love.graphics.setCanvas(canvas)
     love.graphics.clear(0, 0, 0, 0)
     -- straight copy: no blending against the cleared target, no tint from
@@ -521,7 +590,9 @@ local function newEntry(map, base, baked)
                 perRow = tileset.tilesPerRow or 16, step = nil }
     -- the frame files are raw grayscale; learn what the atlas did to the
     -- tile each one stands in for, so they land on the same colours
-    local recolored = baked or (map.renderer and map.renderer.gbcAtlas)
+    local renderer = map.renderer
+    local recolored = baked or (renderer and (renderer.gbcAtlas
+                                              or renderer.trueColor))
     if recolored and not tileset.trueColor then
       local raw = Assets.imageData(tileset.image)
       e.shades = {}
@@ -585,32 +656,20 @@ function TerrainAtlas.animate(map, colors, base, baked)
   if not entry then return nil end
 
   local frame = animFrame()
-  -- Under a non-FLAT swell the water tile roll is held still (Water.tileRoll);
-  -- flowers (kind == "frames") keep advancing. The high bit folds the roll
-  -- state into `step` so flipping FLAT <-> CALM forces one clean repatch
-  -- back to offset 0 rather than leaving a stale shifted slot on the atlas.
-  local roll = true
-  do
-    local ok, r = pcall(Water.tileRoll)
-    if ok and r == false then roll = false end
-  end
   -- one number for the whole entry: every spec's own step, folded together,
   -- so a repatch happens when ANY of them turns over
-  local step = roll and 0 or 0x40000000
+  local step = 0
   for i, spec in ipairs(entry.specs) do
     local n = spec.kind == "hshift" and #spec.offsets or #spec.sequence
-    local st = math.floor(frame / (spec.period or 20)) % n
-    if spec.kind == "hshift" and not roll then st = 0 end
-    step = step + st * (16 ^ i)
+    step = step + (math.floor(frame / (spec.period or 20)) % n) * (16 ^ i)
   end
   if step ~= entry.step then
     entry.step = step
     local ok = pcall(function()
       for _, spec in ipairs(entry.specs) do
         local n = spec.kind == "hshift" and #spec.offsets or #spec.sequence
-        local st = math.floor(frame / (spec.period or 20)) % n
-        if spec.kind == "hshift" and not roll then st = 0 end
-        patch(entry.data, entry, spec, st)
+        patch(entry.data, entry, spec,
+              math.floor(frame / (spec.period or 20)) % n)
       end
       entry.image:replacePixels(entry.data)
     end)
@@ -629,9 +688,105 @@ function TerrainAtlas.animate(map, colors, base, baked)
   return entry.image
 end
 
+-- ---------------------------------------------------------------------------
+-- GEN 3.
+--
+-- The machinery above rewrites an 8x8 slot from a spec that names ONE atlas
+-- cell, which is the Game Boy's animation model.  Emerald's is a run of tile
+-- GRAPHICS DMA'd into VRAM on a timer, and one such tile is reached by
+-- hundreds of cells in the relaid sheet -- so the specs are useless here and
+-- `Gen3.animPatchesForTileset` precomputes the whole set of moving slots as
+-- one strip per step instead (see lib/Gen3.lua).  Applying a step is a paste
+-- per slot; nothing here re-bakes a sheet and nothing rebuilds a mesh.
+--
+-- Keyed by TILESET, not by map: a Gen 3 sheet is a property of the pair and
+-- carries its own colour, so there is no palette in the key and no per-map
+-- copy to evict.  Route 104, Route 103 and Petalburg share one entry.
+--
+-- The frozen sea and the frozen flower beds were TWO faults, not one: the
+-- cartridge's animation frames were never extracted (the engine's
+-- RomExtractorGen3 stage), and this line returned the static sheet
+-- unconditionally so that even with the frames in hand nothing here would
+-- have moved.  This is the second one.
+-- ---------------------------------------------------------------------------
+local gen3Anim = {}     -- tileset id -> entry, or false once given up on
+
+local function gen3Animate(map, base)
+  local tileset = map.tileset
+  local key = tostring(tileset and tileset.id)
+  local entry = gen3Anim[key]
+  if entry == false then return nil end
+  if entry == nil then
+    local okPatch, patches = pcall(Gen3.animPatchesForTileset, tileset)
+    if not (okPatch and patches) then
+      -- no frames in the data (every cartridge dump taken before the
+      -- extractor learned to read them), or no pixel access at all: a
+      -- verdict, not a miss, because neither changes while the game runs
+      gen3Anim[key] = false
+      return nil
+    end
+    local src = Gen3.atlasDataForTileset(tileset)
+    if not (src and love.image and love.image.newImageData
+            and base.replacePixels) then
+      gen3Anim[key] = false
+      return nil
+    end
+    local okNew, built = pcall(function()
+      local w, h = src:getDimensions()
+      -- a PRIVATE copy for the same reason the Gen 1/2 path keeps one: the
+      -- base is what `Gen3.atlasForTileset` hands to the shape passes and to
+      -- anything else sampling the static art, and patching it in place would
+      -- animate those too
+      local data = love.image.newImageData(w, h)
+      data:paste(src, 0, 0, 0, 0, w, h)
+      local image = love.graphics.newImage(data)
+      if image.setFilter then pcall(image.setFilter, image, "nearest", "nearest") end
+      local info = Gen3.atlasInfoFor(tileset)
+      return { data = data, image = image, patches = patches,
+               perRow = (info and info.perRow) or 16, w = w, h = h,
+               step = nil }
+    end)
+    if not (okNew and built) then
+      gen3Anim[key] = false
+      return nil
+    end
+    entry = built
+    gen3Anim[key] = entry
+  end
+
+  local frame = animFrame()
+  local step = math.floor(frame / math.max(1, entry.patches.period))
+                 % entry.patches.steps
+  if step ~= entry.step then
+    entry.step = step
+    local ok = pcall(function()
+      local strip = entry.patches.strips[step + 1]
+      local perRow = entry.perRow
+      for i, t in ipairs(entry.patches.slots) do
+        local dx, dy = (t % perRow) * 8, math.floor(t / perRow) * 8
+        -- a slot past the end of the sheet is a pair whose id space and
+        -- metatile count disagree; skip it rather than let paste raise
+        if dx + 8 <= entry.w and dy + 8 <= entry.h then
+          entry.data:paste(strip, dx, dy, (i - 1) * 8, 0, 8, 8)
+        end
+      end
+      entry.image:replacePixels(entry.data)
+    end)
+    if not ok then
+      gen3Anim[key] = false
+      return nil
+    end
+  end
+  return entry.image
+end
+
 function TerrainAtlas.forMap(map, colors)
   local base, baked = staticAtlas(map, colors)
   if not base then return nil end
+  -- Gen 3 animates by a different mechanism and through its own arm; the
+  -- static sheet is the fallback whenever the frames are not in the data,
+  -- which is exactly the picture this mod drew before g3-anim-261.
+  if Gen3.mapIsGen3(map) then return gen3Animate(map, base) or base end
   return TerrainAtlas.animate(map, colors, base, baked) or base
 end
 
@@ -694,6 +849,12 @@ function TerrainAtlas.invalidate()
   cache = {}
   cacheData = {}
   attempts = {}
+  for _, entry in pairs(gen3Anim) do
+    if entry and entry.image and entry.image.release then
+      pcall(entry.image.release, entry.image)
+    end
+  end
+  gen3Anim = {}
   for _, entry in pairs(animated) do
     if entry and entry.image and entry.image.release then
       pcall(entry.image.release, entry.image)

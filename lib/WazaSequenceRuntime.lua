@@ -1,8 +1,8 @@
 local V=...
 local MoveFXVM=V and V.MoveFXVM
 local W={
-  version=9,
-  source="GC6E01 retail-node-layout dependency-timed 60 Hz Waza lifecycle scheduler",
+  version=10,
+  source="GC6E01 retail-node-layout dependency-timed 60 Hz Waza lifecycle scheduler + retail same-frame entry ordering",
   handlers={},active={},serial=0,trace={},errors={},last=nil,
 }
 
@@ -34,7 +34,7 @@ local function phaseEntries(spec,role)
     if roleForPhase(phase.name)==role then
       runtimePhase=runtimePhase+1
       local namespace=runtimePhase*100000
-      for _,entry in ipairs(phase.entries or {}) do
+      for sourceOrder,entry in ipairs(phase.entries or {}) do
         local copy={}
         for k,v in pairs(entry) do copy[k]=v end
         copy.phase=copy.phase or phase.name
@@ -47,6 +47,10 @@ local function phaseEntries(spec,role)
         copy.runtimeIdentifier=namespace+sourceId
         copy.runtimeAnchorEntry=sourceAnchor>0 and (namespace+sourceAnchor) or 0
         copy.runtimePhaseOrder=runtimePhase
+        -- wazaSequenceLoadData links rows in serialized source order.  The
+        -- identifier is an anchor key, not a scheduling-order key, so never
+        -- sort source rows by identifier before resolving their authored time.
+        copy.runtimeSourceOrder=sourceOrder
         out[#out+1]=copy
       end
     end
@@ -55,9 +59,9 @@ local function phaseEntries(spec,role)
     local ap=tonumber(a.runtimePhaseOrder) or 0
     local bp=tonumber(b.runtimePhaseOrder) or 0
     if ap~=bp then return ap<bp end
-    local ai=tonumber(a.identifier) or tonumber(a.index) or 0
-    local bi=tonumber(b.identifier) or tonumber(b.index) or 0
-    if ai~=bi then return ai<bi end
+    local ao=tonumber(a.runtimeSourceOrder) or tonumber(a.index) or 0
+    local bo=tonumber(b.runtimeSourceOrder) or tonumber(b.index) or 0
+    if ao~=bo then return ao<bo end
     return (tonumber(a.offset) or 0)<(tonumber(b.offset) or 0)
   end)
   return out
@@ -99,14 +103,15 @@ end
 -- Colosseum then shifts the entire sequence if any row would begin negative.
 local function resolveEntryStarts(entries,globalTimingPoints)
   local byId={}; local rows={}; local unresolved=0; local details={};local minStart=math.huge; local maxStart=0
-  for _,entry in ipairs(entries or {}) do
+  for sourceOrder,entry in ipairs(entries or {}) do
     local id=tonumber(entry.runtimeIdentifier) or tonumber(entry.identifier) or tonumber(entry.index) or (#rows+1)
     local anchor=math.floor(tonumber(entry.runtimeAnchorEntry) or tonumber(entry.anchorEntry) or 0)
     local localIdx=pointIndex(entry.localPoint)
     local anchorIdx=pointIndex(entry.anchorPoint)
     local localValue=entryPoint(entry,localIdx) or 0
     local row={entry=entry,id=id,anchor=anchor,localIdx=localIdx,anchorIdx=anchorIdx,localValue=localValue,
-      localPoint=localIdx,anchorPoint=anchorIdx,anchorEntry=anchor}
+      localPoint=localIdx,anchorPoint=anchorIdx,anchorEntry=anchor,
+      sourceOrder=tonumber(entry.runtimeSourceOrder) or sourceOrder}
     rows[#rows+1]=row
     if byId[id] then
       row.timingFallback="duplicate-entry-identifier"
@@ -167,6 +172,21 @@ local function resolveEntryStarts(entries,globalTimingPoints)
     row.entry.timingFallback=row.timingFallback
     if row.startFrame>maxStart then maxStart=row.startFrame end
   end
+  -- Retail wazaSequenceEntryLink maintains the live list by resolved start
+  -- time, not by identifier.  Same-time type-6 owner/controller rows are
+  -- inserted ahead of every other row at that frame; repeated type-6 inserts
+  -- therefore appear in reverse serialized order.  Other same-frame entries
+  -- retain serialized order.  This ordering matters because controller/camera
+  -- state can change the coordinate/visibility context consumed by particles,
+  -- models and sound launched on the very same 60 Hz tick.
+  table.sort(rows,function(a,b)
+    if a.startFrame~=b.startFrame then return a.startFrame<b.startFrame end
+    local a6=tonumber(a.entry and a.entry.entryType)==6
+    local b6=tonumber(b.entry and b.entry.entryType)==6
+    if a6~=b6 then return a6 end
+    if a6 then return (tonumber(a.sourceOrder) or 0)>(tonumber(b.sourceOrder) or 0) end
+    return (tonumber(a.sourceOrder) or 0)<(tonumber(b.sourceOrder) or 0)
+  end)
   return rows,{shift=shift,unresolved=unresolved,unresolvedDetails=details,maxStart=maxStart,minUnshifted=minStart}
 end
 
@@ -306,19 +326,24 @@ end
 local function fireDue(ctx,inst,frame)
   local allStarted=true
   for _,state in ipairs(inst.entries) do
+    local startedNow=false
     if not state.started and frame>=state.startFrame then
       state.started=true
+      state.startedFrame=frame
+      startedNow=true
       state.claimed=callHandlers(ctx,inst,state,"start") or state.claimed
       state.hasUpdate=hasUpdateHandler(state)
-      if not state.hasUpdate then
-        state.finished=true
-        -- Retail has an explicit EntryStart/EntryUpdate/EntryStop lifecycle.
-        -- A start-only entry therefore reaches its Stop hook immediately after
-        -- launch; long-lived objects (GPT1 particles) retain their own lifetime.
-        closeState(ctx,inst,state,"start-only-entry-complete",false)
-      end
     end
     if not state.started then allStarted=false
+    elseif startedNow then
+      -- Retail wazaSequenceUpdate dispatches a node by its state at the start of
+      -- this tick. A state-0 node that starts successfully is not revisited as
+      -- state 1 until the NEXT update tick. That one-frame separation is
+      -- observable for zero-duration type-6 owner controllers and for any
+      -- particle/model/effect whose first update mutates or completes it.
+    elseif not state.hasUpdate and not state.finished then
+      state.finished=true
+      closeState(ctx,inst,state,"start-only-entry-next-tick-complete",false)
     elseif state.hasUpdate and not state.finished then
       local any=false;local keep=false
       for _,record in ipairs(handlerRecords(state.entry)) do
@@ -450,7 +475,7 @@ function W:status()
   end
   return {version=self.version,source=self.source,active=active,handlerKinds=(function()
     local out={};for k,v in pairs(self.handlers) do out[k]=#v end;return out end)(),trace=self.trace,errors=self.errors,
-    timingModel="retail anchorEntry + timingPoint dependency graph; negative-start normalization",ownership="full-role executable-chain"}
+    timingModel="retail anchorEntry + timingPoint dependency graph; negative-start normalization; wazaSequenceEntryLink same-frame type-6 ordering",ownership="full-role executable-chain"}
 end
 
 W.resolveEntryStarts=resolveEntryStarts

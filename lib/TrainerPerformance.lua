@@ -26,8 +26,8 @@ local PROFILES={
   miror_b={label="THEATRICAL",sourceAuthority=1,continuity=.94,tempo=.88,energy=1.22,composure=.82,lead=-1,commandTurn=.078,sendTurn=.106,openingTurn=.074,lossTurn=-.062,victoryTurn=.090,gesture=1.22,reaction=1.12,weight=1.10,idle=1.30,head=1.22,bounce=1.28},
 }
 
-local DURATIONS={opening=1.92,throw=1.48,sendout=1.48,recall=1.18,command=1.20,brace=1.04,concern=1.22,frustration=2.62,victory=1.78,defeat=2.48}
-local PRIORITY={brace=1,concern=2,command=2,opening=3,throw=4,sendout=4,recall=4,victory=5,defeat=6,frustration=6}
+local DURATIONS={opening=1.92,throw=1.48,sendout=1.48,recall=1.18,command=1.20,approval=1.16,brace=1.04,concern=1.22,frustration=2.62,victory=1.78,defeat=2.48}
+local PRIORITY={brace=1,concern=2,command=2,approval=2,opening=3,throw=4,sendout=4,recall=4,victory=5,defeat=6,frustration=6}
 
 local function cloneProfile(id)
   id=tostring(id or ""):lower()
@@ -55,20 +55,14 @@ local function battleSpeed(ctx)
   if not speed or speed~=speed or speed<1 then speed=1 end
   return speed
 end
--- Each actor supplies its own clock. Repeated fast-forward logic ticks in one
--- rendered frame cannot spend the same wall time again. Long stalls are capped
--- so resuming does not leap through a whole throw/reaction in one update.
+-- Trainer choreography uses the same deterministic fixed-step clock as battle
+-- logic, Pokemon actors and MoveFX. Fast-forward supplies more 60 Hz calls per
+-- rendered frame, so throws/reactions accelerate coherently instead of becoming
+-- a wall-clock gate that stalls an otherwise accelerated battle.
 function A.realDt(ctx,dt,clock)
   local requested=math.max(0,tonumber(dt) or 0)
-  if not clock then return math.min(requested,.05) end
-  local timer=love and love.timer and love.timer.getTime
-  local now=timer and timer()
-  if type(now)=="number" and now==now then
-    local previous=clock.now;clock.now=now
-    if requested==0 or not previous or now<previous then return 0 end
-    return math.min(math.max(0,now-previous),.05)
-  end
-  return math.min(requested/math.max(1,battleSpeed(ctx)),.05)
+  if clock then clock.fixed=(tonumber(clock.fixed) or 0)+requested end
+  return math.min(requested,.05)
 end
 function A.speed(ctx) return battleSpeed(ctx) end
 
@@ -100,7 +94,7 @@ function A.damageReaction(damage,maxhp)
 end
 function A.terminal(kind) return kind=="defeat" or kind=="victory" end
 function A.queueReaction(pending,kind,strength)
-  if kind~="brace" and kind~="concern" and kind~="frustration" then return pending end
+  if kind~="brace" and kind~="concern" and kind~="frustration" and kind~="approval" then return pending end
   if not pending or A.priority(kind)>A.priority(pending.kind) then return {kind=kind,strength=strength or 1} end
   return pending
 end
@@ -125,7 +119,7 @@ end
 -- choosing one dominant semantic pose at a time.  At most two neighboring
 -- source poses are blended at once, so every intermediate silhouette lies on
 -- the path between adjacent frames from the SAME Colosseum clip.
-local GESTURE_KIND={opening=true,throw=true,sendout=true,recall=true,command=true,victory=true}
+local GESTURE_KIND={opening=true,throw=true,sendout=true,recall=true,command=true,approval=true,victory=true}
 local REACTION_KIND={brace=true,concern=true,frustration=true,defeat=true}
 local function sourceTimeline(id,kind,t,strength)
   local p=cloneProfile(id)
@@ -217,6 +211,14 @@ function A.motion(id,kind,t,strength,side)
     elseif u<.58 then m.command=.78*g;m.arm=.12*g;m.turn=cmdTurn*1.12;m.forward=-.046*w;m.lean=.034*w;m.look=.10
     elseif u<.84 then local q=smooth((u-.58)/.26);m.command=.78*g*(1-q);m.arm=.12*g*(1-q);m.settle=.46*q;m.turn=cmdTurn*1.12*(1-q);m.forward=-.046*w*(1-q);m.lean=.034*w*(1-q)-.010*q;m.look=.10*(1-q)
     else local q=1-smooth((u-.84)/.16);m.settle=.48*q;m.look=.025*q end
+  elseif kind=="approval" then
+    -- Short positive acknowledgement after the opponent's faint has visually
+    -- completed. The dense source gesture track owns the body when available;
+    -- this restrained semantic curve is only a legacy/fail-open root layer.
+    if u<.16 then local q=smooth(u/.16);m.command=.34*g*q;m.shift=-.08*w*q;m.turn=winTurn*.45*q;m.look=.08*q
+    elseif u<.46 then local q=smooth((u-.16)/.30);m.command=(.34+.16*q)*g;m.arm=.12*g*q;m.shift=-.08*w;m.turn=winTurn*.45;m.look=.10;m.bob=.006*p.bounce*q
+    elseif u<.72 then m.command=.50*g;m.arm=.12*g;m.shift=-.08*w;m.turn=winTurn*.45;m.look=.10;m.bob=.006*p.bounce
+    else local q=1-smooth((u-.72)/.28);m.command=.50*g*q;m.arm=.12*g*q;m.settle=.34*(1-q);m.shift=-.08*w*q;m.turn=winTurn*.45*q;m.look=.10*q;m.bob=.006*p.bounce*q end
   elseif kind=="brace" then
     if u<.10 then local q=smooth(u/.10);m.brace=.72*r*q;m.forward=.016*w*q;m.bob=-.010*r*q;m.lean=-.020*r*q
     elseif u<.30 then local q=smooth((u-.10)/.20);m.brace=(.72+.08*q)*r;m.shift=-.10*w*q;m.forward=.016*w;m.bob=-.010*r;m.lean=-.020*r-.010*r*q;m.look=-.05*q
@@ -400,5 +402,5 @@ function A.root(id,motion)
     compression=(motion.brace or 0)*.020*residual,
   }
 end
-function A.status() return {version=14,vocabulary={"opening","sendout","recall","command","brace","concern","frustration","victory","defeat"},profiles=PROFILES,clock="wall-clock-presentation",sharedPlayerEnemy=true,statefulContinuity=true,sourceAuthority=true,sourcePoseBank="native-a1-full-frame-tracks",sourcePlayback="adjacent-authored-frame-interpolation",proceduralRoot="one-percent-continuity-only",randomVariation=false} end
+function A.status() return {version=15,vocabulary={"opening","sendout","recall","command","approval","brace","concern","frustration","victory","defeat"},profiles=PROFILES,clock="battle-fixed-step-presentation",sharedPlayerEnemy=true,statefulContinuity=true,sourceAuthority=true,sourcePoseBank="native-a1-full-frame-tracks",sourcePlayback="adjacent-authored-frame-interpolation",proceduralRoot="one-percent-continuity-only",randomVariation=false} end
 return A

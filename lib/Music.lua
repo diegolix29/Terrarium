@@ -23,6 +23,12 @@ local THEMES={
   {id="link2",label="BATTLE MODE 2",seq="tool_battle2",song="COLOSSEUM_ENV_LINK2",intro="assets/audio/themes/link_2_intro.wav",loop="assets/audio/themes/link_2_loop.wav"},
   {id="link3",label="BATTLE MODE 3",seq="tool_battle3",song="COLOSSEUM_ENV_LINK3",intro="assets/audio/themes/link_3_intro.wav",loop="assets/audio/themes/link_3_loop.wav"},
 }
+local ENVIRONMENT={
+  pokemon_center={id="pokemon_center",label="POKEMON CENTER",song="COLOSSEUM_ENV_POKEMON_CENTER",
+    intro="assets/audio/environment/pokemon_center_intro.wav",loop="assets/audio/environment/pokemon_center_loop.wav"},
+  mt_battle_lobby={id="mt_battle_lobby",label="COLOSSEUM MAIN MENU / MT. BATTLE SETUP",song="COLOSSEUM_ENV_MT_BATTLE_LOBBY",
+    intro="assets/audio/environment/mt_battle_main_menu_intro.wav",loop="assets/audio/environment/mt_battle_main_menu_loop.wav"},
+}
 local OPTIONS={{id="random",label="RANDOM"}}
 for _,t in ipairs(THEMES) do OPTIONS[#OPTIONS+1]=t end
 OPTIONS[#OPTIONS+1]={id="original",label="ORIGINAL / OFF",original=true}
@@ -61,6 +67,9 @@ local function themeCached(theme)
   -- selected theme is actually materialized.
   return GeneratedAssets.exists(theme.intro) and GeneratedAssets.exists(theme.loop)
 end
+local function environmentCached(theme)
+  return theme and GeneratedAssets.exists(theme.intro) and GeneratedAssets.exists(theme.loop) or false
+end
 local function registerTheme(game,theme)
   if not theme or not themeCached(theme) then return false end
   game=game or gameRef or (modRef and modRef.game)
@@ -71,6 +80,44 @@ local function registerTheme(game,theme)
   if not (intro and loop) then return false end
   songs[theme.song]={file=intro,loopFile=loop}
   return true
+end
+local function registerEnvironment(game,theme)
+  if not theme or not environmentCached(theme) then return false end
+  game=game or gameRef or (modRef and modRef.game)
+  local data=game and game.data;local songs=data and data.audio and data.audio.songs
+  if not songs then return false end
+  if songs[theme.song] then return true end
+  local intro=assetPath(modRef,theme.intro);local loop=assetPath(modRef,theme.loop)
+  if not (intro and loop) then return false end
+  songs[theme.song]={file=intro,loopFile=loop}
+  return true
+end
+local function optionEnabled(key,default)
+  local opts=modRef and modRef.options
+  if opts and type(opts.get)=="function" then
+    local ok,value=pcall(opts.get,opts,key)
+    if ok and value~=nil then return value~=false end
+  end
+  return default~=false
+end
+local function pokemonCenterRequest(song,ctx,game)
+  local s=tostring(song or "")
+  local centerSong=s=="Music_Pokecenter" or s=="Music_PokemonCenter"
+  if type(ctx)=="table" then
+    local reason=tostring(ctx.reason or ""):lower()
+    if reason=="pokecenter" or reason=="pokemon_center" then return true end
+  end
+  if not centerSong then return false end
+  -- Gen I reuses Music_Pokecenter for Marts and several other interiors, so
+  -- replacing the song label globally would turn the Colosseum Pokemon Center
+  -- theme into a Celadon Department Store theme too. Scope the replacement to
+  -- an actual POKECENTER map. restoreMap() omits mapId from its context, so use
+  -- the live overworld map as the fallback when returning from Mt. Battle.
+  local mapId=type(ctx)=="table" and ctx.mapId or nil
+  if mapId==nil and game and game.overworld and game.overworld.map then
+    mapId=game.overworld.map.id
+  end
+  return tostring(mapId or ""):upper():find("POKECENTER",1,true)~=nil
 end
 local function settings(game)
   if not (game and game.save) then return {music="normal"} end
@@ -145,7 +192,16 @@ function M.install(mod)
   if hookInstalled then return installed end
   if not (mod and mod.hooks and type(mod.hooks.wrap)=="function") then return false end
   mod.hooks:wrap("music.select",function(next,song,ctx)
-    local selected=next(song,ctx);local game=(modRef and modRef.game) or gameRef;local mode=settings(game).music;local kind=requestKind(selected,ctx) or requestKind(song,ctx)
+    local selected=next(song,ctx);local game=(modRef and modRef.game) or gameRef
+    -- The Pokemon Center replacement is independent from the battle-theme
+    -- selector. It can be toggled off without changing battle music, and it
+    -- never owns the dedicated Mt. Battle setup/lobby route below.
+    if optionEnabled("colosseumPokemonCenterMusic",true)
+        and (pokemonCenterRequest(selected,ctx,game) or pokemonCenterRequest(song,ctx,game)) then
+      local center=ENVIRONMENT.pokemon_center
+      if registerEnvironment(game,center) then return center.song end
+    end
+    local mode=settings(game).music;local kind=requestKind(selected,ctx) or requestKind(song,ctx)
     if mode=="original" then randomBattleTheme=nil;return selected end
     if mode=="random" then
       if kind=="battle" then
@@ -170,6 +226,26 @@ function M.install(mod)
   hookInstalled=true;installed=ensureSongs(gameRef) or installed;return installed
 end
 function M.attachGame(game) gameRef=game or gameRef;return ensureSongs(gameRef) end
+function M.pokemonCenterReplacementEnabled()
+  return optionEnabled("colosseumPokemonCenterMusic",true)
+end
+function M.playMtBattleLobby(game)
+  game=game or gameRef;local theme=ENVIRONMENT.mt_battle_lobby
+  if not (game and registerEnvironment(game,theme)) then return false,"Mt. Battle main-menu source audio unavailable" end
+  local ok,NativeMusic=pcall(require,"src.core.Music")
+  if not (ok and NativeMusic and type(NativeMusic.play)=="function") then return false,"native Music.play unavailable" end
+  local data=game.data
+  if not data then return false,"game data unavailable" end
+  NativeMusic.play(data,theme.song,true,{reason="mt_battle_lobby"})
+  return true
+end
+function M.restoreOverworldMusic(game)
+  game=game or gameRef
+  local ok,NativeMusic=pcall(require,"src.core.Music")
+  if not (ok and NativeMusic and type(NativeMusic.restoreMap)=="function" and game and game.data) then return false end
+  NativeMusic.restoreMap(game.data)
+  return true
+end
 function M.getMode(game) return settings(game or gameRef).music end
 function M.setMode(game,mode)
   game=game or gameRef;local s=settings(game);if BY_ID[mode] then s.music=mode end;randomBattleTheme=nil;ensureSongs(game);return s.music
@@ -187,6 +263,9 @@ function M.status()
     local ready=themeCached(t);if ready then available=available+1 end
     list[#list+1]={id=t.id,label=t.label,sequence=t.seq,song=t.song,available=ready}
   end
-  return {installed=installed,hookInstalled=hookInstalled,availableThemes=available,totalThemes=#THEMES,mode=M.getMode(gameRef),modeLabel=M.themeLabel(gameRef),themeOptions=M.themeOptions(gameRef),themes=list,randomChoice=randomBattleTheme and randomBattleTheme.id or nil,renderer="CBE canonical v9 source-audio cache / lazy runtime theme residency / cross-platform MusyX source compiler",sourceGroup="snd_music"}
+  return {installed=installed,hookInstalled=hookInstalled,availableThemes=available,totalThemes=#THEMES,mode=M.getMode(gameRef),modeLabel=M.themeLabel(gameRef),themeOptions=M.themeOptions(gameRef),themes=list,randomChoice=randomBattleTheme and randomBattleTheme.id or nil,
+    pokemonCenterReplacement=M.pokemonCenterReplacementEnabled(),
+    environment={pokemonCenter=environmentCached(ENVIRONMENT.pokemon_center),mtBattleLobby=environmentCached(ENVIRONMENT.mt_battle_lobby)},
+    renderer="CBE canonical v9 source-audio cache / lazy runtime theme residency / cross-platform MusyX source compiler",sourceGroup="snd_music"}
 end
 return M

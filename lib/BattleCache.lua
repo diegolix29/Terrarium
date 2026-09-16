@@ -1,11 +1,18 @@
 -- Main-menu preparation owns an opaque state; runtime readiness never does.
--- Cold runtime work retains the last game frame and completes before native
--- battle updates. No turns, HP, rewards, save data or sprite options are changed.
+-- Cooperative desktop readiness queues into the shared post-frame worker, not
+-- a synchronous drain hidden inside BattleState.update. Mobile retains its live
+-- native progression policy:
+-- cooperative prewarm owns that path so a cold switch-in cannot freeze the
+-- authoritative battle queue on a send-out message.
+-- No turns, HP, rewards, save data or sprite options are changed.
 -- Errors never authorize another Pokemon artwork provider.
 local V=...
 local A,W=V.PokemonActors,V.WorkBudget
-local C={version=7}
+local G=V.GeneratedAssets
+local C={version=9}
 local Planner=V.QuickCachePlanner
+local Dex=V.ColosseumDex
+local mtBattleCompletedIdentity=nil
 local lastInventory=nil
 local CacheScreen=V.CacheScreen
 local view=nil
@@ -17,8 +24,78 @@ local pendingTitle=nil
 local renderErrors=setmetatable({}, {__mode="k"})
 local runtime=setmetatable({}, {__mode="k"})
 local attempted=setmetatable({}, {__mode='k'})
+local REUSE_MARKER_PATH='build/battle_cache_reuse_v1.complete'
+local REUSE_MARKER='cbe-battle-cache-reuse=1\ncontract=required-models-only\n'
+local HARD_CACHE_MARKERS={'build/hard_cache_team_v1.complete','build/hard_cache_v5.complete',
+  'build/hard_cache_catalog_151_v1.complete','build/hard_cache_catalog_251_v1.complete','build/hard_cache_catalog_v1.complete','build/hard_cache_catalog_v2.complete','build/hard_cache_catalog_v3.complete'}
+local CATALOG_MAX=386
 local function clock()return love and love.timer and love.timer.getTime and love.timer.getTime() or os.clock()end
+-- Platform identity is invariant for the process. Cache it once instead of
+-- crossing LÖVE's system bridge every cache-screen frame/slice. This is
+-- especially visible on Android where frameBudgetMs() is called from both the
+-- reuse probe and the foreground preparation loop.
+local function platformOS()
+  if love and love.system and type(love.system.getOS)=='function' then
+    local ok,value=pcall(love.system.getOS)
+    if ok and value then return tostring(value) end
+  end
+  return 'Unknown'
+end
+local PLATFORM_OS=platformOS()
+local MOBILE_RUNTIME=PLATFORM_OS=='Android' or PLATFORM_OS=='iOS'
 local function req(n)return (V.engineRequire or require)(n)end
+local function generatedExists(path)
+  if G and type(G.exists)=='function' then
+    local ok,value=pcall(G.exists,path);if ok then return value==true end
+  end
+  local cache=V.mod and V.mod.cache
+  if cache and type(cache.read)=='function' then
+    local ok,value=pcall(cache.read,cache,path);return ok and type(value)=='string'
+  end
+  return false
+end
+-- This marker records a user/runtime history fact, not file completeness. Once a
+-- model-cache pass has completed successfully, future title entries may prefer
+-- the narrow required-team path instead of reopening the cache-mode chooser.
+-- prepareRequiredModel/loadScene still validate the exact current team, so a
+-- stale/damaged artifact is repaired rather than trusted from this marker.
+local function reuseCertified()
+  if generatedExists(REUSE_MARKER_PATH) then return true,'model-cache' end
+  for _,path in ipairs(HARD_CACHE_MARKERS) do
+    if generatedExists(path) then return true,'hard-cache' end
+  end
+  return false
+end
+local function persistReusePreference(refreshRegistry,deferRegistry)
+  local ready=reuseCertified()
+  local written=false
+  if ready and not refreshRegistry then return true end
+  if not ready then
+    if G and type(G.write)=='function' then
+      local ok,value=pcall(G.write,REUSE_MARKER_PATH,REUSE_MARKER)
+      written=ok and value~=false and value~=nil
+    end
+    if not written then
+      local cache=V.mod and V.mod.cache
+      if cache and type(cache.write)=='function' then
+        local ok,value=pcall(cache.write,cache,REUSE_MARKER_PATH,REUSE_MARKER)
+        written=ok and value~=false and value~=nil
+      end
+    end
+  end
+  if (written or refreshRegistry) and G and type(G.saveInfoRegistry)=='function' then
+    -- Persist the positive metadata learned by this preparation pass. A cold
+    -- battle repair already paid model I/O here; do not append a full registry
+    -- serialization to that same boundary. In-memory metadata is authoritative
+    -- immediately, while ResidentPrewarm persists it on a later stable frame.
+    if deferRegistry and V.ResidentPrewarm and type(V.ResidentPrewarm.deferInfoRegistrySave)=='function' then
+      pcall(V.ResidentPrewarm.deferInfoRegistrySave,{modelReuse=true,revision=1})
+    else
+      pcall(G.saveInfoRegistry,{modelReuse=true,revision=1})
+    end
+  end
+  return ready or written
+end
 function C.enabled(game,save)
   save=save or (game and game.save)
   local p=save and save.colosseumBattle
@@ -26,14 +103,13 @@ function C.enabled(game,save)
 end
 function C.plan()
   local rows={}
-  for dex=1,251 do
+  for dex=1,CATALOG_MAX do
     rows[#rows+1]={dex=dex,variant='normal'}
-    rows[#rows+1]={dex=dex,variant='shiny'}
   end
   return rows
 end
--- Required startup warms only the current team. Manual Quick Start separately
--- selects 30 NEW source-model units based on save progress and disk completeness.
+-- Required startup warms only the current team. Manual Smart Cache separately
+-- selects a user-chosen batch of NEW source-model units based on save progress and disk completeness.
 local function generation()
   return V.GenerationCompat and V.GenerationCompat.current() or 1
 end
@@ -54,9 +130,13 @@ local function isEgg(mon)
 end
 function C.startupPlan(game,save,newGame)
   local rows,seen={},{}
-  local function add(dex,variant,why)
-    local row={dex=dex,variant=variant or 'normal',error=why}
+  local function add(dex,variant,why,battler)
+    local row={dex=dex,variant=variant or 'normal',error=why,battler=battler}
     local key=why and ('error:'..tostring(why)) or rowKey(row)
+    -- Same-species party members may carry different moves and therefore request
+    -- different retail PKX/Waza action rows. Keep each real battler in the narrow
+    -- startup plan; fullPlan still deduplicates them by model identity below.
+    if battler then key=key..':battler:'..tostring(battler) end
     if not seen[key] then rows[#rows+1]=row;seen[key]=true end
   end
   local party=not newGame and save and (save.party or save.pokemon or save.team)
@@ -67,7 +147,11 @@ function C.startupPlan(game,save,newGame)
       local mon=party[i]
       if not isEgg(mon) then
         local dex,variant=V.ModelIdentity.resolve(game,mon)
-        if dex then add(dex,variant) else add(nil,'normal',variant) end
+        -- The narrow startup path must prepare the ACTUAL current-party variant.
+        -- Hypothetical catalog shinies can remain on-demand, but moving an owned
+        -- shiny back onto its first visible battle/menu frame defeats the point
+        -- of a persistent cache and is especially expensive on Android.
+        if dex then add(dex,variant,nil,mon) else add(nil,'normal',variant,nil) end
       end
     end
   end
@@ -81,6 +165,23 @@ function C.startupPlan(game,save,newGame)
 end
 -- Compatibility for existing consumers of the old team-only plan API.
 C.quickPlan=C.startupPlan
+
+-- Mt. Battle adds generations the cartridge itself does not normally need.
+-- Gen 1 installs Johto + Hoenn (152-386); Gen 2 installs Hoenn (252-386).
+-- Required Mt. Battle installation is normal-model only. Dedicated rare/shiny
+-- source variants are intentionally omitted and remain on-demand.
+function C.mtBattlePlan(game)
+  if not (Dex and type(Dex.supported)=="function") then return nil,"Colosseum model catalog unavailable" end
+  local first=generation()==1 and 152 or 252
+  local rows={}
+  for dex=first,386 do
+    if Dex.supported(dex) then
+      rows[#rows+1]={dex=dex,variant="normal",mtBattle=true}
+    end
+  end
+  return rows
+end
+
 function C.fullPlan(game,save)
   local rows,seen={},{}
   local function add(row)
@@ -92,11 +193,13 @@ function C.fullPlan(game,save)
   for _,row in ipairs(C.plan()) do add(row) end
   return rows
 end
-function C.quickReady(rows)
+function C.quickReady(rows,game)
   local identity=A.sessionCacheIdentity()
   for _,row in ipairs(rows or {}) do
     if row.error or quickValidated[rowKey(row)]~=identity
-        or not A.peek('startup',row.dex,row.variant).resident then return false end
+        or not A.peek('startup',row.dex,row.variant).resident
+        or (type(A.requiredModelReady)=="function"
+          and not A.requiredModelReady(row.dex,row.variant,game,row.battler)) then return false end
   end
   return true
 end
@@ -110,11 +213,11 @@ function C.status()
     mode=current and current.mode or 'idle',done=current and (current.index-1) or 0,
     total=current and #(current.rows or {}) or 0,error=active and active.error,
     planning=active and active.planning==true or false,
-    batchLimit=Planner and Planner.batchSize or 30,
+    batchLimit=(active and active.batchLimit) or (current and current.batchLimit) or (Planner and Planner.batchSize) or 30,
     cachedModels=lastInventory and lastInventory.cachedModels,
     cachedAppearances=lastInventory and lastInventory.cachedAppearances,
-    totalModels=270,totalAppearances=502,
-    catalogDiskReady=lastInventory and lastInventory.cachedModels==270 or false,
+    totalModels=CATALOG_MAX,totalAppearances=CATALOG_MAX,
+    catalogDiskReady=lastInventory and lastInventory.cachedModels==CATALOG_MAX or false,
     profile=lastInventory and lastInventory.profile,
     label=current and current.label,resident=A.sessionResidentCount and A.sessionResidentCount() or 0,
     elapsed=current and math.max(0,(current.finishedAt or clock())-(current.startedAt or clock())) or 0,
@@ -123,13 +226,12 @@ function C.status()
     runtimeLoadingScreen=false}
 end
 function C.frameBudgetMs()
-  local ok,osName=pcall(function()return love.system.getOS()end)
-  return ok and (osName=='Android' or osName=='iOS') and 8 or 12
+  return MOBILE_RUNTIME and 8 or 12
 end
--- Any title/cache chooser may advertise REUSE CACHE only after proving that
--- at least one full Quick Start quota (30 model units) already
--- exists on disk. This is a read-only metadata/sidecar check and is deliberately
--- separate from the 30-new Quick Start planner. It never prepares a new model.
+-- Older installs without the persistent reuse preference can still advertise
+-- REUSE CACHE after proving that at least one full Quick Start quota (30 model
+-- units) exists on disk. This migration probe is read-only and never prepares a
+-- new model. Once a successful cache pass completes, later launches skip it.
 local function stepReuseProbe(self)
   if not (self and self.selector) or self.reuseChecked then return end
   if not (Planner and Planner.reuseInfo and A and A.persistentModelState and W) then
@@ -140,7 +242,8 @@ local function stepReuseProbe(self)
   self.reuseNextAt=started+1/60
   if not self.reuseTask then
     self.reuseTask=W.new(function()
-      return Planner.reuseInfo(A.persistentModelState,function(label)
+      local probe=type(A.inventoryModelState)=="function" and A.inventoryModelState or A.persistentModelState
+      return Planner.reuseInfo(probe,function(label)
         self.reuseLabel=label;W.checkpoint(label)
       end,Planner.batchSize or 30)
     end,'Checking existing cache for reuse')
@@ -210,9 +313,9 @@ function State:update()
     end
     local firstStartupKey=self.reuseEligible and 'reuse' or 'startup'
     local keys
-    if self.startupRequest then keys={firstStartupKey,'quick','full','b'}
-    elseif self.reuseEligible then keys={'reuse','quick','full','b'}
-    else keys={'quick','full','b'} end
+    if self.startupRequest then keys={firstStartupKey,'quick','batch60','batch120','full','b'}
+    elseif self.reuseEligible then keys={'reuse','quick','batch60','batch120','full','b'}
+    else keys={'quick','batch60','batch120','full','b'} end
     if pressed('up') then self.choice=(self.choice-2)%#keys+1 end
     if pressed('down') then self.choice=self.choice%#keys+1 end
     for i,key in ipairs(keys) do
@@ -228,13 +331,15 @@ function State:update()
         -- The automatic/manual chooser has no pending Continue/New Game callback,
         -- but selecting REUSE should still make the choice meaningful: warm only
         -- the current team's required models from the existing disk cache now.
-        -- This never invokes the 30-new planner, and it prevents an immediate
+        -- This never invokes the smart-batch planner, and it prevents an immediate
         -- second cache prompt when the user selects Continue afterward.
         lastInventory=self.reuseInfo or lastInventory
         C.openReuse(game,save,nil,false)
       elseif choice=='startup' and request then
         C.openStartup(game,request.save,request.onDone,request.newGame)
-      elseif choice=='quick' then C.openQuick(game,save)
+      elseif choice=='quick' then C.openBatch(game,save,30)
+      elseif choice=='batch60' then C.openBatch(game,save,60)
+      elseif choice=='batch120' then C.openBatch(game,save,120)
       elseif choice=='full' then C.openFull(game,save) end
     end
     return
@@ -242,7 +347,32 @@ function State:update()
   if self.error then
     if pressed('a') then
       if self.retryRenderer then self:close();return end
+      local row=self.rows[self.index]
+      if row and row.dex and type(A.retryModelPreparation)=='function' then
+        for _,variant in ipairs(row.variants or {row.variant or 'normal'}) do
+          A.retryModelPreparation(row.dex,variant)
+        end
+      end
       self.error=nil;self.nextAt=0
+    elseif pressed('select') then
+      local row=self.rows[self.index]
+      if not (row and row.dex and type(A.deleteModelCache)=='function') then
+        report(self,'This failure has no scoped Pokemon cache to delete. Use RETRY or the source-cache recovery screen.')
+        return
+      end
+      local variants=row.variants or {row.variant or 'normal'}
+      local messages={}
+      for _,variant in ipairs(variants) do
+        local ok,why=A.deleteModelCache(row.dex,variant)
+        if not ok then report(self,why or 'model cache delete failed');return end
+        quickValidated[rowKey({dex=row.dex,variant=variant})]=nil
+        messages[#messages+1]=tostring(why or '')
+      end
+      self.task=nil;self.error=nil;self.nextAt=0
+      self.label='Scoped model cache deleted; rebuilding '..tostring(row.dex)
+      if V.mod and V.mod.cache then
+        pcall(V.mod.cache.write,V.mod.cache,'build/model-cache-recovery.txt',table.concat(messages,'\n')..'\n')
+      end
     elseif pressed('b') and not self.battle then self:close()
     elseif pressed('start') and love and love.event and love.event.quit then love.event.quit() end
     return
@@ -258,10 +388,11 @@ function State:update()
     if not self.task then
       self.task=W.new(function()
         if not (Planner and A.persistentModelState) then return nil,'Batch cache service unavailable' end
-        return Planner.select(self.game,self.selectedSave,A.persistentModelState,function(label)
+        local probe=type(A.inventoryModelState)=='function' and A.inventoryModelState or (type(A.storageModelState)=='function' and A.storageModelState or A.persistentModelState)
+        return Planner.select(self.game,self.selectedSave,probe,function(label)
           self.label=label;W.checkpoint(label)
-        end)
-      end,'Selecting the next 30 uncached models')
+        end,self.batchLimit or (Planner.batchSize or 30))
+      end,'Selecting the next '..tostring(self.batchLimit or 30)..' uncached models')
     end
     local ok,state,rows,info=W.resume(self.task,math.max(.25,(deadline-clock())*1000))
     if ok and state=='working' then return end
@@ -278,9 +409,16 @@ function State:update()
     if not row then
       if self.full then
         completedIdentity=A.sessionCacheIdentity()
-        lastInventory={cachedModels=270,cachedAppearances=502,totalModels=270,totalAppearances=502}
+        lastInventory={cachedModels=CATALOG_MAX,cachedAppearances=CATALOG_MAX,totalModels=CATALOG_MAX,totalAppearances=CATALOG_MAX}
       end
       self.finishedAt=clock();self.label=self.full and 'Full catalog prepared' or (self.battle and 'Battle models prepared' or (self.batchInfo and 'Batch complete; cached models are kept' or 'Startup models prepared'))
+      if not self.battle and self.mode~='mtbattle' then
+        -- PokemonActors batches its acceleration-only normal-model inventory
+        -- proof in RAM. Commit it once after a successful cache operation; do
+        -- not turn a 386-model Full Catalog into 386 tiny Android bridge writes.
+        if type(A.flushInventoryCertificate)=='function' then pcall(A.flushInventoryCertificate) end
+        persistReusePreference(true)
+      end
       lastCompleted={mode=self.mode,index=self.index,rows=self.rows,label=self.label,
         startedAt=self.startedAt,finishedAt=self.finishedAt}
       if self.mode=='quick' and self.batchInfo then
@@ -294,11 +432,30 @@ function State:update()
       self.task=W.new(function()
         if row.error then return false,row.error end
         local result,why
+        local prepareModel=A.prepareSessionModel
+        if self.mode=="startup" and type(A.prepareRequiredModel)=="function" then
+          prepareModel=A.prepareRequiredModel
+        elseif (self.mode=="quick" or self.mode=="full" or self.mode=="mtbattle")
+            and type(A.prepareStorageModel)=="function" then
+          -- All catalog/model-library passes are bounded body + authored idle.
+          -- Exact battle action rows are added only for Pokemon that actually
+          -- battle, so a release never turns an existing 386 catalog into a
+          -- multi-gigabyte all-actions migration.
+          prepareModel=A.prepareStorageModel
+        elseif self.mode=="mtbattle" and type(A.preparePersistentModel)=="function" then
+          prepareModel=A.preparePersistentModel
+        end
+        if type(prepareModel)~="function" then return false,"persistent model preparation unavailable" end
         for _,variant in ipairs(row.variants or {row.variant or 'normal'})do
-          result,why=A.prepareSessionModel(row.dex,variant,function(label)
+          local function progress(label)
             self.label=tostring(label or self.label or '')
             W.checkpoint(self.label)
-          end)
+          end
+          if prepareModel==A.prepareRequiredModel then
+            result,why=prepareModel(row.dex,variant,self.game,row.battler,progress)
+          else
+            result,why=prepareModel(row.dex,variant,progress)
+          end
           if not result then return false,why end
           quickValidated[rowKey({dex=row.dex,variant=variant})]=A.sessionCacheIdentity()
         end
@@ -367,7 +524,7 @@ function C.drawHud(next,game,viewport)
   if view and view.setTarget then view.setTarget() end
   G.origin();G.setShader();if G.setScissor then G.setScissor() end
   if G.setBlendMode then G.setBlendMode('alpha') end
-  if showCache then active:drawPanel(w,h,true) else CacheScreen.drawRuntimeError(w,h) end
+  if showCache then active:drawPanel(w,h,true) else CacheScreen.drawRuntimeError(w,h,live) end
   G.pop()
   return result
 end
@@ -386,34 +543,68 @@ function C.openStartup(game,save,onDone,newGame)
   if active then return false,'cache preparation already active' end
   if not newGame and save==nil then save=readSave(game) end
   local rows=C.startupPlan(game,save,newGame)
-  if C.quickReady(rows) then if onDone then onDone() end;return true,'startup-ready' end
+  if C.quickReady(rows,game) then
+    persistReusePreference()
+    if onDone then onDone() end;return true,'startup-ready'
+  end
   return C.open(game,rows,onDone,false,'startup')
 end
 -- Explicit reuse is intentionally the same narrow required-model warm as the
 -- old team/starter-only path. The important contract is what it does NOT do:
--- it never invokes QuickCachePlanner.select and therefore never adds 30 models.
+-- it never invokes QuickCachePlanner.select and therefore never adds a smart batch.
 -- Required team/starter bodies may still be loaded from their existing disk cache
 -- (or prepared individually if genuinely absent) so strict Colosseum rendering
 -- remains intact.
 function C.openReuse(game,save,onDone,newGame)
   return C.openStartup(game,save,onDone,newGame)
 end
--- Explicit Quick Start ALWAYS makes a fresh 30-new-unit selection. Continue
--- uses openStartup instead, so finishing a batch cannot trigger another batch
--- just by loading the save. Disk completeness is checked on a cancellable worker.
-function C.openQuick(game,save)
+-- Explicit Smart Cache makes a fresh progress-aware selection of NEW models.
+-- Continue uses openStartup instead, so finishing a batch cannot trigger another
+-- batch just by loading the save. Disk completeness is checked on a cancellable
+-- worker and every completed model remains persisted across later sessions.
+function C.openBatch(game,save,limit)
   if active then return false,'cache preparation already active' end
+  limit=math.max(1,math.min(CATALOG_MAX,math.floor(tonumber(limit) or (Planner and Planner.batchSize) or 30)))
   local ok,why=C.open(game,{},nil,false,'quick')
   if ok then
-    active.planning=true;active.selectedSave=save or readSave(game)
+    active.planning=true;active.selectedSave=save or readSave(game);active.batchLimit=limit
     active.label='Checking completed models; no source extraction during selection'
   end
   return ok,why
 end
+function C.openQuick(game,save) return C.openBatch(game,save,30) end
 function C.openFull(game,save)
+  if active then return false,'cache preparation already active' end
   if not active then lastInventory=nil end
-  return C.open(game,C.fullPlan(game,save or readSave(game)),nil,false,'full')
+  local ok,why=C.open(game,{},nil,false,'full')
+  if ok then
+    active.planning=true
+    active.selectedSave=save or readSave(game)
+    active.batchLimit=CATALOG_MAX
+    active.label='Checking completed models; existing valid cache is reused'
+  end
+  return ok,why
 end
+
+function C.openMtBattle(game,onDone)
+  if active then return false,'cache preparation already active' end
+  if type(A.prepareStorageModel)~="function" and type(A.preparePersistentModel)~="function" then
+    return false,'persistent model preparation unavailable'
+  end
+  local identity=A.sessionCacheIdentity and A.sessionCacheIdentity() or nil
+  if identity and mtBattleCompletedIdentity==identity then
+    if onDone then onDone() end
+    return true,'mtbattle-ready'
+  end
+  local rows,why=C.mtBattlePlan(game)
+  if not rows then return false,why end
+  local function finished()
+    mtBattleCompletedIdentity=A.sessionCacheIdentity and A.sessionCacheIdentity() or true
+    if onDone then onDone() end
+  end
+  return C.open(game,rows,finished,false,'mtbattle')
+end
+
 function C.openMenu(game,save,startupRequest)
   if active then return false,'cache preparation already active' end
   if not (game and game.stack and game.stack.push) then return false,'cache state unavailable' end
@@ -425,42 +616,70 @@ function C.openMenu(game,save,startupRequest)
     -- the old save's party, without writing either save or its options.
     selectedSave={party=C.startupPlan(game,nil,true)}
   end
-  local knownReusable=lastInventory and tonumber(lastInventory.cachedModels)
-    and tonumber(lastInventory.cachedModels)>=((Planner and Planner.batchSize) or 30) or false
+  local certified,certifiedBy=reuseCertified()
+  local knownReusable=certified or (lastInventory and tonumber(lastInventory.cachedModels)
+    and tonumber(lastInventory.cachedModels)>=((Planner and Planner.batchSize) or 30) or false)
+  local knownInfo=certified and {eligible=true,certified=true,certifiedBy=certifiedBy}
+    or (knownReusable and lastInventory or nil)
   local s=setmetatable({game=game,selector=true,mode='choice',choice=1,rows={},index=1,
     selectionArmed=false,startupRequest=startupRequest,
     selectedSave=selectedSave,startedAt=clock(),reuseNextAt=0,
     reuseChecked=knownReusable==true,reuseEligible=knownReusable==true,
-    reuseInfo=knownReusable and lastInventory or nil},State)
+    reuseInfo=knownInfo},State)
   active=s;game.stack:push(s);return true
 end
--- User-facing title entry: only a fully ready current-session team may go
--- straight through. Cold/evicted startup models must offer an explicit choice
--- instead of starting a preparation worker from Continue or New Game.
--- openStartup remains the executor for an explicitly selected team/starter mode.
+-- User-facing title entry: a fully ready current-session team goes straight
+-- through, while a previously successful cache save automatically takes the
+-- narrow required-team reuse path. Only a genuinely first-run/legacy cache state
+-- opens the chooser. openStartup remains the executor for that narrow path.
 function C.requestStartup(game,save,onDone,newGame)
   if active then return false,'cache preparation already active' end
   if pendingTitle and pendingTitle.game==game then pendingTitle=nil end
   if not newGame and save==nil then save=readSave(game) end
-  if C.quickReady(C.startupPlan(game,save,newGame)) then
+  if C.quickReady(C.startupPlan(game,save,newGame),game) then
+    persistReusePreference()
     if onDone then onDone() end
     return true,'startup-ready'
   end
+  -- After any successful prior cache save, Continue/New Game should be simple:
+  -- automatically reuse persisted assets and validate/load only the exact party
+  -- or starter models needed now. The manual BATTLE CACHE item remains the place
+  -- to request a +30/+60/+120 smart batch or the full catalog.
+  if reuseCertified() then return C.openReuse(game,save,onDone,newGame) end
   return C.openMenu(game,save,{save=save,onDone=onDone,newGame=newGame==true})
 end
 function C.noteRenderError(game,reason)
   if game then completedIdentity=nil;renderErrors[game]=tostring(reason or 'Colosseum renderer failed') end
 end
 function C.runtimeStatus(game)return runtime[game] end
+function C.pumpRuntimePreparation(game,milliseconds)
+  local r=runtime[game]
+  if not (r and r.waitingForModels and not r.error and A.pumpBattlePrewarm) then return false end
+  A.pumpBattlePrewarm(tonumber(milliseconds) or 3)
+  return true
+end
 local function runtimeFailure(game,r,why,kind)
   r.error=tostring(why or 'model preparation failed');r.kind=kind
+  r.waitingForModels=false
+  r.build=V.mod and V.mod.exports and (V.mod.exports.releaseBuild or V.mod.exports.version) or 'unknown'
+  r.platform=PLATFORM_OS;r.generation=generation()
+  local row=kind=='model' and r.failedRow or nil
+  local battler=row and row.battler
+  local mon=type(battler)=='table' and (type(battler.mon)=='table' and battler.mon or battler)
+  r.species=mon and (mon.species or mon.id) or nil
+  r.dex=row and row.dex or nil;r.variant=row and row.variant or nil
   r.failures=(r.failures or 0)+1
   r.retryAt=clock()+math.min(8,2^math.min(3,r.failures-1))
   -- A persistent fault is reported once per distinct reason, not every draw.
   if r.logged~=r.error then
     r.logged=r.error
     if V.mod and V.mod.cache then
-      pcall(V.mod.cache.write,V.mod.cache,'build/model-cache-error.txt','Runtime '..tostring(kind)..'\n'..r.error..'\n')
+      local report=table.concat({'Runtime '..tostring(kind),
+        'Build: '..tostring(r.build),'Platform: '..tostring(r.platform),
+        'Generation: '..tostring(r.generation),'Species: '..tostring(r.species or 'unknown'),
+        'Dex: '..tostring(r.dex or 'unknown'),'Variant: '..tostring(r.variant or 'unknown'),
+        'Error: '..r.error},'\n')..'\n'
+      pcall(V.mod.cache.write,V.mod.cache,'build/model-cache-error.txt',report)
     end
   end
   return true
@@ -479,31 +698,77 @@ function C.holdBattle(game,mons,owner)
     local input=game.input
     local function pressed(k)return input and input.wasPressed and input:wasPressed(k) end
     if pressed('start') and love and love.event and love.event.quit then love.event.quit();return true end
-    if not pressed('a') and clock()<(r.retryAt or 0) then return true end
+    local manualRetry=pressed('a')
+    if not manualRetry and clock()<(r.retryAt or 0) then return true end
+    if manualRetry and r.failedRow and type(A.retryModelPreparation)=='function' then
+      A.retryModelPreparation(r.failedRow.dex,r.failedRow.variant)
+    end
     r.error=nil
   end
   local rows,seen={},{}
   local cacheIdentity=A.sessionCacheIdentity()
   for _,mon in ipairs(mons or {}) do
-    local dex,variant=V.ModelIdentity.resolve(game,mon)
-    local identity=tostring(dex)..':'..tostring(variant)
-    if not seen[identity] then
-      seen[identity]=true
-      if not dex then rows[#rows+1]={error=variant}
-      elseif not ((A.sessionModelReady and A.sessionModelReady(dex,variant))
-          or (not A.sessionModelReady and quickValidated[identity]==cacheIdentity and A.peek('selected',dex,variant).resident)) then
-        -- An information viewer may have loaded the body without baking the
-        -- battle action sidecars. Finish those here, not inside a turn.
-        rows[#rows+1]={dex=dex,variant=variant}
+    local compat=V.GenerationCompat
+    local empty=compat and type(compat.isEmptyBattler)=='function' and compat.isEmptyBattler(mon)
+    -- Crystal creates the facade wrappers before the native sendout. Holding
+    -- this update for a nil-species wrapper prevents the very update that fills
+    -- it. Skip only explicitly marked vacant slots; real identities/actions
+    -- still go through the existing strict readiness gate.
+    if not empty then
+      local dex,variant=V.ModelIdentity.resolve(game,mon)
+      local identity=tostring(dex)..':'..tostring(variant)
+      if A.requiredModelReady or not seen[identity] then
+        if not A.requiredModelReady then seen[identity]=true end
+        if not dex then rows[#rows+1]={error=variant,battler=mon}
+        elseif not ((A.requiredModelReady and A.requiredModelReady(dex,variant,game,mon))
+            or (not A.requiredModelReady and A.sessionModelReady and A.sessionModelReady(dex,variant))
+            or (not A.sessionModelReady and quickValidated[identity]==cacheIdentity and A.peek('selected',dex,variant).resident)) then
+          -- An information viewer may have loaded the body without baking the
+          -- current battler's required action sidecars. Finish those here, not
+          -- inside a visible move. Same-species battlers are checked independently.
+          rows[#rows+1]={dex=dex,variant=variant,battler=mon}
+        end
       end
     end
   end
-  if #rows==0 then return false end
+  if #rows==0 then
+    if r.waitingForModels then
+      r.prepared=r.prepared+#(r.waitingRows or {})
+      persistReusePreference(true,true)
+      r.failures=0;r.logged=nil;r.failedRow=nil
+    end
+    r.waitingForModels=false;r.waitingRows=nil
+    return false
+  end
+  if A.service and A.service.cooperativePreparation==true and A.queueBattlePrewarm
+      and A.pumpBattlePrewarm then
+    -- Keep the native exact-action readiness gate, but do not drain a coroutine
+    -- to completion inside it. It shares the body-first queue with the arena;
+    -- there cannot be two workers decoding/uploading the same scene at once.
+    if not r.waitingForModels and V.ResidentPrewarm and V.ResidentPrewarm.cancelViewer then
+      V.ResidentPrewarm.cancelViewer()
+    end
+    local host=owner and owner.game and owner or {game=game}
+    for _,row in ipairs(rows) do
+      if row.error then r.failedRow=row;return runtimeFailure(game,r,row.error,'model') end
+      local failed=A.battlePreparationFailure and A.battlePreparationFailure(row.dex,row.variant)
+      if failed and clock()<(tonumber(failed.retryAt) or 0) then
+        r.failedRow=row;return runtimeFailure(game,r,failed.reason,'model')
+      end
+      A.queueBattlePrewarm(host,'required',row.battler,true)
+    end
+    r.waitingForModels=true;r.waitingRows=rows
+    -- Normal Game.update delegates to BattleRuntime once per rendered frame.
+    -- Without that frame wrapper an explicit/legacy caller still makes progress.
+    local frameOwns=V.FrameWork and V.FrameWork.active and V.FrameWork.active(game)
+    if not frameOwns then C.pumpRuntimePreparation(game,3) end
+    return true
+  end
   -- Finish required assets on the native update boundary. The last presented
   -- game frame remains visible during a cold read/build; no stack push, progress
   -- draw, GPU placeholder or battle update occurs in between. A cold model can
   -- still buffer, but cannot open the startup cache UI. Keep source validation,
-  -- exact shiny metadata and all authored action sidecars intact.
+  -- exact shiny metadata and the current battlers' required source actions intact.
   if V.ResidentPrewarm and V.ResidentPrewarm.cancel then V.ResidentPrewarm.cancel() end
   local started=clock();local pumpAt=started
   local function checkpoint()
@@ -522,18 +787,32 @@ function C.holdBattle(game,mons,owner)
       -- Keep the worker's transactional cleanup even though runtime buffering
       -- drains it synchronously. Decoder/GPU failures must release resources
       -- registered with WorkBudget.onCancel, just like title preparation does.
-      local task=W.new(function()return A.prepareSessionModel(row.dex,row.variant,checkpoint)end,'Battle model')
+      local task=W.new(function()
+        if type(A.prepareRequiredModel)=="function" then
+          return A.prepareRequiredModel(row.dex,row.variant,game,row.battler,checkpoint)
+        end
+        return A.prepareSessionModel(row.dex,row.variant,checkpoint)
+      end,'Battle model')
       local state
       repeat
         ok,state,result,why=W.resume(task,C.frameBudgetMs())
         checkpoint()
       until not ok or state~='working'
       if not ok then result=state end
-    else ok,result,why=pcall(A.prepareSessionModel,row.dex,row.variant,checkpoint) end
+    else
+      if type(A.prepareRequiredModel)=="function" then
+        ok,result,why=pcall(A.prepareRequiredModel,row.dex,row.variant,game,row.battler,checkpoint)
+      else ok,result,why=pcall(A.prepareSessionModel,row.dex,row.variant,checkpoint) end
+    end
     r.lastMs=math.max(0,(clock()-started)*1000);r.maxMs=math.max(r.maxMs,r.lastMs)
-    if not ok or not result then return runtimeFailure(game,r,ok and why or result,'model') end
+    if not ok or not result then
+      r.failedRow=row
+      return runtimeFailure(game,r,ok and why or result,'model')
+    end
+    r.failedRow=nil
     quickValidated[rowKey(row)]=A.sessionCacheIdentity();r.prepared=r.prepared+1
   end
+  persistReusePreference(true,true)
   r.failures=0;r.logged=nil
   return false
 end
@@ -588,7 +867,9 @@ function C.install()
     if not attempted[game] then
       attempted[game]=true
       local save=readSave(game)
-      if C.enabled(game,save) and not C.quickReady(C.startupPlan(game,save)) then pendingTitle={game=game,save=save} end
+      if C.enabled(game,save) and not C.quickReady(C.startupPlan(game,save)) and not reuseCertified() then
+        pendingTitle={game=game,save=save}
+      end
     end
     return rows
   end)
@@ -639,12 +920,31 @@ function C.install()
           local host=V.GenerationCompat and V.GenerationCompat.prepare(screen) or screen
           for _,side in ipairs({'player','enemy'}) do if host and host[side] then mons[#mons+1]=host[side] end end
         end
-        if C.holdBattle(game,mons,screen) then return end
+        if MOBILE_RUNTIME then
+          -- Mobile singles has the same deadlock class doubles already proved:
+          -- BattleState emits battler_switched from INSIDE updateQueue(). Holding
+          -- this outer update while prepareRequiredModel() extracts/uploads the new
+          -- species leaves the engine frozen on "sent out X!" until the model job
+          -- finishes (or forever if that job faults). Jynx #124 in Gen-I Mt. Battle
+          -- is the concrete reproducer.
+          --
+          -- Never synchronously hold native battle progression on mobile. Doubles
+          -- queues all four slots through its presenter; singles has BattleRuntime's
+          -- battle-start roster queue + switch-event priority promotion. Re-queue
+          -- the live pair here as a cheap safety net in case a host omitted the
+          -- switch semantic event. queueBattlePrewarm() deduplicates exact plans.
+          if not doubles and type(A.queueBattlePrewarm)=='function' then
+            local host=V.GenerationCompat and V.GenerationCompat.prepare and V.GenerationCompat.prepare(screen) or screen
+            pcall(A.queueBattlePrewarm,host)
+          end
+        elseif C.holdBattle(game,mons,screen) then return end
       end
       return old(screen,dt,...)
     end
     B.__cbeModelCache=true
   end
 end
-C._test={State=State,reset=function()active=nil;completedIdentity=nil;quickValidated={};lastCompleted=nil;lastInventory=nil;pendingTitle=nil;renderErrors=setmetatable({}, {__mode='k'});runtime=setmetatable({}, {__mode='k'});attempted=setmetatable({}, {__mode='k'})end}
+C._test={State=State,reuseCertified=reuseCertified,persistReusePreference=persistReusePreference,
+  reuseMarkerPath=REUSE_MARKER_PATH,
+  reset=function()active=nil;completedIdentity=nil;mtBattleCompletedIdentity=nil;quickValidated={};lastCompleted=nil;lastInventory=nil;pendingTitle=nil;renderErrors=setmetatable({}, {__mode='k'});runtime=setmetatable({}, {__mode='k'});attempted=setmetatable({}, {__mode='k'})end}
 return C

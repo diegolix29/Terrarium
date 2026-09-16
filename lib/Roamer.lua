@@ -88,6 +88,7 @@ function Roamer.new(spriteDef, species, level, kind, cellX, cellY)
   self.id = ("TR_ROAM_%d"):format(nextId)
   self.species, self.level, self.kind = species, level, kind
   self.sprite = SpriteRenderer.new(spriteDef, self.id)
+  self.sprite._colosseumEntity = self
   self.cellX, self.cellY = cellX, cellY
   self.px, self.py = cellX * 16, cellY * 16
   self.facing = "down"
@@ -96,6 +97,13 @@ function Roamer.new(spriteDef, species, level, kind, cellX, cellY)
   self.stepFlip = false
   self.frozen = false
   self.wanders = true
+  -- Store species for Colosseum resolution
+  self.species = species
+  -- Tag for Colosseum 3D models if available
+  local ok, ow = pcall(V.require, "OverworldColosseum")
+  if ok and ow and ow.tag then
+    pcall(ow.tag, self, species)
+  end
   -- what lets Collision.canMove hand it a water cell, which is otherwise
   -- unwalkable to everybody: the same field the player's surf sets
   self.surfing = kind == "water"

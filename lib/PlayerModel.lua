@@ -1,8 +1,9 @@
 -- PLAYER MODEL: loading and rendering custom 3D models for the player character.
 --
--- This module handles loading .obj, .gltf, and .glb files and rendering them
+-- This module handles loading .obj and .glb files and rendering them
 -- in place of the default player sprite. It integrates with the existing
--- Voxel3D rendering pipeline.
+-- Voxel3D rendering pipeline. (.gltf, the multi-file JSON variant, is not
+-- supported -- export as single-file .glb instead. See GLBModel.lua.)
 
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
@@ -253,11 +254,25 @@ function PlayerModel.load(filename)
     
     mesh = objToMesh(vertices, texCoords, faces)
     print("PlayerModel.load: Mesh creation", mesh and "succeeded" or "failed")
-  elseif ext == "gltf" or ext == "glb" then
-    -- glTF support would require a library like Menori
-    -- For now, return not implemented
-    print("PlayerModel.load: glTF/.glb files are not yet supported. Please convert your model to .obj format.")
-    return false, "glTF/.glb support not yet implemented - please use .obj format"
+  elseif ext == "glb" then
+    local GLBModel = V.require("GLBModel")
+    local glbMesh, glbTexture, glbErr, glbStats = GLBModel.load(data, Voxel3D)
+    if glbStats then
+      print("PlayerModel.load: Parsed GLB - vertices:", glbStats.vertexCount,
+            "triangles:", glbStats.triangleCount, "hasTexCoords:", glbStats.hasTexCoords)
+    end
+    if not glbMesh then
+      print("PlayerModel.load: GLB load failed -", glbErr)
+      return false, glbErr or "failed to load glb"
+    end
+    mesh = glbMesh
+    texture = glbTexture
+  elseif ext == "gltf" then
+    -- .gltf (JSON + separate .bin/.png files) isn't handled yet -- only the
+    -- single-file .glb container is. Convert with e.g. Blender's glTF
+    -- exporter set to "glTF Binary (.glb)".
+    print("PlayerModel.load: .gltf (non-binary) is not supported yet. Please export as .glb.")
+    return false, ".gltf not supported yet - please export as .glb"
   else
     print("PlayerModel.load: Unsupported file format:", ext)
     return false, "unsupported file format: " .. (ext or "unknown")

@@ -5,7 +5,9 @@ local CurrentSpriteModels=V.CurrentSpriteModels
 local ArenaCatalog=V.ArenaCatalog
 local GeneratedAssets=V.GeneratedAssets
 local RuntimeMeshCache=V.RuntimeMeshCache
+local ArenaCacheIdentity=V.ArenaCacheIdentity
 local RelicPresentation=V.RelicPresentation
+local ColosseumFont=V.ColosseumFont
 local A = {}
 
 local function platformOS()
@@ -81,22 +83,12 @@ vec4 position(mat4 transform_projection, vec4 vertex_position) {
   vec4 localPos = vertex_position;
   vec3 localNormal = normalize(VertexNormal);
   if (materialMode > 0.5 && materialMode < 1.5) {
-    if (materialFlow < 0.5) {
-      /* Horizontal pools carry true cross-wave displacement and normals. */
-      float p1 = vertex_position.x * 0.052 + sceneTime * 1.12;
-      float p2 = vertex_position.z * 0.067 - sceneTime * 0.87;
-      float w1 = sin(p1);
-      float w2 = sin(p2);
-      localPos.y += w1 * 0.34 + w2 * 0.22;
-      float dhdx = 0.34 * 0.052 * cos(p1);
-      float dhdz = 0.22 * 0.067 * cos(p2);
-      vec3 waveNormal = normalize(vec3(-dhdx,1.0,-dhdz));
-      localNormal = normalize(mix(VertexNormal,waveNormal,0.82));
-    } else {
-      /* Vertical waterfall sheets stay anchored to their stone channels; a
-         tiny lateral ripple keeps the silhouette from reading as a glass pane. */
-      localPos.x += sin(vertex_position.y*0.045 + sceneTime*1.36) * 0.10;
-    }
+    /* GC6E01 source water vertices are immutable here.  We have decoded the
+       source material/texture animation attached to these DObjs, but not a
+       source-owned JObj/shape animation that authorizes deforming their mesh.
+       Earlier CBE sine displacement therefore fabricated geometry motion. Fail
+       closed until that ownership is recoverable instead of moving retail HSD
+       vertices with an invented wave. */
   } else if (materialMode > 3.5 && materialMode < 4.5) {
     /* Retail audience cards occupy half-height atlas cells: their bottom V is
        .5 or .496094, not 1. UV-driven sway therefore lifted every spectator's
@@ -113,45 +105,10 @@ vec4 position(mat4 transform_projection, vec4 vertex_position) {
     localPos.x += gust*amp*tip;
     localPos.z += sin(sceneTime*0.91 + vertex_position.z*0.035)*amp*0.42*tip;
   } else if (materialMode > 4.5) {
-    /* Platform 100 lava needs actual geometry motion, not just a scrolling
-       picture. Horizontal magma rolls in two directions; vertical falls whip
-       slightly inside their rock channels. Source units are quarter-scaled
-       later, so these amplitudes remain controlled in world space. */
-    if (materialFlow < 0.5) {
-      float l1 = vertex_position.x*0.057 + vertex_position.z*0.027 + sceneTime*2.72;
-      float l2 = vertex_position.z*0.074 - vertex_position.x*0.024 - sceneTime*2.03;
-      float l3 = (vertex_position.x+vertex_position.z)*0.031 + sceneTime*3.48;
-      float radial = length(vertex_position.xz)*0.035 - sceneTime*1.92;
-      /* Keep the molten surface visibly alive, but damp physical displacement
-         where it meets the Platform 100 ring and the outer crater rock. This
-         prevents the rolling mesh from periodically poking through authored
-         steel/rock while texture transport continues at full speed. */
-      float lavaR = length(vertex_position.xz);
-      float innerSafe = smoothstep(155.0,205.0,lavaR);
-      float outerSafe = 1.0-smoothstep(320.0,382.0,lavaR);
-      float geomLife = mix(0.12,1.0,clamp(innerSafe*outerSafe,0.0,1.0));
-      float h1 = sin(l1)*2.45;
-      float h2 = sin(l2)*1.55;
-      float h3 = sin(l3)*0.62;
-      float h4 = sin(radial)*0.82;
-      localPos.y += (h1+h2+h3+h4)*geomLife;
-      float dx = (2.45*0.057*cos(l1) - 1.55*0.024*cos(l2) + 0.62*0.031*cos(l3)
-                 + 0.82*0.035*cos(radial)*(vertex_position.x/max(lavaR,1.0)))*geomLife;
-      float dz = (2.45*0.027*cos(l1) + 1.55*0.074*cos(l2) + 0.62*0.031*cos(l3)
-                 + 0.82*0.035*cos(radial)*(vertex_position.z/max(lavaR,1.0)))*geomLife;
-      localNormal = normalize(mix(VertexNormal,normalize(vec3(-dx,1.0,-dz)),0.92));
-    } else {
-      /* Waterfall mesh is now subdivided, so small phase differences between
-         rows/columns create a rolling molten sheet instead of translating one
-         rigid quad. Keep the lip almost fixed and let instability build toward
-         the receiving pool. */
-      float f = vertex_position.y*0.071 + VertexTexCoord.x*5.7 + sceneTime*3.18;
-      float f2 = vertex_position.y*0.033 - VertexTexCoord.x*8.2 - sceneTime*1.67;
-      float amp = 0.18 + 0.82*clamp(abs(VertexTexCoord.y)*0.22,0.0,1.0);
-      localPos.x += (sin(f)*0.82 + sin(f2)*0.31)*amp;
-      localPos.z += (cos(f*0.73)*0.38 + sin(f2*1.17)*0.16)*amp;
-      localNormal = normalize(mix(VertexNormal,normalize(VertexNormal + vec3(sin(f)*.16,0.0,cos(f2)*.14)),0.48));
-    }
+    /* D2 crater lava follows the same rule: retain the exact extracted mesh and
+       source normal until a GC6E01 JObj/shape-animation mapping proves physical
+       deformation.  Source MatAnim/TexAnim still supplies every decoded temporal
+       channel; unsupported channels remain static rather than guessed. */
   }
   vec4 world = model * localPos;
   worldPos = world.xyz;
@@ -162,32 +119,144 @@ vec4 position(mat4 transform_projection, vec4 vertex_position) {
 -- Vertex operations are GLES-safe and identical across platforms; retain the
 -- small mobile fragment shader instead of paying the desktop pixel cost.
 local MOBILE_VERTEX = VERTEX
+-- The original Open Sea stage shares ONE material implementation across desktop,
+-- GLES and the conservative Android fallback. Retail HSD stages do not enter it.
+-- No derivatives, loops, extra render targets or time-growing high-frequency UVs.
+local OPEN_SEA_PIXEL = [[
+vec4 openSeaSurface(Image texture, vec2 uv, vec4 color) {
+  vec3 horizon = vec3(.285,.430,.520);
+  /* Scale before length: distant ocean coordinates must not overflow the
+     minimum GLES mediump range when squared on older mobile drivers. */
+  float distance100 = length((worldPos-cameraEye)*.01);
+  float haze = smoothstep(1.10,8.0,distance100);
+  float va = mix(1.0,tint.a,step(.5,sourceVertexAlpha));
+  if (materialMode > .5 && materialMode < 1.5) {
+    vec2 current = vec2(sceneTime*.0016,sceneTime*.0010);
+    vec3 a = Texel(texture,uv+current).rgb;
+    vec3 b = Texel(texture,uv*.73-current*.61+vec2(.23,.41)).rgb;
+    float sourceDetail = dot(mix(a,b,.34),vec3(.299,.587,.114))-.5;
+    float detailFade = 1.0-smoothstep(.40,2.20,distance100);
+    float sx = worldPos.x*.052+worldPos.z*.031+sceneTime*.34;
+    float sz = worldPos.z*.061-worldPos.x*.026-sceneTime*.27;
+    vec3 n = normalize(vec3(cos(sx)*.045,1.0,sin(sz)*.035));
+    vec3 view = normalize((cameraEye-worldPos)*.01);
+    float grazing = 1.0-clamp(abs(dot(n,view)),0.0,1.0);
+    float fresnel = grazing*grazing;
+    float shallow = 1.0-smoothstep(.20,.65,length(worldPos.xz*.01));
+    vec3 deep = mix(vec3(.024,.092,.145),vec3(.048,.180,.224),shallow*.62);
+    vec3 water = mix(deep,vec3(.185,.310,.395),fresnel*.48);
+    float swell = sin(sx)*.55+sin(sz)*.45;
+    /* Source pixels provide subtle surface variation, not opaque white cracks.
+       Clamp the contribution rather than multiplying the high-contrast atlas. */
+    water += vec3(.72,.89,1.0)*(sourceDetail*.024*detailFade+swell*.006);
+    vec3 halfDir = normalize(normalize(vec3(.30,.84,.45))+view);
+    float glint = pow(max(dot(n,halfDir),0.0),18.0)*.055;
+    water += vec3(.58,.70,.77)*glint*(1.0-haze);
+    water = mix(water,horizon,haze);
+    /* flow=1 is the v6 opaque base sheet; lower-flow geometry is only local
+       shallow-water tint. Texture alpha is effect data, never ocean coverage. */
+    float alpha = materialFlow > .75 ? color.a : materialAlpha*va*color.a;
+    return vec4(clamp(water*color.rgb,vec3(0.0),vec3(1.0)),clamp(alpha,0.0,1.0));
+  }
+  vec4 texel = Texel(texture,uv);
+  vec3 vertex = mix(vec3(1.0),tint.rgb,step(.5,sourceVertexColor));
+  if (sourceDiffuseLighting < .5) {
+    /* Unlit dome colours already match the far-ocean haze. Applying lighting or
+       distance fog to the sky would create a second, camera-dependent horizon. */
+    return vec4(texel.rgb*vertex*materialDiffuse*color.rgb,materialAlpha*va*color.a);
+  }
+  vec3 normal = normalize(worldNormal);
+  float light = .76+.24*max(dot(normal,normalize(vec3(.34,.83,.44))),0.0);
+  float detail = dot(texel.rgb,vec3(.299,.587,.114));
+  vec3 stone = materialDiffuse*vertex*(.62+.38*detail)*light;
+  /* Keep source mineral detail but bring brown rock and pale masonry into one
+     cool marine palette. Near-field platform inlays stay deliberately quiet. */
+  stone = mix(stone,texel.rgb*materialDiffuse*vertex*light,.16);
+  stone = mix(stone,horizon,haze);
+  return vec4(clamp(stone*color.rgb,vec3(0.0),vec3(1.0)),materialAlpha*va*color.a);
+}
+]]
 local MOBILE_PIXEL = [[
 uniform float materialAlpha;
 uniform float materialMode;
+uniform float sourceTexAnimAuthored;
+uniform vec4 sourceTexAnim0;
+uniform vec2 sourceTexAnim1;
 uniform float sourceTextureColorMap;
 uniform float sourceTextureBlending;
+uniform float materialFlow;
+uniform float sceneTime;
 uniform float sceneProfile;
 uniform vec3 materialDiffuse;
 uniform vec3 materialAmbient;
+uniform vec3 cameraEye;
 uniform float sourceDiffuseLighting;
 uniform float sourceVertexColor;
 uniform float sourceVertexAlpha;
+uniform vec4 wazaWorldModulate;
 varying vec4 tint;
 varying float crowdPhase;
 varying vec3 worldNormal;
 varying vec3 worldPos;
+vec4 applyWazaWorldModulate(vec4 c) {
+  return vec4(clamp(c.rgb+(wazaWorldModulate.rgb-vec3(0.5019607843)),vec3(0.0),vec3(1.0)),
+    clamp(c.a*wazaWorldModulate.a,0.0,1.0));
+}
+/*OPEN_SEA_SHARED*/
 vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
+  if (sceneProfile > 9.5 && sceneProfile < 10.5)
+    return applyWazaWorldModulate(openSeaSurface(texture,uv,color));
   vec4 sourceTint = vec4(mix(vec3(1.0),tint.rgb,step(0.5,sourceVertexColor)),mix(1.0,tint.a,step(0.5,sourceVertexAlpha)));
-  vec4 texel = Texel(texture,uv);
+  bool openSea = sceneProfile > 9.5 && sceneProfile < 10.5;
+  vec2 sourceUV = sourceTexAnimAuthored > 0.5
+    ? vec2(sourceTexAnim0.x*uv.x+sourceTexAnim0.y*uv.y+sourceTexAnim0.z,
+           sourceTexAnim0.w*uv.x+sourceTexAnim1.x*uv.y+sourceTexAnim1.y)
+    : uv;
+  if (openSea && sourceTexAnimAuthored < 0.5 && materialMode > 0.5 && materialMode < 1.5) {
+    sourceUV += materialFlow > 0.5
+      ? vec2(sceneTime*.0019,sceneTime*.0011)
+      : vec2(-sceneTime*.0011,sceneTime*.0016);
+  }
+  vec4 texel = Texel(texture,sourceUV);
+  if (openSea && sourceTexAnimAuthored < 0.5 && materialMode > 0.5 && materialMode < 1.5) {
+    vec2 crossUV=uv*1.17+vec2(-sceneTime*.0012,sceneTime*.0018);
+    vec4 crossSample=Texel(texture,crossUV);
+    texel.rgb=mix(texel.rgb,crossSample.rgb,.08);
+    texel.a=max(texel.a,crossSample.a*.42);
+  }
   vec4 tex = texel * color * sourceTint;
   float alpha = tex.a * materialAlpha;
-  if (materialMode > 2.5) {
+  if (materialMode > 2.5 && materialMode < 4.5) {
     /* Match desktop cutout/depth coverage. Fractional edge texels must not
        leave translucent rectangles around the source audience on GLES. */
     if (alpha < 0.34) discard;
     alpha = 1.0;
   } else if (alpha <= 0.012) discard;
+  if (openSea && materialMode > 0.5 && materialMode < 1.5) {
+    /* GLES-friendly moonlit ocean: two moving swell directions perturb the
+       extracted mesh normal, while Fresnel and a broad moon lobe create depth
+       without an extra render target or reflection pass. */
+    vec3 n=normalize(worldNormal);
+    float wx=cos(worldPos.x*.048+worldPos.z*.026+sceneTime*.44)*.048
+      +cos(worldPos.z*.031-sceneTime*.31)*.024;
+    float wz=sin(worldPos.z*.052-worldPos.x*.022-sceneTime*.41)*.048
+      +sin(worldPos.x*.028+sceneTime*.34)*.024;
+    vec3 waterN=normalize(n+vec3(wx,0.0,wz));
+    vec3 viewDir=normalize(cameraEye-worldPos);
+    float fresnel=pow(1.0-clamp(abs(dot(waterN,viewDir)),0.0,1.0),2.05);
+    vec3 moonDir=normalize(vec3(.30,.91,.28));
+    vec3 halfDir=normalize(moonDir+viewDir);
+    float moon=pow(max(dot(waterN,halfDir),0.0),18.0)*(.16+.31*fresnel);
+    float swell=.5+.5*sin(worldPos.x*.050+worldPos.z*.036+sceneTime*.43);
+    float crossWave=.5+.5*sin(worldPos.z*.061-worldPos.x*.028-sceneTime*.37);
+    float crest=smoothstep(.82,.992,swell*.58+crossWave*.42);
+    vec3 deep=mix(vec3(.026,.090,.155),vec3(.070,.220,.315),.22+.48*fresnel);
+    vec3 body=texel.rgb*materialDiffuse*vec3(.66,.76,.84);
+    vec3 shaded=mix(body,deep,.36+.09*(1.0-fresnel));
+    shaded+=vec3(.48,.58,.66)*moon;
+    shaded+=vec3(.24,.34,.42)*crest*(.010+.035*fresnel);
+    return applyWazaWorldModulate(vec4(clamp(shaded,vec3(0.0),vec3(1.0)),alpha*.90));
+  }
   if (sourceDiffuseLighting < 0.5 && !(sceneProfile > 0.5 && sceneProfile < 1.5)) {
     /* HSD chooses vertex RGB OR material diffuse before its texture stage.
        Unlit source materials do not multiply both, add ambient, or acquire a
@@ -196,7 +265,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     vec3 sourceRGB = sourceTextureColorMap > 2.5 && sourceTextureColorMap < 3.5
       ? mix(sourceBase,texel.rgb,clamp(sourceTextureBlending,0.0,1.0))
       : texel.rgb * sourceBase;
-    return vec4(sourceRGB * color.rgb,alpha);
+    return applyWazaWorldModulate(vec4(sourceRGB * color.rgb,alpha));
   }
   float ndl = max(dot(normalize(worldNormal),normalize(vec3(0.34,0.83,0.44))),0.0);
   if (sourceDiffuseLighting < 0.5) {
@@ -217,7 +286,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
          contrast recovery; do not green-tint or crush them. */
       shaded=clamp((shaded-vec3(.42))*1.045+vec3(.42),vec3(0.0),vec3(1.0))*.985;
     }
-    return vec4(shaded,alpha);
+    return applyWazaWorldModulate(vec4(shaded,alpha));
   }
   if (sceneProfile < 0.5) {
     /* Phenac / Water Colosseum: the source HSD already carries bright diffuse
@@ -232,7 +301,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     float luma = dot(shaded,vec3(0.299,0.587,0.114));
     shaded = mix(vec3(luma)*vec3(0.965,0.990,1.015),shaded,0.90);
     shaded = clamp((shaded-vec3(0.46))*0.95+vec3(0.43),vec3(0.0),vec3(0.88));
-    return vec4(shaded,alpha);
+    return applyWazaWorldModulate(vec4(shaded,alpha));
   }
   vec3 light = clamp(materialAmbient + materialDiffuse * (0.42 + ndl*0.58),0.0,1.65);
   vec3 shaded=tex.rgb*light;
@@ -248,7 +317,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     float l=dot(shaded,vec3(.299,.587,.114));
     shaded=mix(vec3(l),shaded,.965)*vec3(.92,.965,.95)*.86;
   }
-  return vec4(shaded,alpha);
+  return applyWazaWorldModulate(vec4(shaded,alpha));
 }
 ]]
 -- Emergency Android shader fallback. The primary mobile shader preserves
@@ -272,36 +341,61 @@ vec4 position(mat4 transform_projection, vec4 vertex_position) {
 }
 ]]
 local ANDROID_SAFE_PIXEL = [[
+uniform float sceneProfile;
+uniform float sceneTime;
+uniform float materialFlow;
+uniform vec3 cameraEye;
+uniform float sourceDiffuseLighting;
 uniform float materialAlpha;
 uniform float materialMode;
+uniform float sourceTexAnimAuthored;
+uniform vec4 sourceTexAnim0;
+uniform vec2 sourceTexAnim1;
 uniform vec3 materialDiffuse;
 uniform float sourceVertexColor;
 uniform float sourceVertexAlpha;
+uniform vec4 wazaWorldModulate;
 varying vec4 tint;
 varying float crowdPhase;
 varying vec3 worldPos;
 varying vec3 worldNormal;
+vec4 applyWazaWorldModulate(vec4 c) {
+  return vec4(clamp(c.rgb+(wazaWorldModulate.rgb-vec3(0.5019607843)),vec3(0.0),vec3(1.0)),
+    clamp(c.a*wazaWorldModulate.a,0.0,1.0));
+}
+/*OPEN_SEA_SHARED*/
 vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
-  vec4 texel=Texel(texture,uv)*color;
+  if (sceneProfile > 9.5 && sceneProfile < 10.5)
+    return applyWazaWorldModulate(openSeaSurface(texture,uv,color));
+  vec2 sourceUV=sourceTexAnimAuthored > 0.5
+    ? vec2(sourceTexAnim0.x*uv.x+sourceTexAnim0.y*uv.y+sourceTexAnim0.z,
+           sourceTexAnim0.w*uv.x+sourceTexAnim1.x*uv.y+sourceTexAnim1.y)
+    : uv;
+  vec4 texel=Texel(texture,sourceUV)*color;
   vec3 base=materialDiffuse;
   if (sourceVertexColor>0.5) base*=tint.rgb;
   float a=texel.a*materialAlpha;
   if (sourceVertexAlpha>0.5) a*=tint.a;
-  if (materialMode>2.5) { if (a<0.34) discard; a=1.0; }
+  if (materialMode>2.5 && materialMode<4.5) { if (a<0.34) discard; a=1.0; }
   else if (a<=0.012) discard;
-  return vec4(clamp(texel.rgb*base,vec3(0.0),vec3(1.0)),clamp(a,0.0,1.0));
+  return applyWazaWorldModulate(vec4(clamp(texel.rgb*base,vec3(0.0),vec3(1.0)),clamp(a,0.0,1.0)));
 }
 ]]
 
 local PIXEL = [[
 uniform float materialAlpha;
 uniform float materialMode;
+uniform float sourceMatAnimAuthored;
+uniform float sourceTexAnimAuthored;
+uniform vec4 sourceTexAnim0;
+uniform vec2 sourceTexAnim1;
 uniform float sourceTextureColorMap;
 uniform float sourceTextureBlending;
 uniform float materialFlow;
 uniform float sceneTime;
 uniform float sceneRadiusWorld;
 uniform float sceneProfile;
+uniform float sourceFogEnabled;
 uniform vec3 cameraEye;
 uniform vec3 materialDiffuse;
 uniform vec3 materialAmbient;
@@ -313,24 +407,44 @@ uniform float sourceVertexColor;
 uniform float sourceVertexAlpha;
 uniform float sourceConstantColor;
 uniform vec2 texelStep;
+uniform vec4 wazaWorldModulate;
 varying vec4 tint;
 varying float crowdPhase;
 varying vec3 worldPos;
 varying vec3 worldNormal;
+vec4 applyWazaWorldModulate(vec4 c) {
+  return vec4(clamp(c.rgb+(wazaWorldModulate.rgb-vec3(0.5019607843)),vec3(0.0),vec3(1.0)),
+    clamp(c.a*wazaWorldModulate.a,0.0,1.0));
+}
+/*OPEN_SEA_SHARED*/
 vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
+  if (sceneProfile > 9.5 && sceneProfile < 10.5)
+    return applyWazaWorldModulate(openSeaSurface(texture,uv,color));
   float arenaRadius = length(worldPos.xz);
   if (arenaRadius > sceneRadiusWorld) discard;
 
-  vec2 sampleUV = uv;
-  if (materialMode > 0.5 && materialMode < 1.5) {
+  vec2 sampleUV = sourceTexAnimAuthored > 0.5
+    ? vec2(sourceTexAnim0.x*uv.x+sourceTexAnim0.y*uv.y+sourceTexAnim0.z,
+           sourceTexAnim0.w*uv.x+sourceTexAnim1.x*uv.y+sourceTexAnim1.y)
+    : uv;
+  if (sourceTexAnimAuthored < 0.5 && materialMode > 0.5 && materialMode < 1.5) {
     /* Pools drift; vertical waterfall bodies stream downward. */
-    sampleUV += materialFlow > 0.5
-      ? vec2(sceneTime*0.0025,-sceneTime*0.070)
-      : vec2(sceneTime*0.0092,sceneTime*0.0054);
-  } else if (materialMode > 1.5 && materialMode < 2.5) {
+    if (sceneProfile > 9.5 && sceneProfile < 10.5) {
+      /* Open Sea is a horizontal ocean sheet. Two very slow diagonal currents
+         keep the retained Water Colosseum pixels moving without the old vertical
+         waterfall-scroll look. */
+      sampleUV += materialFlow > 0.30
+        ? vec2(-sceneTime*.0041,sceneTime*.0067)
+        : vec2(sceneTime*.0062,sceneTime*.0034);
+    } else {
+      sampleUV += materialFlow > 0.5
+        ? vec2(sceneTime*0.0025,-sceneTime*0.070)
+        : vec2(sceneTime*0.0092,sceneTime*0.0054);
+    }
+  } else if (sourceTexAnimAuthored < 0.5 && materialMode > 1.5 && materialMode < 2.5) {
     /* The extracted waterfall glint is a vertical energy streak. */
     sampleUV += vec2(sin(sceneTime*0.31)*0.006,-sceneTime*0.115);
-  } else if (materialMode > 4.5) {
+  } else if (sourceTexAnimAuthored < 0.5 && materialMode > 4.5) {
     /* D2 magma: obvious directional transport plus irregular distortion.
        The prior .010 horizontal scroll was technically animated but visually
        indistinguishable from a static texture at battle distance. */
@@ -343,7 +457,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     sampleUV += lavaWarp;
   }
   vec4 texel = Texel(texture, sampleUV);
-  if (materialMode > 4.5) {
+  if (sourceTexAnimAuthored < 0.5 && materialMode > 4.5) {
     vec2 lavaUV2 = uv + (materialFlow > 0.5
       ? vec2(-sceneTime*.027,-sceneTime*.258)
       : vec2(-sceneTime*.061,sceneTime*.074));
@@ -352,14 +466,16 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     texel.rgb=mix(texel.rgb,lava2.rgb,clamp(lavaMix,0.22,0.56));
     texel.a=max(texel.a,lava2.a*.82);
   }
-  if (materialMode > 0.5 && materialMode < 1.5) {
+  if (sourceTexAnimAuthored < 0.5 && materialMode > 0.5 && materialMode < 1.5) {
     /* A second low-amplitude scroll from the SAME extracted Colosseum water
        texture restores some of the source surface breakup without adding any
        cache assets. This is presentation detail, not another translucent
        geometry sheet. */
-    vec2 sampleUV2 = uv + (materialFlow > 0.5
-      ? vec2(-sceneTime*0.0018,-sceneTime*0.044)
-      : vec2(-sceneTime*0.0042,sceneTime*0.0064));
+    vec2 sampleUV2 = uv + ((sceneProfile > 9.5 && sceneProfile < 10.5)
+      ? vec2(sceneTime*.0031,-sceneTime*.0052)
+      : (materialFlow > 0.5
+        ? vec2(-sceneTime*0.0018,-sceneTime*0.044)
+        : vec2(-sceneTime*0.0042,sceneTime*0.0064)));
     vec4 water2 = Texel(texture, sampleUV2);
     texel.rgb = mix(texel.rgb, water2.rgb, 0.22);
     texel.a = max(texel.a, water2.a * 0.72);
@@ -368,7 +484,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
   /* Modes 3/4 are binary-alpha GameCube scenery (rails/banners and the
      surviving seated crowd cards). Treat them like alpha-test hardware:
      either the pixel exists and writes depth, or it does not. */
-  if (materialMode > 2.5) {
+  if (materialMode > 2.5 && materialMode < 4.5) {
     float a = texel.a * mix(1.0,tint.a,step(0.5,sourceVertexAlpha)) * materialAlpha * color.a;
     if (a < 0.34) discard;
     texel.a = 1.0;
@@ -400,12 +516,12 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     vec3 sourceRGB = sourceTextureColorMap > 2.5 && sourceTextureColorMap < 3.5
       ? mix(sourceBase,texel.rgb,clamp(sourceTextureBlending,0.0,1.0))
       : texel.rgb * sourceBase;
-    return vec4(sourceRGB * color.rgb,materialMode > 2.5 ? 1.0 : a);
+    return applyWazaWorldModulate(vec4(sourceRGB * color.rgb,materialMode > 2.5 ? 1.0 : a));
   }
 
   /* Extracted waterfall glints are energy layers, not translucent cards. Keep
      only their bright strokes and dramatically reduce their intensity. */
-  if (materialMode > 1.5 && materialMode < 2.5) {
+  if (sourceMatAnimAuthored < 0.5 && materialMode > 1.5 && materialMode < 2.5) {
     float lum = dot(texel.rgb, vec3(0.299,0.587,0.114));
     float cascade = 0.84 + 0.16*sin(sceneTime*1.46 + worldPos.y*0.20 + worldPos.x*0.035);
     float spray = 0.88 + 0.12*sin(sceneTime*2.15 + worldPos.z*0.11);
@@ -413,7 +529,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     if (a < 0.016) discard;
     vec3 fx = mix(vec3(0.07,0.28,0.44),vec3(0.63,0.88,0.98),clamp(lum*1.22,0.0,1.0));
     fx *= spray;
-    return vec4(fx,a);
+    return applyWazaWorldModulate(vec4(fx,a));
   }
 
   if (a < 0.025) discard;
@@ -442,7 +558,7 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     shaded = texel.rgb * mix(vec3(1.0),sourceTint.rgb,0.58) * color.rgb * srcMat * light;
   }
 
-  if (materialMode > 4.5) {
+  if (sourceMatAnimAuthored < 0.5 && materialMode > 4.5) {
     float lum = dot(texel.rgb,vec3(.299,.587,.114));
     float broad = .80 + .20*sin(sceneTime*2.05 + worldPos.y*.071 + worldPos.x*.022);
     float hotBand = .5+.5*sin(worldPos.x*.104 + worldPos.z*.083 - sceneTime*3.65);
@@ -460,10 +576,10 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
       hot *= mix(vec3(.54,.38,.30),vec3(1.08,1.01,.86),core);
       hot += vec3(.28,.070,.002)*vein*core*(.35+.65*pulse);
       float emission=1.19+.24*vein+.13*pulse;
-      return vec4(clamp(hot*broad*emission*mix(vec3(1.0),tint.rgb,.14),vec3(0.0),vec3(1.0)),a);
+      return applyWazaWorldModulate(vec4(clamp(hot*broad*emission*mix(vec3(1.0),tint.rgb,.14),vec3(0.0),vec3(1.0)),a));
     }
     float emission=1.07+.28*boil;
-    return vec4(clamp(hot*broad*emission*mix(vec3(1.0),tint.rgb,.18),vec3(0.0),vec3(1.0)),a);
+    return applyWazaWorldModulate(vec4(clamp(hot*broad*emission*mix(vec3(1.0),tint.rgb,.18),vec3(0.0),vec3(1.0)),a));
   }
 
   /* Summit surface separation. Procedural Mt. Battle geometry previously sent
@@ -522,20 +638,41 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
        instead of a white duplicate of the wall behind it. */
     /* Cross-wave normal perturbation gives the water a changing highlight
        rather than merely scrolling its diffuse texture. */
-    float wx = cos(worldPos.x*0.29 + sceneTime*1.05)*0.10 + cos(worldPos.z*0.18-sceneTime*.73)*0.055;
-    float wz = sin(worldPos.z*0.31 - sceneTime*.92)*0.10 + sin(worldPos.x*0.16+sceneTime*.61)*0.050;
+    bool openSea = sceneProfile > 9.5 && sceneProfile < 10.5;
+    float wx = openSea
+      ? cos(worldPos.x*.052-worldPos.z*.034+sceneTime*.46)*.050 + cos(worldPos.z*.029-sceneTime*.31)*.024
+      : cos(worldPos.x*0.29 + sceneTime*1.05)*0.10 + cos(worldPos.z*0.18-sceneTime*.73)*0.055;
+    float wz = openSea
+      ? sin(worldPos.z*.056+worldPos.x*.027-sceneTime*.42)*.050 + sin(worldPos.x*.031+sceneTime*.34)*.024
+      : sin(worldPos.z*0.31 - sceneTime*.92)*0.10 + sin(worldPos.x*0.16+sceneTime*.61)*0.050;
     vec3 waterN = normalize(n + vec3(wx,0.0,wz));
     float fresnel = pow(1.0 - clamp(abs(dot(waterN,viewDir)),0.0,1.0),2.15);
-    float ripple = 0.5 + 0.5*sin(worldPos.x*0.23 + worldPos.z*0.17 + sceneTime*1.18);
-    float sparkle = smoothstep(0.78,0.995,0.5+0.5*sin(worldPos.x*1.31 + worldPos.z*1.77 + sceneTime*2.30));
-    float glint = pow(max(dot(waterN,halfDir),0.0),18.0) * (0.17 + 0.22*fresnel);
+    float ripple = openSea
+      ? 0.5 + 0.5*sin(worldPos.x*.060 + worldPos.z*.043 + sceneTime*.48)
+      : 0.5 + 0.5*sin(worldPos.x*0.23 + worldPos.z*0.17 + sceneTime*1.18);
+    float sparkle = smoothstep(openSea ? .91 : .78,0.995,
+      0.5+0.5*sin(worldPos.x*(openSea ? .47 : 1.31) + worldPos.z*(openSea ? .63 : 1.77) + sceneTime*(openSea ? .88 : 2.30)));
+    vec3 waterLight = openSea ? normalize(vec3(.30,.91,.28)) : lightDir;
+    vec3 waterHalf = normalize(waterLight + viewDir);
+    float glint = pow(max(dot(waterN,waterHalf),0.0),openSea ? 18.0 : 18.0)
+      * (openSea ? (0.18 + 0.29*fresnel) : (0.17 + 0.22*fresnel));
     /* Source Water Colosseum is steel/cool-gray first and blue second. Keep
        the water reflective without turning the entire venue cyan-white. */
-    vec3 waterTint = mix(vec3(0.040,0.145,0.195),vec3(0.115,0.315,0.375),0.26+0.28*fresnel);
+    vec3 waterTint = openSea
+      ? mix(vec3(.028,.095,.160),vec3(.075,.235,.325),.22+.48*fresnel)
+      : mix(vec3(0.040,0.145,0.195),vec3(0.115,0.315,0.375),0.26+0.28*fresnel);
     float flowBright = materialFlow > 0.5 ? 1.035 : 0.985;
-    shaded = mix(shaded * vec3(0.60,0.76,0.82),waterTint,0.39+0.09*ripple) * flowBright;
-    shaded += vec3(0.30,0.47,0.52)*(glint + sparkle*0.022*fresnel);
-    a *= materialFlow > 0.5 ? 0.72 : 0.66;
+    shaded = mix(shaded * (openSea ? vec3(.64,.73,.81) : vec3(0.60,0.76,0.82)),waterTint,
+      openSea ? (0.34+0.08*ripple) : (0.39+0.09*ripple)) * flowBright;
+    shaded += (openSea ? vec3(.42,.51,.59) : vec3(0.30,0.47,0.52))
+      *(glint + sparkle*(openSea ? .014 : .022)*fresnel);
+    if (openSea) {
+      float swell=.5+.5*sin(worldPos.x*.052+worldPos.z*.037+sceneTime*.44);
+      float crossWave=.5+.5*sin(worldPos.z*.064-worldPos.x*.029-sceneTime*.38);
+      float crest=smoothstep(.84,.992,swell*.57+crossWave*.43);
+      shaded += vec3(.25,.34,.42)*crest*(.012+.038*fresnel);
+    }
+    a *= openSea ? .88 : (materialFlow > 0.5 ? 0.72 : 0.66);
   } else {
     float dNear = length(worldPos - cameraEye);
     float detail = 1.0 - smoothstep(44.0,78.0,dNear);
@@ -813,7 +950,8 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
   bool relicProfile = sceneProfile > 4.5 && sceneProfile < 5.5;
   bool outskirtsProfile = sceneProfile > 6.5 && sceneProfile < 7.5;
   bool deepProfile = sceneProfile > 8.5 && sceneProfile < 9.5;
-  bool neutralSourceProfile = sceneProfile > 4.5;
+  bool openSeaProfile = sceneProfile > 9.5 && sceneProfile < 10.5;
+  bool neutralSourceProfile = sceneProfile > 4.5 && !openSeaProfile;
   /* Venue-specific depth: Outskirts needs miles of pale desert atmosphere,
      while Deep must keep its distant machinery visible inside a dark chamber. */
   float fogNear = summitProfile ? 318.0
@@ -821,26 +959,36 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
     : (realgamProfile ? 205.0
     : (outskirtsProfile ? 420.0
     : (deepProfile ? 620.0
-    : (relicProfile ? 300.0 : 150.0)))));
+    : (openSeaProfile ? 170.0
+    : (relicProfile ? 300.0 : 150.0))))));
   float fogFar  = summitProfile ? 520.0
     : (orreProfile ? 292.0
     : (realgamProfile ? 330.0
     : (outskirtsProfile ? 980.0
     : (deepProfile ? 1400.0
-    : (relicProfile ? 760.0 : 225.0)))));
+    : (openSeaProfile ? 285.0
+    : (relicProfile ? 760.0 : 225.0))))));
   float distanceFog = smoothstep(fogNear,fogFar,d);
   float edgeFog = sceneProfile < .5
     ? smoothstep(98.0,106.0,arenaRadius)
     : smoothstep(sceneRadiusWorld*.82,sceneRadiusWorld*.98,arenaRadius);
-  float fog = max(distanceFog,edgeFog);
+  /* floorReadMapPostFunc exposes scene_data as {models,camera,lights,extra};
+     `extra` is registered as the 0x1A00 fog resource, and floorInitMap passes
+     that exact resource to fn_800D2B90/HSD_FogLoadDesc. The audited GC6E01
+     battle-stage DATs used by CBE all publish NULL extra pointers, so retail
+     disables HSD fog for those scenes. Keep the legacy edge/distance treatment
+     only for procedural/unverified arenas instead of mistaking it for source
+     photometry. */
+  float fog = sourceFogEnabled > 0.5 ? max(distanceFog,edgeFog) : 0.0;
   vec3 fogColor = summitProfile ? vec3(.50,.52,.54)
     : (orreProfile ? vec3(.63,.46,.31)
     : (realgamProfile ? vec3(.64,.47,.25)
     : (outskirtsProfile ? vec3(.91,.82,.62)
     : (deepProfile ? vec3(.026,.029,.027)
+    : (openSeaProfile ? vec3(.075,.115,.180)
     : (relicProfile ? vec3(.30,.37,.25)
     : (neutralSourceProfile ? vec3(.30,.31,.30)
-    : (sceneProfile > .5 ? vec3(.52,.64,.64) : vec3(.10,.19,.27))))))));
+    : (sceneProfile > .5 ? vec3(.52,.64,.64) : vec3(.10,.19,.27)))))))));
   if (materialMode > 3.5 && materialMode < 4.5)
     shaded = mix(shaded,fogColor,fog*(deepProfile ? .015 : .10));
   else if (!(materialMode > .5 && materialMode < 1.5)) {
@@ -849,15 +997,20 @@ vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
       : (realgamProfile ? .22
       : (outskirtsProfile ? .12
       : (deepProfile ? .018
+      : (openSeaProfile ? .23
       : (relicProfile ? .070
-      : (neutralSourceProfile ? .08 : (sceneProfile > .5 ? .36 : .42)))))));
+      : (neutralSourceProfile ? .08 : (sceneProfile > .5 ? .36 : .42))))))));
     shaded = mix(shaded,fogColor,fog*fogStrength);
   }
 
   if (materialMode > 2.5) a = 1.0;
-  return vec4(clamp(shaded,vec3(0.0),vec3(1.0)),clamp(a,0.0,1.0));
+  return applyWazaWorldModulate(vec4(clamp(shaded,vec3(0.0),vec3(1.0)),clamp(a,0.0,1.0)));
 }
 ]]
+
+MOBILE_PIXEL=MOBILE_PIXEL:gsub("/[*]OPEN_SEA_SHARED[*]/",function() return OPEN_SEA_PIXEL end)
+ANDROID_SAFE_PIXEL=ANDROID_SAFE_PIXEL:gsub("/[*]OPEN_SEA_SHARED[*]/",function() return OPEN_SEA_PIXEL end)
+PIXEL=PIXEL:gsub("/[*]OPEN_SEA_SHARED[*]/",function() return OPEN_SEA_PIXEL end)
 
 local scene, shader, white
 local shaderMode=nil
@@ -885,6 +1038,34 @@ local RESIDENT_LIMIT=ARENA_ANDROID and 2 or 3
 local activeDef=nil
 local STAGE_SCALE = 0.25
 local STAGE_YAW = 0
+local STAGE_COS,STAGE_SIN=1,0
+-- Stage transforms are immutable for one arena activation. Keep the composed
+-- matrix instead of rebuilding rotateY*scale on every frame; Mt. Battle's
+-- per-fight variation only changes this once at acquire/begin time.
+local function mat4Ready()
+  return Mat4 and type(Mat4.mul)=="function" and type(Mat4.rotateY)=="function" and type(Mat4.scale)=="function"
+end
+local function composeStageModel(scale,yaw)
+  if not mat4Ready() then return nil end
+  return Mat4.mul(Mat4.rotateY(yaw or 0),Mat4.scale(scale or .25,scale or .25,scale or .25))
+end
+local STAGE_MODEL=composeStageModel(STAGE_SCALE,STAGE_YAW)
+local summitVariation=nil
+local summitModels={}
+local summitCos={}
+local summitSin={}
+local summitOffsets={}
+local summitNumberGroup,summitNumberCanvas,summitNumberKey=nil,nil,nil
+local summitNumberModel=(Mat4 and type(Mat4.identity)=="function") and Mat4.identity() or nil
+-- Platform 100's giant red floor marking is a dedicated, flat source DObj. It is
+-- NOT the steel floor itself: the retail cache contains a central 759-vertex
+-- carrier using this exact 128x128 red atlas at raw Y ~= 0.5, over the ordinary
+-- deck groups. Mt. Battle reuses the Platform-100 environment for fights 1..100,
+-- so retaining that DObj permanently paints "100" under every generated fight.
+-- Keep the source geometry in the canonical cache, identify only this submitted
+-- carrier at runtime, suppress it, and repaint the current battle number in the
+-- same measured footprint. No per-fight arena/cache variants are created.
+local SUMMIT_RETAIL_NUMBER_PATH="cache/stages/d2_crater/textures/tex_07dec0_128x128_f14.rgba"
 local activeArenaId="water"
 -- The source map contains much more world geometry than a battle camera needs.
 -- 0.0.8 uses the FULL decoded Water Colosseum cache again, but keeps only the
@@ -910,8 +1091,34 @@ local figureScale = DEFAULT_FIGURE_SCALE
 local VIS_PLAYER = {0, 14.5}
 local VIS_ENEMY  = {0,-14.5}
 local sceneTime = 0
+local crowdSceneTime = 0
+local summitNight = false
+local summitNightCheckAt = -1
+local gen2Clock,gen2Palettes
 
-local function clamp(v,a,b) if v<a then return a elseif v>b then return b else return v end end
+local function gen2Night(game)
+  local compat=V and V.GenerationCompat
+  if not (compat and type(compat.current)=="function") then return false end
+  local okGen,generation=pcall(compat.current);if not okGen or tonumber(generation)~=2 then return false end
+  local req=(V and V.engineRequire) or require
+  if gen2Clock==nil then local ok,value=pcall(req,"src.core.gen2.Clock");gen2Clock=ok and value or false end
+  if gen2Palettes==nil then local ok,value=pcall(req,"src.world.gen2.Palettes");gen2Palettes=ok and value or false end
+  if not (gen2Clock and gen2Palettes and type(gen2Clock.hour)=="function" and type(gen2Palettes.clockDaytime)=="function") then return false end
+  local okHour,hour=pcall(gen2Clock.hour,game and game.save or nil);if not okHour then return false end
+  local okDay,daytime=pcall(gen2Palettes.clockDaytime,tonumber(hour) or 0);if not okDay then return false end
+  daytime=tostring(daytime or "DAY"):upper()
+  return daytime=="NITE" or daytime=="NIGHT" or daytime=="DARK"
+end
+
+local function audienceDt(ctx,dt)
+  local requested=math.max(0,tonumber(dt) or 0)
+  local perf=V and V.TrainerPerformance
+  local speed=1
+  if perf and type(perf.speed)=="function" then local ok,value=pcall(perf.speed,ctx);if ok then speed=tonumber(value) or 1 end end
+  if speed~=speed or speed<1 then speed=1 end
+  return requested/speed
+end
+
 local function log(ctx,level,msg,...)
   local l=ctx and ctx.services and ctx.services.log
   if l and type(l[level])=="function" then pcall(l[level],l,"[ColosseumEnv] "..msg,...) end
@@ -921,6 +1128,41 @@ local function readLua(path)
   local chunk,err=load(src,"@"..tostring(mod.path or mod.id).."/"..path)
   if not chunk then return nil,err end
   local ok,value=pcall(chunk); if not ok then return nil,value end
+  return value,nil,src
+end
+local function materializeArenaVertices(cache)
+  if type(cache)~="table" or type(cache.groups)~="table" then return nil,"invalid arena cache" end
+  for gi,g in ipairs(cache.groups) do
+    if type(g.vertices)~="table" then
+      local packed=g.verticesPacked
+      if type(packed)~="string" then return nil,("arena group %d vertex payload missing"):format(gi) end
+      local rows={}
+      for line in packed:gmatch("[^\r\n]+") do
+        local row={}
+        for token in line:gmatch("[^,]+") do
+          local value=tonumber(token)
+          if value==nil then return nil,("arena group %d packed vertex contains non-number"):format(gi) end
+          row[#row+1]=value
+        end
+        if #row<5 then return nil,("arena group %d packed vertex row too short"):format(gi) end
+        rows[#rows+1]=row
+      end
+      if #rows==0 then return nil,("arena group %d packed vertex payload empty"):format(gi) end
+      g.vertices=rows
+    end
+  end
+  return cache
+end
+local SOURCE_ANIMATION_CONTRACT="GC6E01/HSD_MatAnimJoint/clip0/mobj-1-10+tobj-affine/loop-30hz"
+local function sourceAnimationMetaPath(id)
+  return "cache/arena_source_animation/"..tostring(id or "water"):gsub("[^%w_%-]","_")..".lua"
+end
+local function readSourceAnimationMeta(id)
+  local path=sourceAnimationMetaPath(id)
+  local src=GeneratedAssets and GeneratedAssets.read and GeneratedAssets.read(path) or nil
+  if type(src)~="string" then return nil end
+  local chunk=load(src,"@"..path);if not chunk then return nil end
+  local ok,value=pcall(chunk);if not (ok and type(value)=="table" and value.contract==SOURCE_ANIMATION_CONTRACT) then return nil end
   return value
 end
 local function alphaInfo(bytes)
@@ -940,14 +1182,17 @@ local function texture(spec,textures)
   -- A retail image may be clamped on one polygon and repeated on another.
   -- LÖVE stores sampler state on the Image, so sharing solely by pixel path
   -- lets the first material's wrap mode leak into unrelated source surfaces.
-  local textureKey=tostring(spec.path).."|wrap:"..tostring(spec.wrapS)..","..tostring(spec.wrapT)
+  local textureKey=tostring(spec.path).."|wrap:"..tostring(spec.wrapS)..","..tostring(spec.wrapT).."|mips:"..tostring(spec.mipmaps==true)
   local prior=textures[textureKey]; if prior then return prior end
   local bytes,readErr=GeneratedAssets.read(spec.path); if not bytes then return nil,readErr or ("missing "..spec.path) end
   local binaryAlpha, fractionalAlpha = alphaInfo(bytes)
   local ok,data=pcall(love.image.newImageData,spec.w,spec.h,"rgba8",bytes)
   if not ok then return nil,data end
-  local ok2,img=pcall(love.graphics.newImage,data)
+  local ok2,img
+  if spec.mipmaps==true then ok2,img=pcall(love.graphics.newImage,data,{mipmaps=true}) end
+  if not ok2 then ok2,img=pcall(love.graphics.newImage,data) end
   if not ok2 then return nil,img end
+  if spec.mipmaps==true and img.setMipmapFilter then pcall(img.setMipmapFilter,img,"linear",0) end
   local path=tostring(spec.path or "")
   local crowd=V.ArenaAudienceProfile and V.ArenaAudienceProfile.classifyPath(path)
   local d2stage=path:find("cache/stages/d2_crater/textures/",1,true)
@@ -989,6 +1234,157 @@ local function texture(spec,textures)
   local entry={image=img,binaryAlpha=binaryAlpha,fractionalAlpha=fractionalAlpha}
   textures[textureKey]=entry; return entry
 end
+
+local function releaseSummitNumber()
+  if summitNumberGroup and summitNumberGroup.mesh then
+    pcall(function() if summitNumberGroup.mesh.release then summitNumberGroup.mesh:release() end end)
+  end
+  if summitNumberCanvas then pcall(function() if summitNumberCanvas.release then summitNumberCanvas:release() end end) end
+  summitNumberGroup,summitNumberCanvas,summitNumberKey=nil,nil,nil
+end
+
+-- Reuse an already-resident D2 source texture as the number plate whenever the
+-- source scene contains it. We intentionally do not call texture() here: doing
+-- so could decode a duplicate Image under a different sampler key on mobile.
+local function summitRetailNumberCarrier(path,center,extent)
+  if tostring(path or "")~=SUMMIT_RETAIL_NUMBER_PATH or type(center)~="table" or type(extent)~="table" then return false end
+  local cx,cy,cz=tonumber(center[1]) or math.huge,tonumber(center[2]) or math.huge,tonumber(center[3]) or math.huge
+  local ex,ey,ez=math.abs(tonumber(extent[1]) or 0),math.abs(tonumber(extent[2]) or 0),math.abs(tonumber(extent[3]) or 0)
+  -- Exact source group is central/flat and roughly 249 x .9 x 142 raw units.
+  -- Bounds make this fail closed if a future source/cache revision reuses the
+  -- same atlas for unrelated scenery.
+  return math.abs(cx)<60 and math.abs(cz)<32 and cy>-2 and cy<3
+    and ex>200 and ex<300 and ey<3 and ez>110 and ez<180
+end
+
+local function summitNumberFootprint(s)
+  for _,bucket in ipairs({s and s.opaque,s and s.cutout,s and s.translucent,s and s.additive}) do
+    for _,g in ipairs(bucket or {}) do
+      if g.summitNumberCarrier then return g.boundsCenter or g.center,g.extent end
+    end
+  end
+  return nil,nil
+end
+local function summitRetailNumberTexture(s)
+  for key,entry in pairs((s and s.textures) or {}) do
+    if tostring(key):sub(1,#SUMMIT_RETAIL_NUMBER_PATH)==SUMMIT_RETAIL_NUMBER_PATH
+        and type(entry)=="table" and entry.image then return entry.image end
+  end
+  return nil
+end
+
+local function summitSemanticClass(path,bucket)
+  if bucket=="crowd" then return "crowd" end
+  path=tostring(path or "")
+  if path:find("cache/stages/d2_crater/textures/tex_0ca920_",1,true)
+      or path:find("cache/stages/d2_crater/textures/tex_0be120_",1,true)
+      or path:find("cache/stages/d2_crater/textures/tex_0ea920_",1,true) then return "lava" end
+  if path:find("cache/stages/d2_crater/textures/tex_0ce920_",1,true)
+      or path:find("cache/stages/d2_crater/textures/tex_061ec0_",1,true) then return "rock" end
+  return nil
+end
+
+local function summitModelFor(g)
+  return (g and g.summitClass and summitModels[g.summitClass]) or STAGE_MODEL
+end
+
+-- GC6E01 D4_casino_colo modelset 3 contains the two counter-rotating upper
+-- machinery drums visible behind the Realgam battle floor. floorOpenObject()
+-- selects JObj animation 0, GSmodelLoad() marks it looping, and the floor path
+-- runs it at 0.5 on the 60 Hz model clock (= 30 HSD frames/sec). The canonical
+-- arena cache already contains these DObjs at their static JObj transforms, so
+-- runtime playback only needs the exact animated-vs-static Y-rotation delta.
+--
+-- Keep ownership fail-closed and content-addressed: both the source texture and
+-- immutable extracted bounds must match. This is intentionally NOT a generic
+-- arena animation heuristic, and it neither mutates nor invalidates arena cache
+-- payloads. D2 Summit has no JObj clip, so its source TexAnim lava path is
+-- completely independent of this closure.
+local REALGAM_JOINT_TEXTURE="cache/stages/realgam/source/tex_0ec960_256x256_f14.rgba"
+local REALGAM_SOURCE_JOINTS={
+  {
+    cy=153.45435,cz=-232.90010,ex=86.400009,ey=77.498278,ez=86.400010,
+    pivotX=0.0000064961465824354,pivotZ=-234.500119545055,
+    staticY=6.2831854820251465,endY=6.28125,endFrame=400,
+  },
+  {
+    cy=187.13605,cz=-232.90010,ex=86.400009,ey=77.498280,ez=86.400010,
+    pivotX=0.0000064961463976942,pivotZ=-234.500119545055,
+    staticY=-6.2831854820251465,endY=-6.282958984375,endFrame=400,
+  },
+}
+local function sourceJointNear(a,b,eps)return math.abs((tonumber(a) or 0)-(tonumber(b) or 0))<=(eps or .001) end
+local function realgamSourceJointDescriptor(path,center,extent,renderFlags)
+  if tostring(path or "")~=REALGAM_JOINT_TEXTURE or tonumber(renderFlags)~=16446
+      or type(center)~="table" or type(extent)~="table" then return nil end
+  for _,row in ipairs(REALGAM_SOURCE_JOINTS) do
+    if sourceJointNear(center[1],0,.001) and sourceJointNear(center[2],row.cy,.001)
+        and sourceJointNear(center[3],row.cz,.001)
+        and sourceJointNear(extent[1],row.ex,.001) and sourceJointNear(extent[2],row.ey,.001)
+        and sourceJointNear(extent[3],row.ez,.001) then return row end
+  end
+  return nil
+end
+local function sourceJointRotationDelta(row,time)
+  if type(row)~="table" then return nil end
+  local endFrame=tonumber(row.endFrame) or 0;if endFrame<=0 then return nil end
+  local frame=(math.max(0,tonumber(time) or 0)*30)%endFrame
+  -- Both GC6E01 D4 tracks are two-key HSD_A_OP_LIN streams from frame 0 to
+  -- frame 400, so this is the exact FObj value between authored keys.
+  local animatedY=(tonumber(row.endY) or 0)*(frame/endFrame)
+  return animatedY-(tonumber(row.staticY) or 0),frame
+end
+local function sourceJointModelFor(g,time)
+  local row=g and g.sourceJointAnimation;if not row then return nil end
+  local delta=sourceJointRotationDelta(row,time);if delta==nil then return nil end
+  local c,s=math.cos(delta),math.sin(delta)
+  local px,pz=tonumber(row.pivotX) or 0,tonumber(row.pivotZ) or 0
+  -- T(pivot) * RY(delta) * T(-pivot), written directly to avoid four temporary
+  -- matrix allocations per source group/frame on mobile.
+  local tx=px-c*px-s*pz
+  local tz=s*px+pz-c*pz
+  local localDelta={c,0,s,tx, 0,1,0,0, -s,0,c,tz, 0,0,0,1}
+  return Mat4.mul(STAGE_MODEL,localDelta)
+end
+
+-- One reusable floor mesh; the authored 100 remains in the source scene.
+local function ensureSummitBattleNumber(s,number)
+  number=tonumber(number)
+  if activeArenaId~="mt_battle_summit" or not number then releaseSummitNumber();return nil end
+  number=math.max(1,math.min(100,math.floor(number)))
+  if summitNumberKey==number then return number==100 and nil or summitNumberGroup end
+  if number==100 then summitNumberKey=100;return nil end
+  if not (V.SummitNumerals and love and love.graphics and love.graphics.newMesh) then return nil end
+  local sourceCenter,sourceExtent=summitNumberFootprint(s)
+  local retail=summitRetailNumberTexture(s)
+  if not (sourceCenter and sourceExtent and retail) then return nil end
+  local carrier
+  for _,bucket in ipairs({"opaque","cutout","translucent","additive"}) do
+    for _,g in ipairs(s[bucket] or {}) do
+      if g.summitNumberCarrier then carrier=g;break end
+    end
+    if carrier then break end
+  end
+  if not (carrier and carrier.mesh and carrier.mesh.getVertex) then return nil end
+  local source={}
+  for i=1,carrier.mesh:getVertexCount() do source[i]={carrier.mesh:getVertex(i)} end
+  local rows=V.SummitNumerals.build(number,source,sourceCenter,sourceExtent,STAGE_SCALE)
+  if not rows or #rows==0 then return nil end
+  local capacity=4096
+  if #rows>capacity then return nil end
+  if not summitNumberGroup then
+    local ok,m=pcall(love.graphics.newMesh,FORMAT,capacity,"triangles","dynamic")
+    if not ok or not m then return nil end
+    summitNumberGroup={}
+    for k,v in pairs(carrier) do summitNumberGroup[k]=v end
+    summitNumberGroup.mesh=m;summitNumberGroup.sourceJointAnimation=nil
+    m:setTexture(retail)
+  end
+  summitNumberGroup.mesh:setVertices(rows)
+  summitNumberGroup.mesh:setDrawRange(1,#rows)
+  summitNumberKey=number
+  return summitNumberGroup
+end
 local function groupStats(vertices)
   local x,y,z,n=0,0,0,0
   local minx,maxx,miny,maxy,minz,maxz=math.huge,-math.huge,math.huge,-math.huge,math.huge,-math.huge
@@ -997,9 +1393,10 @@ local function groupStats(vertices)
     x=x+vx;y=y+vy;z=z+vz;n=n+1
     minx=math.min(minx,vx);maxx=math.max(maxx,vx);miny=math.min(miny,vy);maxy=math.max(maxy,vy);minz=math.min(minz,vz);maxz=math.max(maxz,vz)
   end
-  if n==0 then return {0,0,0},0,{0,0,0} end
+  if n==0 then return {0,0,0},0,{0,0,0},{0,0,0} end
   local extent={maxx-minx,maxy-miny,maxz-minz}
-  return {x/n,y/n,z/n},math.max(extent[1],extent[2],extent[3]),extent
+  return {x/n,y/n,z/n},math.max(extent[1],extent[2],extent[3]),extent,
+    {(minx+maxx)*.5,(miny+maxy)*.5,(minz+maxz)*.5}
 end
 local function crowdCardPhases(vertices)
   local n=#(vertices or {});if n<3 then return nil end
@@ -1033,17 +1430,21 @@ local function crowdCardPhases(vertices)
   return phase
 end
 
-local function withNormals(vertices,mode)
+local function withNormals(vertices,mode,vertexRadius)
   local out={}
   local v=vertices or {}
   local crowdPhase=(mode==4) and crowdCardPhases(v) or nil
+  -- Exact source audience is not battle-disc geometry.  Its authored cards can
+  -- sit outside the ordinary mesh radius and must survive intact once the atlas
+  -- has identified them as audience.
+  local radius=(mode==4) and math.huge or (tonumber(vertexRadius) or BATTLE_VERTEX_RADIUS_RAW)
   for i=1,#v,3 do
     local a,b,c=v[i],v[i+1],v[i+2]
     if a and b and c then
       local ar=math.sqrt((a[1] or 0)^2+(a[3] or 0)^2)
       local br=math.sqrt((b[1] or 0)^2+(b[3] or 0)^2)
       local cr=math.sqrt((c[1] or 0)^2+(c[3] or 0)^2)
-      if math.min(ar,br,cr)<=BATTLE_VERTEX_RADIUS_RAW then
+      if math.min(ar,br,cr)<=radius then
         local abx,aby,abz=(b[1] or 0)-(a[1] or 0),(b[2] or 0)-(a[2] or 0),(b[3] or 0)-(a[3] or 0)
         local acx,acy,acz=(c[1] or 0)-(a[1] or 0),(c[2] or 0)-(a[2] or 0),(c[3] or 0)-(a[3] or 0)
         local nx=aby*acz-abz*acy
@@ -1119,7 +1520,12 @@ local function materialMode(g,tex)
   end
   if path:find("tex_0cbb60_",1,true) then return 2 end -- waterfall glint
   if path:find("tex_0cdb60_",1,true) or path:find("tex_081b60_",1,true) then return 1 end -- water
-  if tex and tex.binaryAlpha and V.ArenaAudienceProfile and V.ArenaAudienceProfile.classifyPath(path) then
+  -- Audience identity comes from the exact arena namespace + GC6E01 source
+  -- texture offset registry.  Do not additionally require the decoded alpha to
+  -- be mathematically binary: some authentic cards carry fractional edge alpha,
+  -- and demoting those verified banks to an ordinary opaque material is how a
+  -- valid crowd can disappear or render as solid rectangles.
+  if V.ArenaAudienceProfile and V.ArenaAudienceProfile.classifyPath(path) then
     return 4 -- all six source audience venues, namespace-qualified
   end
   if tex and tex.binaryAlpha and (path:find("tex_05c560_",1,true) or path:find("/source/",1,true)) then
@@ -1212,13 +1618,33 @@ end
 -- metadata plus tightly-packed float32 vertex streams. Subsequent sessions can
 -- skip both the giant Lua vertex parse and normal reconstruction. The source
 -- cache remains authoritative and any sidecar failure falls back to it.
-local ARENA_RUNTIME_MESH_VERSION=7
+local ARENA_RUNTIME_MESH_VERSION=8
 local arenaRuntimeHits,arenaRuntimeWrites=0,0
 local function safeArenaId(id) return tostring(id or "water"):gsub("[^%w_%-]","_") end
-local function arenaRuntimeRoot(id) return "cache/runtime_mesh_v7/arenas/"..safeArenaId(id) end
+local function arenaRuntimeRoot(id) return "cache/runtime_mesh_v8/arenas/"..safeArenaId(id) end
 local function arenaRuntimeMetaPath(id) return arenaRuntimeRoot(id).."/scene.lua" end
 local function arenaRuntimeBinPath(id,bucket,i)
   return arenaRuntimeRoot(id)..("/%s_%03d.f32"):format(tostring(bucket or "group"),tonumber(i) or 0)
+end
+local function sourceAnimationMetaBaseValid(meta,def,sourceSize)
+  return type(meta)=="table" and meta.contract==SOURCE_ANIMATION_CONTRACT
+    and tostring(meta.sourceCache or "")==tostring(def and def.cache or "")
+    and tonumber(meta.sourceSize)==tonumber(sourceSize)
+end
+local function sourceAnimationMetaForRuntime(def,rt)
+  local meta=readSourceAnimationMeta(def and def.id);if not sourceAnimationMetaBaseValid(meta,def,rt and rt.sourceSize) then return nil end
+  if type(meta.runtime)~="table" or type(meta.runtimeMetaFingerprint)~="string" or not ArenaCacheIdentity then return nil end
+  local raw=GeneratedAssets and GeneratedAssets.read and GeneratedAssets.read(arenaRuntimeMetaPath(def.id)) or nil
+  if type(raw)~="string" then return nil end
+  local ok,fingerprint=pcall(ArenaCacheIdentity.fingerprint,raw)
+  if not ok or fingerprint~=meta.runtimeMetaFingerprint then return nil end
+  return meta.runtime
+end
+local function sourceAnimationMetaForCanonical(def,sourceRaw)
+  local meta=readSourceAnimationMeta(def and def.id);if type(sourceRaw)~="string" or not sourceAnimationMetaBaseValid(meta,def,#sourceRaw) or not ArenaCacheIdentity then return nil end
+  local ok,fingerprint=pcall(ArenaCacheIdentity.fingerprint,sourceRaw)
+  if not ok or fingerprint~=meta.sourceFingerprint or type(meta.canonical)~="table" then return nil end
+  return meta.canonical
 end
 local function arenaSourceSize(def,meta)
   local info=GeneratedAssets and GeneratedAssets.info and GeneratedAssets.info(def and def.cache) or nil
@@ -1228,6 +1654,7 @@ end
 local function arenaRuntimeUsable(meta,def,sourceSize)
   if type(meta)~="table" or tonumber(meta.runtimeMeshVersion)~=ARENA_RUNTIME_MESH_VERSION then return false end
   if not sourceSize or tonumber(meta.sourceSize)~=sourceSize or tostring(meta.sourceCache or "")~=tostring(def and def.cache or "") then return false end
+  if (meta.preserveSourceShell==true)~=(def and def.preserveSourceShell==true) then return false end
   if def and def.id=="water" and meta.audienceRevision~=2 then return false end
   local total=0
   for _,bucket in ipairs({"opaque","cutout","crowd","translucent","additive"}) do
@@ -1253,9 +1680,10 @@ local function sourceVertexAlphaEnabled(g)
   return math.floor((tonumber(g.renderFlags) or 0)/1073741824)%2==1
 end
 local function compactArenaEntry(g,textureSpec,runtimeBin)
-  return {runtimeBin=runtimeBin,texture=textureSpec,alpha=g.alpha,noz=g.noz,center=g.center,span=g.span,extent=g.extent,mode=g.mode,flow=g.flow,detail=g.detail,texelStep=g.texelStep,
+  return {runtimeBin=runtimeBin,texture=textureSpec,alpha=g.alpha,noz=g.noz,center=g.center,boundsCenter=g.boundsCenter,span=g.span,extent=g.extent,mode=g.mode,flow=g.flow,detail=g.detail,texelStep=g.texelStep,
     diffuse=g.diffuse,ambient=g.ambient,specular=g.specular,shininess=g.shininess,renderFlags=g.renderFlags,effect=g.effect,
-    useConstant=g.useConstant,useVertexColor=g.useVertexColor,useDiffuseLighting=g.useDiffuseLighting,textureSlot=g.textureSlot}
+    useConstant=g.useConstant,useVertexColor=g.useVertexColor,useDiffuseLighting=g.useDiffuseLighting,textureSlot=g.textureSlot,
+    sourceMaterialAnimation=g.sourceMaterialAnimation,sourceTextureAnimation=g.sourceTextureAnimation}
 end
 local function ensureArenaShader(ctx)
   if shader then return shader end
@@ -1286,23 +1714,29 @@ local function ensureArenaShader(ctx)
   uniformCache=nil;uniformCacheShader=nil
   return shader
 end
-local function loadRuntimeArena(ctx,meta,def)
+local function loadRuntimeArena(ctx,meta,def,animationOverlay)
   local textures={}
   local out={opaque={},cutout={},crowd={},translucent={},additive={},bounds=meta.bounds,source=meta.source,textures=textures,
     culled=tonumber(meta.culled) or 0,oversizeCulled=tonumber(meta.oversizeCulled) or 0,crowdOutliers=tonumber(meta.crowdOutliers) or 0,
     crowdOriginal=tonumber(meta.crowdOriginal) or 0,crowdKept=tonumber(meta.crowdKept) or 0,crowdPolicy=meta.crowdPolicy,cachePath=def.cache,runtimeSidecar=true}
   for _,bucket in ipairs({"opaque","cutout","crowd","translucent","additive"}) do
     for i,g in ipairs(meta[bucket] or {}) do
+      local anim=animationOverlay and animationOverlay[bucket] and animationOverlay[bucket][i] or nil
       local tex,terr=texture(g.texture,textures);if not tex then releaseArenaScene(out);return nil,terr end
       local path=g.runtimeBin or arenaRuntimeBinPath(def.id,bucket,i)
       local mesh,merr=RuntimeMeshCache.meshFromPath(FORMAT,path,12,"static")
       if not mesh then releaseArenaScene(out);return nil,merr end
       mesh:setTexture(tex.image)
-      out[bucket][#out[bucket]+1]={mesh=mesh,alpha=tonumber(g.alpha) or 1,noz=g.noz and true or false,center=g.center or {0,0,0},span=tonumber(g.span) or 0,extent=g.extent or {0,0,0},
+      out[bucket][#out[bucket]+1]={mesh=mesh,alpha=tonumber(g.alpha) or 1,noz=g.noz and true or false,center=g.center or {0,0,0},boundsCenter=g.boundsCenter,span=tonumber(g.span) or 0,extent=g.extent or {0,0,0},
         mode=tonumber(g.mode) or 0,flow=tonumber(g.flow) or 0,detail=g.detail,texelStep=g.texelStep or {1,1},diffuse=g.diffuse or {1,1,1},
         ambient=g.ambient or {1,1,1},specular=g.specular or {0,0,0},shininess=tonumber(g.shininess) or 0,renderFlags=tonumber(g.renderFlags) or 0,effect=g.effect and true or false,
         useConstant=g.useConstant and true or false,useVertexColor=g.useVertexColor and true or false,useVertexAlpha=sourceVertexAlphaEnabled(g),useDiffuseLighting=g.useDiffuseLighting~=false,textureSlot=tonumber(g.textureSlot) or -1,
-        textureColorMap=tonumber(g.texture and g.texture.colorMap) or 4,textureBlending=tonumber(g.texture and g.texture.blending) or 1}
+        textureColorMap=tonumber(g.texture and g.texture.colorMap) or 4,textureBlending=tonumber(g.texture and g.texture.blending) or 1,
+        summitClass=summitSemanticClass(g.texture and g.texture.path,bucket),
+        summitNumberCarrier=summitRetailNumberCarrier(g.texture and g.texture.path,g.center,g.extent),
+        sourceJointAnimation=realgamSourceJointDescriptor(g.texture and g.texture.path,g.center,g.extent,g.renderFlags),
+        sourceMaterialAnimation=g.sourceMaterialAnimation or (anim and anim.sourceMaterialAnimation),
+        sourceTextureAnimation=g.sourceTextureAnimation or (anim and anim.sourceTextureAnimation)}
     end
   end
   arenaRuntimeHits=arenaRuntimeHits+1
@@ -1319,11 +1753,14 @@ local function loadScene(ctx)
   local def=activeDef or (ArenaCatalog and ArenaCatalog.definition and ArenaCatalog.definition("water")) or {id="water",cache="cache/M1_water_cache.lua"}
   local cachePath=def.cache or "cache/M1_water_cache.lua"
   local rt
+  local preserveArenaRuntime=false
   if RuntimeMeshCache and type(RuntimeMeshCache.readLua)=="function" and type(RuntimeMeshCache.meshFromPath)=="function" then
-    rt=select(1,RuntimeMeshCache.readLua(arenaRuntimeMetaPath(def.id)))
+    local rtPath=arenaRuntimeMetaPath(def.id)
+    rt=select(1,RuntimeMeshCache.readLua(rtPath))
+    preserveArenaRuntime=rt~=nil or (type(RuntimeMeshCache.exists)=="function" and RuntimeMeshCache.exists(rtPath)) or false
     local sourceSize=arenaSourceSize(def,rt)
     if arenaRuntimeUsable(rt,def,sourceSize) then
-      local runtimeScene,rerr=loadRuntimeArena(ctx,rt,def)
+      local runtimeScene,rerr=loadRuntimeArena(ctx,rt,def,sourceAnimationMetaForRuntime(def,rt))
       if runtimeScene then
         local sh,serr=ensureArenaShader(ctx);if not sh then releaseArenaScene(runtimeScene);errorText=tostring(serr);return nil,errorText end
         scene=runtimeScene;touchResident(activeArenaId,scene);errorText=nil
@@ -1333,25 +1770,42 @@ local function loadScene(ctx)
     end
   end
   local sourceSize=arenaSourceSize(def,rt)
-  local cache,err=readLua(cachePath)
+  local cache,err,cacheRaw=readLua(cachePath)
   if not cache then errorText=tostring(err);return nil,errorText end
+  local materialized,packedErr=materializeArenaVertices(cache)
+  if not materialized then errorText=tostring(packedErr);return nil,errorText end
+  local canonicalAnimation=sourceAnimationMetaForCanonical(def,cacheRaw)
+  if canonicalAnimation and #canonicalAnimation==#(cache.groups or {}) then
+    for i,g in ipairs(cache.groups or {}) do
+      local anim=canonicalAnimation[i]
+      if type(anim)=="table" then
+        if g.sourceMaterialAnimation==nil then g.sourceMaterialAnimation=anim.sourceMaterialAnimation end
+        if g.sourceTextureAnimation==nil then g.sourceTextureAnimation=anim.sourceTextureAnimation end
+      end
+    end
+  end
   local textures={}; local opaque, cutout, crowd, translucent, additive = {}, {}, {}, {}, {}
   local runtimeRows={opaque={},cutout={},crowd={},translucent={},additive={}}
   local runtimeWritable=sourceSize and RuntimeMeshCache and RuntimeMeshCache.supported and RuntimeMeshCache.supported() and type(RuntimeMeshCache.writeRows)=="function"
   local runtimeAll=runtimeWritable and true or false
+  local preserveShell=activeDef and activeDef.preserveSourceShell==true and cache.crowdPolicy=="source-hsd-crowd"
   local culled,oversizeCulled,crowdOutliers=0,0,0
   for i,g in ipairs(cache.groups or {}) do
-    local center,span,extent=groupStats(g.vertices)
+    local center,span,extent,boundsCenter=groupStats(g.vertices)
     local radial=math.sqrt((center[1] or 0)^2+(center[3] or 0)^2)
-    if radial>BATTLE_SCENE_RADIUS_RAW or span>BATTLE_MAX_GROUP_SPAN_RAW or dropGhostLayer(g) then
+    local sourcePath=g and g.texture and tostring(g.texture.path or "") or ""
+    local sourceAudience=V.ArenaAudienceProfile and V.ArenaAudienceProfile.classifySourceTexture
+      and V.ArenaAudienceProfile.classifySourceTexture(activeArenaId,sourcePath)~=nil
+    local preserveGroup=preserveShell or sourceAudience
+    if ((not preserveGroup) and (radial>BATTLE_SCENE_RADIUS_RAW or span>BATTLE_MAX_GROUP_SPAN_RAW)) or dropGhostLayer(g) then
       culled=culled+1
-      if span>BATTLE_MAX_GROUP_SPAN_RAW then oversizeCulled=oversizeCulled+1 end
+      if (not preserveGroup) and span>BATTLE_MAX_GROUP_SPAN_RAW then oversizeCulled=oversizeCulled+1 end
     else
       local tex,terr=texture(g.texture,textures)
       if not tex then errorText=tostring(terr);return nil,errorText end
       local alpha=tonumber(g.alpha) or 1
       local mode=materialMode(g,tex)
-      local meshVertices=withNormals(g.vertices,mode)
+      local meshVertices=withNormals(g.vertices,mode,preserveGroup and math.huge or BATTLE_VERTEX_RADIUS_RAW)
       if #meshVertices==0 then
         culled=culled+1
       else
@@ -1373,22 +1827,26 @@ local function loadScene(ctx)
           local wp=tostring(g.texture and g.texture.path or "")
           flow=wp:find("grass_tuft_",1,true) and 1 or 0.35
         end
-        local entry={mesh=mesh,alpha=alpha,noz=g.noz and true or false,center=center,span=span,extent=extent,mode=mode,flow=flow,detail=detail,texelStep={1/math.max(1,tw),1/math.max(1,th)},
+        local entry={mesh=mesh,alpha=alpha,noz=g.noz and true or false,center=center,boundsCenter=boundsCenter,span=span,extent=extent,mode=mode,flow=flow,detail=detail,texelStep={1/math.max(1,tw),1/math.max(1,th)},
           diffuse=g.diffuse or {1,1,1},ambient=g.ambient or {1,1,1},specular=g.specular or {0,0,0},shininess=tonumber(g.shininess) or 0,renderFlags=tonumber(g.renderFlags) or 0,effect=g.effect and true or false,
           useConstant=g.useConstant and true or false,useVertexColor=g.useVertexColor and true or false,useVertexAlpha=sourceVertexAlphaEnabled(g),useDiffuseLighting=g.useDiffuseLighting~=false,textureSlot=tonumber(g.textureSlot) or -1,
-          textureColorMap=tonumber(g.texture and g.texture.colorMap) or 4,textureBlending=tonumber(g.texture and g.texture.blending) or 1}
+          textureColorMap=tonumber(g.texture and g.texture.colorMap) or 4,textureBlending=tonumber(g.texture and g.texture.blending) or 1,
+          summitNumberCarrier=summitRetailNumberCarrier(sourcePath,center,extent),
+          sourceJointAnimation=realgamSourceJointDescriptor(g.texture and g.texture.path,center,extent,g.renderFlags),
+          sourceMaterialAnimation=g.sourceMaterialAnimation,sourceTextureAnimation=g.sourceTextureAnimation}
         local bucketName,bucket
         if mode==2 then
           bucketName,bucket="additive",additive
+        elseif mode==1 and activeArenaId=="open_water" and not g.xlu then
+          bucketName,bucket="opaque",opaque
         elseif mode==1 then
-          -- Force all water through the transparent pass, even when the source
+          -- Force all retail water through the transparent pass, even when the source
           -- material happened to be marked opaque for its original TEV setup.
           bucketName,bucket="translucent",translucent
         elseif mode==4 then
           -- Exact source modelsets contain legitimate upper banks at raw
           -- Y=105..148. The old recipe-only Y=84 rule erased 35 of 57 cards.
           -- Preserve every authored source bank; retain the legacy recipe guard.
-          local cpath=tostring(g.texture and g.texture.path or "")
           if cache.crowdPolicy=="source-hsd-crowd" or activeArenaId~="water" or (center[2] or 0) <= 84.0 then
             bucketName,bucket="crowd",crowd
           else
@@ -1402,11 +1860,12 @@ local function loadScene(ctx)
           bucketName,bucket="translucent",translucent
         end
         if bucket then
+          entry.summitClass=summitSemanticClass(sourcePath,bucketName)
           bucket[#bucket+1]=entry
           if runtimeWritable then
             local ri=#runtimeRows[bucketName]+1
             local bin=arenaRuntimeBinPath(def.id,bucketName,ri)
-            local wok=RuntimeMeshCache.writeRows(bin,meshVertices,12)
+            local wok=RuntimeMeshCache.writeRows(bin,meshVertices,12,nil,preserveArenaRuntime)
             if wok then runtimeRows[bucketName][ri]=compactArenaEntry(entry,g.texture,bin) else runtimeAll=false end
           end
         end
@@ -1416,13 +1875,15 @@ local function loadScene(ctx)
   local sh,serr=ensureArenaShader(ctx)
   if not sh then errorText=tostring(serr);return nil,errorText end
   scene={opaque=opaque,cutout=cutout,crowd=crowd,translucent=translucent,additive=additive,bounds=cache.bounds,source=cache.source,textures=textures,culled=culled,oversizeCulled=oversizeCulled,crowdOutliers=crowdOutliers,
-    crowdOriginal=tonumber(cache.crowdOriginal) or 0,crowdKept=#crowd,crowdPolicy=cache.crowdPolicy or ((activeDef and activeDef.crowd) or "none"),cachePath=cachePath,runtimeSidecar=false }
+    crowdOriginal=tonumber(cache.crowdOriginal) or 0,crowdKept=#crowd,crowdPolicy=cache.crowdPolicy or ((activeDef and activeDef.crowd) or "none"),
+    preserveSourceShell=preserveShell,cachePath=cachePath,runtimeSidecar=false }
   if runtimeAll and RuntimeMeshCache and type(RuntimeMeshCache.writeLua)=="function" then
     local meta={runtimeMeshVersion=ARENA_RUNTIME_MESH_VERSION,audienceRevision=2,textureStateVersion=cache.textureStateVersion,sourceSize=sourceSize,sourceCache=cachePath,bounds=cache.bounds,source=cache.source,
       culled=culled,oversizeCulled=oversizeCulled,crowdOutliers=crowdOutliers,crowdOriginal=tonumber(cache.crowdOriginal) or 0,crowdKept=#crowd,
-      crowdPolicy=cache.crowdPolicy or ((activeDef and activeDef.crowd) or "none"),opaque=runtimeRows.opaque,cutout=runtimeRows.cutout,crowd=runtimeRows.crowd,
+      crowdPolicy=cache.crowdPolicy or ((activeDef and activeDef.crowd) or "none"),preserveSourceShell=preserveShell,
+      opaque=runtimeRows.opaque,cutout=runtimeRows.cutout,crowd=runtimeRows.crowd,
       translucent=runtimeRows.translucent,additive=runtimeRows.additive}
-    local wok=RuntimeMeshCache.writeLua(arenaRuntimeMetaPath(def.id),meta)
+    local wok=RuntimeMeshCache.writeLua(arenaRuntimeMetaPath(def.id),meta,preserveArenaRuntime)
     if wok then arenaRuntimeWrites=arenaRuntimeWrites+1;log(ctx,"info","wrote compact runtime arena sidecar for %s",tostring(def.id)) end
   end
   cache=nil
@@ -1567,32 +2028,167 @@ local function viewProjection(ctx,w,h)
   p[5],p[6],p[7],p[8]=-p[5],-p[6],-p[7],-p[8]
   return Mat4.mul(p,Mat4.lookAt(eye,focus,UP_Y)), pose
 end
+local WAZA_NEUTRAL={128/255,128/255,128/255,1}
+-- Verified directly from the GC6E01 `scene_data.extra` field. These are the ten
+-- retail HSD arena DATs used by this mod; every one publishes a NULL fog
+-- resource. Keep this explicit/fail-closed so a future arena does not silently
+-- inherit the no-fog claim until its own source archive has been audited.
+local SOURCE_NO_FOG={
+  water=true,orre_colosseum=true,cipher_lab_underground=true,
+  relic_chamber=true,relic_cave=true,outskirts=true,pyrite_colosseum=true,
+  deep_colosseum=true,realgam_colosseum=true,mt_battle_summit=true,
+}
+local function sourceFogEnabled(def)
+  return not (def and SOURCE_NO_FOG[tostring(def.id or "")]==true)
+end
 local function setStageState(vp,model,writeDepth,pose)
   if depthActive then love.graphics.setDepthMode("lequal",writeDepth and true or false) else love.graphics.setDepthMode() end
   if love.graphics.setMeshCullMode then love.graphics.setMeshCullMode("none") end
   love.graphics.setBlendMode("alpha","alphamultiply")
-  love.graphics.setColor(1,1,1,1)
+  if summitNight and activeDef and activeDef.profile=="summit" then
+    love.graphics.setColor(.48,.58,.76,1)
+  else love.graphics.setColor(1,1,1,1) end
   love.graphics.setShader(shader)
   sendShader("vp","row",vp);sendShader("model","row",model)
-  sendShader("sceneTime",sceneTime)
+  -- Sea swell follows the unaccelerated environment clock. Battle/MoveFX
+  -- retain sceneTime and their source timing in all retail venues.
+  sendShader("sceneTime",activeDef and activeDef.profile=="open_water" and crowdSceneTime or sceneTime)
   sendShader("sceneRadiusWorld",math.max(20,(BATTLE_VERTEX_RADIUS_RAW or 415)*(STAGE_SCALE or 0.25)+8))
   local profile=(activeDef and activeDef.profile) or "water"
-  sendShader("sceneProfile",profile=="realgam" and 4 or (profile=="orre" and 3 or (profile=="summit" and 2 or (profile=="outdoor" and 1 or (profile=="water" and 0 or (profile=="relic" and 5 or (profile=="relic_cave" and 6 or (profile=="outskirts" and 7 or (profile=="pyrite" and 8 or ((profile=="deep" or profile=="cipher_lab") and 9 or 5))))))))))
+  -- v6 Open Sea has a shared desktop/mobile material and world-space sky.
+  -- Retail Water Colosseum and other source venues retain their own paths.
+  sendShader("sceneProfile",profile=="open_water" and 10 or (profile=="realgam" and 4 or (profile=="orre" and 3 or (profile=="summit" and 2 or (profile=="outdoor" and 1 or (profile=="water" and 0 or (profile=="relic" and 5 or (profile=="relic_cave" and 6 or (profile=="outskirts" and 7 or (profile=="pyrite" and 8 or ((profile=="deep" or profile=="cipher_lab") and 9 or 5)))))))))))
+  sendShader("sourceFogEnabled",sourceFogEnabled(activeDef) and 1 or 0)
   sendShader("cameraEye",pose and pose.eye or {54,24,13})
+  local modulate=WAZA_NEUTRAL
+  local wh=V and V.WazaHandlers
+  if wh and type(wh.arenaModulation)=="function" then
+    local ok,value=pcall(wh.arenaModulation,wh)
+    if ok and type(value)=="table" then modulate=value end
+  end
+  sendShader("wazaWorldModulate",modulate)
 end
 -- Shared immutable fallbacks. These were allocated fresh for every material
 -- group that omitted the field, on every frame.
 local WHITE3={1,1,1}
 local BLACK3={0,0,0}
 local UNIT2={1,1}
+local SOURCE_TEX_ID0={1,0,0,0}
+local SOURCE_TEX_ID1={1,0}
+local sourceTexRow0={1,0,0,0}
+local sourceTexRow1={1,0}
+local sourceMatDiffuse={1,1,1}
+local sourceMatAmbient={1,1,1}
+local sourceMatSpecular={0,0,0}
+local function sourceFobjValue(keys,frame)
+  if not keys or #keys==0 then return nil end
+  if frame<(tonumber(keys[1].frame) or 0) then return nil end
+  if frame>=(tonumber(keys[#keys].frame) or 0) then
+    for i=#keys,1,-1 do if tonumber(keys[i].op)~=5 then return tonumber(keys[i].value) end end
+    return nil
+  end
+  local p0,p1,d0,d1,t0,t1=0,0,0,0,0,0;local opPrev,op=1,1
+  for _,k in ipairs(keys) do
+    opPrev=op;op=tonumber(k.op) or 0
+    local value,tan,kframe=tonumber(k.value) or 0,tonumber(k.tan) or 0,tonumber(k.frame) or 0
+    if op==1 or op==2 then p0=p1;p1=value;if opPrev~=5 then d0=d1;d1=0 end;t0=t1;t1=kframe
+    elseif op==3 then p0=p1;d0=d1;p1=value;d1=0;t0=t1;t1=kframe
+    elseif op==4 then p0=p1;p1=value;d0=d1;d1=tan;t0=t1;t1=kframe
+    elseif op==5 then d0=d1;d1=tan
+    elseif op==6 then p0=p1;p1=value;t0=t1;t1=kframe end
+    if t1>frame and op~=5 then break end
+    opPrev=op
+  end
+  if frame<=t0 then return p0 end;if frame>=t1 then return p1 end
+  if t0==t1 or opPrev==1 or opPrev==6 then return p0 end
+  local time=frame-t0;local span=t1-t0
+  if opPrev==2 then return p0+(p1-p0)*(time/span) end
+  if opPrev==3 or opPrev==4 or opPrev==5 then
+    local inv=1/span;local f1=time*time;local f2=inv*inv*f1*time;local f3=3*f1*inv*inv;local f4=f2-f1*inv;local f2b=2*f2*inv
+    return d1*f4+d0*(time+(f4-f1*inv))+p0*(1+(f2b-f3))+p1*(-f2b+f3)
+  end
+  return p0
+end
+local function sourceTextureAnimationRows(g,time)
+  local anim=g and g.sourceTextureAnimation
+  if type(anim)~="table" then return 0,SOURCE_TEX_ID0,SOURCE_TEX_ID1 end
+  if anim.state~="animated" then return 1,SOURCE_TEX_ID0,SOURCE_TEX_ID1 end
+  local base=anim.base
+  if type(base)~="table" or type(base.baseInverse)~="table" then return 1,SOURCE_TEX_ID0,SOURCE_TEX_ID1 end
+  local scale=base.scale or UNIT2;local translation=base.translation or {0,0}
+  local sx0,sy0=tonumber(scale[1]) or 1,tonumber(scale[2]) or 1
+  local tx,ty=tonumber(translation[1]) or 0,tonumber(translation[2]) or 0
+  local rz=tonumber(base.rotationZ) or 0
+  local endFrame=tonumber(anim.endFrame) or 0
+  local frame=(tonumber(time) or 0)*(tonumber(anim.framesPerSecond) or 30)
+  if anim.loop~=false and endFrame>0 then frame=frame-math.floor(frame/endFrame)*endFrame elseif endFrame>0 and frame>endFrame then frame=endFrame end
+  local tracks=anim.tracks or {}
+  local v=sourceFobjValue(tracks[2],frame);if v~=nil then tx=v end
+  v=sourceFobjValue(tracks[3],frame);if v~=nil then ty=v end
+  v=sourceFobjValue(tracks[4],frame);if v~=nil then sx0=v end
+  v=sourceFobjValue(tracks[5],frame);if v~=nil then sy0=v end
+  v=sourceFobjValue(tracks[8],frame);if v~=nil then rz=v end
+  local rs,rt=tonumber(base.repeatS) or 1,tonumber(base.repeatT) or 1
+  if rs<=0 or rt<=0 then return 1,SOURCE_TEX_ID0,SOURCE_TEX_ID1 end
+  local us=math.abs(sx0)<1e-10 and 0 or rs/sx0
+  local vs=math.abs(sy0)<1e-10 and 0 or rt/sy0
+  local mirror=(tonumber(base.wrapT) or 0)==2 and sy0/rt or 0
+  local c,s=math.cos(rz),math.sin(rz)
+  local px,py=-tx,-(ty+mirror)
+  -- Exact affine subset of SysDolphin MakeTextureMtx: S * R(-Z) * T(-XY).
+  local a,b=us*c,us*s;local d,e=-vs*s,vs*c
+  local cc=us*(c*px+s*py);local ff=vs*(-s*px+c*py)
+  local inv=base.baseInverse
+  local ia,ib,ic,id,ie,ifv=tonumber(inv[1]),tonumber(inv[2]),tonumber(inv[3]),tonumber(inv[4]),tonumber(inv[5]),tonumber(inv[6])
+  if not (ia and ib and ic and id and ie and ifv) then return 1,SOURCE_TEX_ID0,SOURCE_TEX_ID1 end
+  sourceTexRow0[1]=a*ia+b*id;sourceTexRow0[2]=a*ib+b*ie;sourceTexRow0[3]=a*ic+b*ifv+cc
+  sourceTexRow0[4]=d*ia+e*id;sourceTexRow1[1]=d*ib+e*ie;sourceTexRow1[2]=d*ic+e*ifv+ff
+  return 1,sourceTexRow0,sourceTexRow1
+end
+local function sourceMaterialAnimationValues(g,time)
+  local alpha=tonumber(g and g.alpha) or 1
+  local diffuse=(g and g.diffuse) or WHITE3
+  local ambient=(g and g.ambient) or WHITE3
+  local specular=(g and g.specular) or BLACK3
+  local anim=g and g.sourceMaterialAnimation
+  if type(anim)~="table" then return 0,alpha,diffuse,ambient,specular end
+  if anim.state~="animated" then return 1,alpha,diffuse,ambient,specular end
+  for i=1,3 do sourceMatDiffuse[i]=tonumber(diffuse[i]) or 1;sourceMatAmbient[i]=tonumber(ambient[i]) or 1;sourceMatSpecular[i]=tonumber(specular[i]) or 0 end
+  local endFrame=tonumber(anim.endFrame) or 0
+  local frame=(tonumber(time) or 0)*(tonumber(anim.framesPerSecond) or 30)
+  if anim.loop~=false and endFrame>0 then frame=frame-math.floor(frame/endFrame)*endFrame elseif endFrame>0 and frame>endFrame then frame=endFrame end
+  local tracks=anim.tracks or {}
+  local function colorChannel(track,base)
+    local v=sourceFobjValue(tracks[track],frame)
+    if v==nil then return base end
+    if v<=0 then return 0 elseif v>=1 then return 1 end
+    -- GC6E01 MObjUpdateFunc stores animated ambient/diffuse/specular channels
+    -- through an unsigned 8-bit material field after clamp-to-[0,1].
+    return math.floor(255*v)/255
+  end
+  for i=1,3 do sourceMatAmbient[i]=colorChannel(i,sourceMatAmbient[i]) end
+  for i=1,3 do sourceMatDiffuse[i]=colorChannel(i+3,sourceMatDiffuse[i]) end
+  for i=1,3 do sourceMatSpecular[i]=colorChannel(i+6,sourceMatSpecular[i]) end
+  local av=sourceFobjValue(tracks[10],frame)
+  if av~=nil then
+    av=1-av
+    if av<=0 then alpha=0 elseif av>=1 then alpha=1 else alpha=av end
+  end
+  return 1,alpha,sourceMatDiffuse,sourceMatAmbient,sourceMatSpecular
+end
 local worldCenter
 local function cameraOccluder(g,pose)
-  -- The complete Relic cache uses native joint scale compensation. Its former
-  -- "overhangs" were sheared source geometry, not extra foreground props.
-  -- A material group can contain hundreds of separate leaf sprigs; its AABB
-  -- must never erase the real forest now that their transforms are correct.
-  if activeDef and activeDef.profile=="relic" and activeDef.sourceShellOnly then return false end
-  -- 1.9.27 hard Relic clear-zone rule. Any broad, thin, elevated carrier whose
+  -- Canonical Relic uses the complete retail HSD shell. Never send it through
+  -- any CBE-authored camera/AABB readability heuristic. Retail HSD submission is
+  -- controlled by authored JOBJ/DOBJ visibility/pass state; it does not delete a
+  -- source tree, foliage card, canopy or branch because a different battle shot
+  -- puts that geometry in front of the lens. The old projected-view guard could
+  -- suppress the 8,070-vertex source foliage group for an entire camera orbit.
+  if activeDef and activeDef.profile=="relic" and activeDef.sourceShellOnly then
+    return false
+  end
+  -- Legacy/non-source Relic clear-zone rule. Canonical sourceShellOnly returns
+  -- above and never reaches it. Any broad, thin, elevated carrier whose
   -- raw bounds actually cross the battle core is presentation-only overhead for
   -- CBE's 360-degree camera and is never submitted. This is deliberately based
   -- on geometry bounds, not a single centre ray, so the same branch/canopy sheet
@@ -1609,11 +2205,8 @@ local function cameraOccluder(g,pose)
     if crossesCore and broad and thin and elevated then return true end
   end
 
-  -- Relic Chamber uses a view-adaptive presentation guard in addition to its
-  -- clean camera volume. The source scene stays complete; only an oversized
-  -- camera-side foliage/root carrier that actually covers the protected battle
-  -- viewport is omitted for the current view. This catches the broad off-centre
-  -- canopy/pale bark sheets that centre-ray tests cannot detect.
+  -- Legacy/non-source Relic view-adaptive presentation guard. This predates the
+  -- retail DAT audit and is intentionally unreachable from canonical source mode.
   if activeDef and activeDef.presentationOccluderTrim and activeDef.profile=="relic"
       and RelicPresentation and type(RelicPresentation.shouldCull)=="function" then
     local aspect=(projW and projH and projH>0) and (projW/projH) or (16/9)
@@ -1672,7 +2265,7 @@ local function ensureRelicFarField()
   local tex=texture(nil,scene and scene.textures or {})
   if not (tex and tex.image) then return nil end
   local rows={};local seg=96
-  -- 1.9.31 continuity land: source geometry now supplies the visible roots,
+  -- Legacy continuity land: source geometry supplies the visible roots,
   -- rocks and ground patches. This mesh only bridges the space underneath them,
   -- but uses denser rings and low-relief deterministic mottling so it no longer
   -- reads as one flat olive disc beyond the authored stage.
@@ -1713,6 +2306,7 @@ local function drawRelicFarField()
   if activeDef.sourceShellOnly then return end
   local m=ensureRelicFarField();if not m then return end
   sendShader("materialAlpha",1);sendShader("materialMode",0);sendShader("materialFlow",0)
+  sendShader("sourceMatAnimAuthored",0);sendShader("sourceTexAnimAuthored",0);sendShader("sourceTexAnim0",SOURCE_TEX_ID0);sendShader("sourceTexAnim1",SOURCE_TEX_ID1)
   sendShader("sourceTextureColorMap",4);sendShader("sourceTextureBlending",1)
   sendShader("materialDiffuse",WHITE3);sendShader("materialAmbient",WHITE3);sendShader("materialSpecular",BLACK3);sendShader("materialShininess",0)
   sendShader("sourceDiffuseLighting",0);sendShader("sourceVertexColor",1);sendShader("sourceVertexAlpha",1);sendShader("sourceConstantColor",0)
@@ -1720,13 +2314,11 @@ local function drawRelicFarField()
   love.graphics.draw(m)
 end
 
--- Relic Chamber source-forest closure. The battle map has excellent authentic
--- tree/trunk/leaf assets, but its retail camera never exposes every azimuth at
--- once. CBE does. Rather than drawing synthetic billboard trees, select a small
--- motif directly from the extracted M3_shrine_1F_bf material groups and reuse
--- those source meshes OUTSIDE the legal camera volume. This gives every 360°
--- angle real Colosseum bark/foliage geometry while keeping the inner clearing
--- completely free of foreground branches.
+-- Historical Relic source-forest closure. The retail DAT audit proves the scene
+-- already contains source geometry through every azimuth, so canonical
+-- sourceShellOnly returns before this path. Keep it only as a clearly non-exact
+-- fallback for legacy/non-source definitions; never treat rotated source copies
+-- as retail-authored instances.
 local drawGroup
 local relicForestSectorCache=setmetatable({},{__mode="k"})
 local function angleWrap(a)
@@ -1747,14 +2339,9 @@ local function relicAtan2(y,x)
   return 0
 end
 
--- 1.9.29: build the missing 360-degree Relic perimeter from a COMPLETE source
--- forest sector rather than cloning four trunk groups and five leaf cards as
--- isolated "trees".  The retail battle map contains one side with a coherent
--- arrangement of trunks, roots, rocks and matching foliage.  Find the densest
--- safe 120-degree perimeter sector at runtime, preserve every eligible group in
--- that sector at its authored relative position, then rotate that whole source
--- sector around the shrine.  This keeps real Colosseum spacing/material pairing
--- and removes the sparse/repeated artificial-ring look from 1.9.28.
+-- Legacy closure builder. This rotates a selected source sector into positions
+-- that are NOT authored scene instances. Canonical sourceShellOnly bypasses it;
+-- it remains solely for old fallback definitions that do not claim 1:1 parity.
 local function relicForestSector(s)
   if not s then return nil end
   local cached=relicForestSectorCache[s];if cached then return cached end
@@ -1805,10 +2392,7 @@ local function relicForestSector(s)
   for _,g in ipairs(s.opaque or {}) do consider(g,"opaque") end
   for _,g in ipairs(s.cutout or {}) do consider(g,"cutout") end
 
-  -- Use one coherent HALF of the retail forest and mirror only the missing
-  -- hemisphere. 1.9.29's 120-degree slice repeated three times was structurally
-  -- complete but visually repetitive and sparse. A 180-degree source slice
-  -- retains far more unique trunks, roots, ground and foliage relationships.
+  -- Legacy fallback: select one coherent source half for synthetic replication.
   local windowBins=8
   local bestStart,bestScore=1,-1
   for st=1,binsN do
@@ -1835,9 +2419,8 @@ local function drawRelicSourceForestShell(s,vp,baseModel,pose)
   local sector=relicForestSector(s)
   if not (sector and #sector.groups>0) then return end
 
-  -- The original M3 scene remains authoritative. Fill only the opposite
-  -- hemisphere with the complete source half. This removes the repeated
-  -- three-sector tree cadence while preserving a clean inner camera bowl.
+  -- Legacy fallback only: rotated copies are synthetic and never participate in
+  -- canonical source-shell rendering.
   local copyModel=Mat4.mul(Mat4.rotateY(math.pi),baseModel)
   setStageState(vp,copyModel,true,pose)
   for _,g in ipairs(sector.groups) do drawGroup(g) end
@@ -1898,8 +2481,14 @@ local function ensureOutskirtsFarField()
 end
 local function drawOutskirtsFarField()
   if not (activeDef and activeDef.profile=="outskirts") then return end
+  -- Source-parity mode: S1_out_bf now retains its complete submitted HSD shell.
+  -- The old five-ring skirt was CBE-authored continuity geometry and overlaps
+  -- the expanded source envelope, so it must never participate in a source-only
+  -- Outskirts render.
+  if activeDef.sourceShellOnly then return end
   local m=ensureOutskirtsFarField();if not m then return end
   sendShader("materialAlpha",1);sendShader("materialMode",0);sendShader("materialFlow",0)
+  sendShader("sourceMatAnimAuthored",0);sendShader("sourceTexAnimAuthored",0);sendShader("sourceTexAnim0",SOURCE_TEX_ID0);sendShader("sourceTexAnim1",SOURCE_TEX_ID1)
   sendShader("sourceTextureColorMap",4);sendShader("sourceTextureBlending",1)
   sendShader("materialDiffuse",WHITE3);sendShader("materialAmbient",WHITE3);sendShader("materialSpecular",BLACK3);sendShader("materialShininess",0)
   sendShader("sourceDiffuseLighting",0);sendShader("sourceVertexColor",1);sendShader("sourceVertexAlpha",1);sendShader("sourceConstantColor",0)
@@ -1908,14 +2497,24 @@ local function drawOutskirtsFarField()
 end
 
 drawGroup=function(g)
-  sendShader("materialAlpha",g.alpha or 1)
+  -- Source crowd cards are ambient venue animation, not battle choreography.
+  -- Fast-forward can execute several fixed battle ticks per rendered frame; if
+  -- audience MatAnim/TexAnim consumes that clock directly, spectators visibly
+  -- vibrate at 4x/10x. Keep source animation curves intact but sample them from
+  -- a speed-neutral ambient clock.
+  local animationTime=(tonumber(g and g.mode) or 0)==4 and crowdSceneTime or sceneTime
+  local authored,texAnim0,texAnim1=sourceTextureAnimationRows(g,animationTime)
+  local matAuthored,matAlpha,matDiffuse,matAmbient,matSpecular=sourceMaterialAnimationValues(g,animationTime)
+  sendShader("materialAlpha",matAlpha)
   sendShader("materialMode",g.mode or 0)
+  sendShader("sourceMatAnimAuthored",matAuthored)
+  sendShader("sourceTexAnimAuthored",authored);sendShader("sourceTexAnim0",texAnim0);sendShader("sourceTexAnim1",texAnim1)
   sendShader("sourceTextureColorMap",g.textureColorMap or 4)
   sendShader("sourceTextureBlending",g.textureBlending or 1)
   sendShader("materialFlow",g.flow or 0)
-  sendShader("materialDiffuse",g.diffuse or WHITE3)
-  sendShader("materialAmbient",g.ambient or WHITE3)
-  sendShader("materialSpecular",g.specular or BLACK3)
+  sendShader("materialDiffuse",matDiffuse)
+  sendShader("materialAmbient",matAmbient)
+  sendShader("materialSpecular",matSpecular)
   sendShader("materialShininess",g.shininess or 0)
   sendShader("sourceDiffuseLighting",g.useDiffuseLighting and 1 or 0)
   sendShader("sourceVertexColor",g.useVertexColor and 1 or 0)
@@ -1926,7 +2525,20 @@ drawGroup=function(g)
   love.graphics.draw(g.mesh)
 end
 local function drawGroups(groups,pose)
-  for i=1,#groups do local g=groups[i];if not cameraOccluder(g,pose) then drawGroup(g) end end
+  local bound=STAGE_MODEL
+  for i=1,#groups do
+    local g=groups[i]
+    -- Platform 100's source numeral is a floor-paint overlay, not structural
+    -- deck geometry. Mt. Battle challenge mode replaces that single carrier with
+    -- the live fight number immediately after the opaque pass.
+    if not (activeArenaId=="mt_battle_summit" and summitNumberKey~=nil and g.summitNumberCarrier and summitNumberKey~=100)
+        and not cameraOccluder(g,pose) then
+      local wanted=sourceJointModelFor(g,sceneTime) or summitModelFor(g)
+      if wanted~=bound then sendShader("model","row",wanted);bound=wanted end
+      drawGroup(g)
+    end
+  end
+  if bound~=STAGE_MODEL then sendShader("model","row",STAGE_MODEL) end
 end
 local function drawCrowd(groups,vp,baseModel,pose)
   if not groups then return end
@@ -1939,6 +2551,8 @@ local function drawCrowd(groups,vp,baseModel,pose)
   local ex,ey,ez
   if cull then ex,ey,ez=pose.eye[1] or 0,pose.eye[2] or 0,pose.eye[3] or 0 end
   local sc=STAGE_SCALE or 0.25
+  local crowdModel=summitModels.crowd
+  if crowdModel then sendShader("model","row",crowdModel) end
   for i=1,#groups do
     local g=groups[i]
     local c=g.center or BLACK3
@@ -1954,12 +2568,15 @@ local function drawCrowd(groups,vp,baseModel,pose)
       skip=sameCameraHemisphere or (dx*dx+dy*dy+dz*dz)<34*34
     end
     if not skip then
-      setStageState(vp,baseModel,true,pose)
-      -- Was drawGroups({g}): one throwaway table per visible crowd sector
-      -- per frame.
+      -- The caller binds one shared stage VP/model/depth state for the complete
+      -- crowd pass. Re-sending those unchanged matrices/profile/camera uniforms
+      -- for every visible source audience group was pure driver work (especially
+      -- costly on GLES/mobile) and cannot affect authored placement or material
+      -- animation. Per-group material uniforms still update in drawGroup().
       drawGroup(g)
     end
   end
+  if crowdModel then sendShader("model","row",STAGE_MODEL) end
 end
 local function drawAdditive(groups,pose)
   if not groups or #groups==0 then return end
@@ -2009,7 +2626,14 @@ local function paintBackdropStatic(w,h)
   -- gradient made the extracted crater feel like a model viewer.  Build a
   -- quiet layered sky/cloud deck in screen space so the 3D stage still owns
   -- all silhouettes and depth.
-  if profile=="water" then
+  if profile=="open_water" then
+    -- No fake celestial discs/cards. The v6 world dome owns sky/cloud/horizon
+    -- projection; this flat clear only protects a backend without a sky mesh.
+    love.graphics.setColor(.285,.430,.520,1)
+    love.graphics.rectangle("fill",0,0,w,h)
+    love.graphics.setColor(1,1,1,1)
+    return
+  elseif profile=="water" then
     -- Phenac / Water Colosseum is an enclosed limestone stadium. The previous
     -- pass borrowed Mt. Battle sky/cloud textures behind it, which could turn
     -- gaps in the authentic source shell into an outdoor blue-sky scene. Keep
@@ -2025,10 +2649,16 @@ local function paintBackdropStatic(w,h)
     love.graphics.setColor(1,1,1,1)
     return
   elseif profile=="relic" then
-    -- Relic Chamber must read as an outdoor Agate forest from every azimuth.
-    -- The source HSD owns the shrine, stone, trunks and near foliage. This
-    -- backdrop supplies only the distant sky/forest closure behind that real
-    -- geometry so there is never a black void or flat green wall between trees.
+    -- Canonical Relic is source-shell-only. The retail M3_shrine_1F_bf scene has
+    -- authored source vertices in every azimuth sector (including the large
+    -- canopy/background carriers), so painting a CBE sky/cloud/haze behind it is
+    -- synthetic closure rather than retail data. Fail closed: let the complete
+    -- source shell own the background and leave this cached backdrop transparent.
+    if activeDef and activeDef.sourceShellOnly then
+      love.graphics.setColor(1,1,1,1)
+      return
+    end
+    -- Legacy/non-source fallback only.
     local topSky={.19,.42,.70};local midSky={.42,.61,.72};local horizon={.70,.80,.66}
     for i=0,71 do
       local t=i/71;local y=i*h/71;local r,g,b
@@ -2045,10 +2675,8 @@ local function paintBackdropStatic(w,h)
     for _,c in ipairs(clouds) do
       love.graphics.setColor(.96,.98,1.0,c[5]);love.graphics.ellipse("fill",c[1]*w,c[2]*h,c[3]*w,c[4]*h)
     end
-    -- 1.9.28: the actual 360-degree tree line is now built in 3D from
-    -- M3_shrine_1F_bf source meshes. The screen-space backdrop is sky only; a
-    -- very soft horizon haze hides the mathematical seam without pretending to
-    -- be trees. This removes the flat cardboard-tree look from reverse angles.
+    -- Legacy fallback horizon treatment. Canonical source-shell mode returns
+    -- above and never draws these CBE-authored closure layers.
     love.graphics.setColor(.32,.43,.23,.036);love.graphics.rectangle("fill",0,h*.735,w,h*.265)
     love.graphics.setColor(.56,.63,.42,.022);love.graphics.rectangle("fill",0,h*.675,w,h*.105)
     love.graphics.setColor(1,1,1,1)
@@ -2084,17 +2712,25 @@ local function paintBackdropStatic(w,h)
     love.graphics.setColor(1,1,1,1)
     return
   elseif profile=="summit" then
-    -- Mt. Battle is source-backed now. The HSD stage itself owns the mountain,
-    -- bridge, crater silhouettes, sky-facing cards and every decoded GX texture.
-    -- Keep screen-space background treatment deliberately neutral so it cannot
-    -- recolour the source venue into the invented sunset used by the procedural
-    -- rebuild. This gradient exists only behind holes/open horizon in the stage.
-    local a={.30,.38,.49};local b={.72,.72,.69}
+    -- Mt. Battle is source-backed now. Gen I keeps the canonical daytime grade.
+    -- Gen II inherits Gold's actual RTC/daytime state: at NITE the same source
+    -- Summit is presented under a restrained cool night grade instead of forcing
+    -- a second invented arena. Geometry, textures and source animation stay the
+    -- same; only the environmental light/sky changes.
+    local a,b
+    if summitNight then a={.025,.045,.105};b={.12,.18,.29}
+    else a={.30,.38,.49};b={.72,.72,.69} end
     for i=0,bands-1 do
       local t=(i+.5)/bands;local q=t*t*(3-2*t)
       local y=math.floor(i*h/bands);local y2=math.ceil((i+1)*h/bands)
       love.graphics.setColor(a[1]+(b[1]-a[1])*q,a[2]+(b[2]-a[2])*q,a[3]+(b[3]-a[3])*q,1)
       love.graphics.rectangle("fill",0,y,w,math.max(1,y2-y+1))
+    end
+    if summitNight then
+      -- Sparse deterministic high-altitude stars. These are background-only and
+      -- never replace source cards/mountains.
+      love.graphics.setColor(.82,.88,1.0,.42)
+      for i=1,20 do local x=((i*97)%997)/997*w;local y=((i*53)%211)/211*h*.48;love.graphics.rectangle("fill",x,y,1,1) end
     end
     love.graphics.setColor(1,1,1,1)
     return
@@ -2273,7 +2909,7 @@ end
 -- before it binds the arena framebuffer.
 local function ensureBackdrop(w,h)
   local key=tostring(activeDef and activeDef.profile or "water").."|"..tostring(w).."x"..tostring(h)
-    .."|"..tostring(scene).."|"..tostring(activeDef)
+    .."|"..tostring(scene).."|"..tostring(activeDef).."|night:"..tostring(summitNight)
   if backdropCanvas and backdropKey==key then return backdropCanvas end
   if backdropCanvas then pcall(function() if backdropCanvas.release then backdropCanvas:release() end end) end
   backdropCanvas=nil;backdropKey=nil
@@ -2323,6 +2959,10 @@ end
 -- emitter and no random-state churn on low-end/mobile devices.
 local function drawOutskirtsSandDrift(w,h)
   if not (activeDef and activeDef.profile=="outskirts") then return end
+  -- The screen-space grains/veils are an authored atmosphere approximation,
+  -- not decoded S1_out_bf presentation. Keep the legacy fallback available for
+  -- non-source configurations, but never add it to the canonical retail shell.
+  if activeDef.sourceShellOnly then return end
   love.graphics.setShader()
   love.graphics.setDepthMode()
   love.graphics.setBlendMode("alpha","alphamultiply")
@@ -2358,8 +2998,7 @@ end
 worldCenter=function(c)
   local x,y,z=(c[1] or 0)*STAGE_SCALE,(c[2] or 0)*STAGE_SCALE,(c[3] or 0)*STAGE_SCALE
   if STAGE_YAW~=0 then
-    local cs,sn=math.cos(STAGE_YAW),math.sin(STAGE_YAW)
-    x,z=cs*x+sn*z,-sn*x+cs*z
+    x,z=STAGE_COS*x+STAGE_SIN*z,-STAGE_SIN*x+STAGE_COS*z
   end
   return x,y,z
 end
@@ -2376,14 +3015,17 @@ local function drawTransparent(groups,pose)
   if n<2 then return drawGroups(groups,pose) end
   local eye=pose and pose.eye or {0,0,0}
   local ex,ey,ez=eye[1],eye[2],eye[3]
-  local cs,sn=1,0
-  local yawed=STAGE_YAW~=0
-  if yawed then cs,sn=math.cos(STAGE_YAW),math.sin(STAGE_YAW) end
   for i=1,n do
     local g=groups[i]
     local c=g.center or BLACK3
-    local x,y,z=(c[1] or 0)*STAGE_SCALE,(c[2] or 0)*STAGE_SCALE,(c[3] or 0)*STAGE_SCALE
-    if yawed then x,z=cs*x+sn*z,-sn*x+cs*z end
+    local class=g.summitClass
+    local offset=(class and summitOffsets[class]) or nil
+    local x,y,z=((c[1] or 0)+(offset and offset[1] or 0))*STAGE_SCALE,
+      (c[2] or 0)*STAGE_SCALE,
+      ((c[3] or 0)+(offset and offset[2] or 0))*STAGE_SCALE
+    local cs=(class and summitCos[class]) or STAGE_COS
+    local sn=(class and summitSin[class]) or STAGE_SIN
+    if sn~=0 or cs~=1 then x,z=cs*x+sn*z,-sn*x+cs*z end
     local dx,dy,dz=x-ex,y-ey,z-ez
     sortKey[g]=dx*dx+dy*dy+dz*dz
   end
@@ -2414,6 +3056,14 @@ function A:available(ctx)
 end
 local function activateDefinition(ctx,def,selected)
   if not def then return nil end
+  -- Arena source/metadata helpers are intentionally loadable without a 3D
+  -- matrix implementation (several ROM-free validation paths use that mode).
+  -- A real arena activation cannot render without the matrix bridge, so fail
+  -- closed here rather than crashing at module load or halfway through acquire.
+  if not mat4Ready() then
+    log(ctx,"warn","arena matrix bridge unavailable")
+    return nil
+  end
   if not cacheAvailable(def) then
     log(ctx,"warn","arena cache unavailable: %s",tostring(def and def.cache))
     return nil
@@ -2425,12 +3075,25 @@ local function activateDefinition(ctx,def,selected)
   activeDef=def
   activeArenaId=nextId
   selectResident(activeArenaId)
+  local battle=ctx and ctx.battle
+  summitVariation=(activeArenaId=="mt_battle_summit" and battle and type(battle.cbeMtBattleSummitVariation)=="table")
+    and battle.cbeMtBattleSummitVariation or nil
   if def.pokemon then
     VIS_PLAYER={def.pokemon.player[1],def.pokemon.player[2]}
     VIS_ENEMY={def.pokemon.enemy[1],def.pokemon.enemy[2]}
   end
   STAGE_SCALE=tonumber(def.stageScale) or 0.25
-  STAGE_YAW=tonumber(def.stageYaw) or 0
+  STAGE_YAW=(tonumber(def.stageYaw) or 0)+(summitVariation and tonumber(summitVariation.yaw) or 0)
+  STAGE_COS,STAGE_SIN=math.cos(STAGE_YAW),math.sin(STAGE_YAW)
+  local scaleModel=Mat4.scale(STAGE_SCALE,STAGE_SCALE,STAGE_SCALE)
+  STAGE_MODEL=Mat4.mul(Mat4.rotateY(STAGE_YAW),scaleModel)
+  summitModels={};summitCos={};summitSin={};summitOffsets={}
+  -- Mt. Battle variation owns only the COMPLETE D2 shell transform. Never move
+  -- texture families independently: the same source atlases are shared by rock,
+  -- bridge, deck and floor DObjs, so class transforms can separate adjacent
+  -- retail polygons and expose literal holes. Source-owned JObj/TexAnim remains
+  -- free to animate through its verified runtime path.
+  summitNumberModel=Mat4.rotateY(STAGE_YAW)
   BATTLE_SCENE_RADIUS_RAW=tonumber(def.sceneRadiusRaw) or 430
   BATTLE_MAX_GROUP_SPAN_RAW=tonumber(def.maxGroupSpanRaw) or 920
   BATTLE_VERTEX_RADIUS_RAW=tonumber(def.vertexRadiusRaw) or 415
@@ -2444,6 +3107,13 @@ local function activateDefinition(ctx,def,selected)
     profile=def.profile,
     portable=true,replacesMap=true,discs=false,
     camera=def.camera or {side=58,back=14,height=24,lookX=0,lookY=6,frameH=50},
+    -- Expose the two distinct source transforms. Stage HSD geometry/camera-local
+    -- coordinates use stageScale; Pokemon model geometry uses figureScale.
+    -- Keeping both explicit prevents embedded retail cameras from being
+    -- accidentally double-scaled through the actor VP.
+    stageScale=STAGE_SCALE,stageYaw=STAGE_YAW,
+    mtBattleNumber=battle and battle.cbeMtBattleNumber or (summitVariation and summitVariation.battleNumber),
+    mtBattleVariation=summitVariation,
     _cbeArenaId=activeArenaId,
   }
   updateAnchors(arena)
@@ -2522,12 +3192,20 @@ function A:prewarm(ctx)
 end
 
 function A:begin(ctx,arena)
-  sceneTime=0
+  sceneTime=summitVariation and (tonumber(summitVariation.animationOffset) or 0) or 0
+  crowdSceneTime=sceneTime
+  summitNight=(activeArenaId=="mt_battle_summit") and gen2Night((ctx and ctx.game) or (ctx and ctx.battle and ctx.battle.game) or mod.game) or false
+  summitNightCheckAt=crowdSceneTime
   if arena and arena._cbeArenaId and arena._cbeArenaId~=activeArenaId then
     return false
   end
   local s,err=loadScene(ctx)
   if not s then log(ctx,"error","arena load failed: %s",tostring(err));return false end
+  if activeArenaId=="mt_battle_summit" then
+    ensureSummitBattleNumber(s,(arena and arena.mtBattleNumber) or (ctx and ctx.battle and ctx.battle.cbeMtBattleNumber))
+  else
+    releaseSummitNumber()
+  end
   if Trainer then
     local okTrainer,trainerErr=Trainer:begin(ctx)
     if okTrainer==false then log(ctx,"error","enemy trainer actor unavailable: %s",tostring(trainerErr)) end
@@ -2552,6 +3230,16 @@ function A:begin(ctx,arena)
 end
 function A:update(ctx,dt,arena)
   sceneTime=sceneTime+(tonumber(dt) or 0)
+  crowdSceneTime=crowdSceneTime+audienceDt(ctx,dt)
+  if activeArenaId=="mt_battle_summit" and crowdSceneTime-(summitNightCheckAt or -1)>=5 then
+    summitNightCheckAt=crowdSceneTime
+    local night=gen2Night((ctx and ctx.game) or (ctx and ctx.battle and ctx.battle.game) or mod.game)
+    if night~=summitNight then
+      summitNight=night
+      if backdropCanvas then pcall(function() if backdropCanvas.release then backdropCanvas:release() end end) end
+      backdropCanvas=nil;backdropKey=nil
+    end
+  end
   if Trainer then Trainer:update(ctx,dt) end
   if PlayerTrainer then PlayerTrainer:update(ctx,dt) end
   if CurrentSpriteModels and cbePokemonModelsEnabled(ctx) and not standaloneContext(ctx) then
@@ -2593,7 +3281,7 @@ function A:render(ctx,arena,drawActors)
   local ok,out=pcall(ensureCanvas,w,h); if not ok then error(out) end
   if not out then return V.FALLBACK end
   local vp,pose=viewProjection(ctx,w,h)
-  local model=Mat4.mul(Mat4.rotateY(STAGE_YAW),Mat4.scale(STAGE_SCALE,STAGE_SCALE,STAGE_SCALE))
+  local model=STAGE_MODEL
   local actorVP=Mat4.mul(vp,Mat4.scale(figureScale,figureScale,figureScale))
   local prior=love.graphics.getCanvas(); local pushed=false
   local good,why=pcall(function()
@@ -2623,6 +3311,16 @@ function A:render(ctx,arena,drawActors)
     end)
     safeArenaPass(ctx,"cutout",function() setStageState(vp,model,true,pose);drawGroups(s.cutout,pose) end)
     safeArenaPass(ctx,"crowd",function() setStageState(vp,model,true,pose);drawCrowd(s.crowd,vp,model,pose) end)
+
+    -- Runtime-only platform number: one floor mesh prepared at begin, not
+    -- a per-frame text draw and not a new arena/cache variant. Depth testing is
+    -- retained while writes stay off so battlers/trainers remain in front.
+    if summitNumberGroup and summitNumberKey~=100 then
+      safeArenaPass(ctx,"mtBattleNumber",function()
+        setStageState(vp,summitNumberModel,false,pose)
+        drawGroup(summitNumberGroup)
+      end)
+    end
 
     -- 2) The boss trainer shadow is authored directly onto the Colosseum
     -- floor before any figures draw. It is deliberately separate from the
@@ -2733,8 +3431,12 @@ function A:resetRuntime()
   pcall(function() if canvas and canvas.release then canvas:release() end end)
   pcall(function() if depthCanvas and depthCanvas.release then depthCanvas:release() end end)
   pcall(function() if backdropCanvas and backdropCanvas.release then backdropCanvas:release() end end)
+  releaseSummitNumber()
   backdropCanvas=nil;backdropKey=nil
   scene=nil;shader=nil;shaderMode=nil;white=nil;canvas=nil;depthCanvas=nil;depthMode=nil;depthActive=false;cw=nil;ch=nil;errorText=nil;renderErrors={};sceneTime=0
+  summitVariation=nil;summitModels={};summitCos={};summitSin={};summitOffsets={};STAGE_COS,STAGE_SIN=math.cos(STAGE_YAW),math.sin(STAGE_YAW)
+  STAGE_MODEL=composeStageModel(STAGE_SCALE,STAGE_YAW)
+  summitNumberModel=(Mat4 and type(Mat4.identity)=="function") and Mat4.identity() or nil
   uniformCache=nil;uniformCacheShader=nil
   residentScenes={};residentUse={};residentSerial=0;activeDef=nil;activeArenaId="water"
   if Trainer and type(Trainer.resetRuntime)=="function" then pcall(Trainer.resetRuntime,Trainer) end
@@ -2749,7 +3451,7 @@ function A:status()
     crowd=scene and #scene.crowd or 0,
     translucent=scene and #scene.translucent or 0,
     additive=scene and #scene.additive or 0,
-    stageScale=STAGE_SCALE,figureScale=figureScale,triangleRadiusRaw=BATTLE_VERTEX_RADIUS_RAW,culled=scene and scene.culled or 0,
+    stageScale=STAGE_SCALE,stageYaw=STAGE_YAW,figureScale=figureScale,triangleRadiusRaw=BATTLE_VERTEX_RADIUS_RAW,culled=scene and scene.culled or 0,
     oversizeCulled=scene and scene.oversizeCulled or 0,
     crowdKept=scene and scene.crowdKept or 0,
     crowdOriginal=scene and scene.crowdOriginal or 0,
@@ -2757,8 +3459,11 @@ function A:status()
     crowdOutliers=scene and scene.crowdOutliers or 0,
     activeArena=activeArenaId,cache=activeDef and activeDef.cache or nil,profile=activeDef and activeDef.profile or nil,source=scene and scene.source or nil,framebufferMode=depthMode,depthActive=depthActive,shaderMode=shaderMode,android=ARENA_ANDROID,
     backdropBaked=backdropCanvas~=nil,backdropBakes=backdropBakes,
+    mtBattleNumber=summitNumberKey,mtBattleVariation=summitVariation,
     residentScenes=residentCount(),residentLimit=RESIDENT_LIMIT,runtimeSidecar=scene and scene.runtimeSidecar==true or false,runtimeMeshHits=arenaRuntimeHits,runtimeMeshWrites=arenaRuntimeWrites,
   }
 end
-A._test={sourceVertexAlphaEnabled=sourceVertexAlphaEnabled,vertex=VERTEX,pixel=PIXEL,mobileVertex=MOBILE_VERTEX,mobilePixel=MOBILE_PIXEL,withNormals=withNormals,materialMode=materialMode,texture=texture,dropGhostLayer=dropGhostLayer}
+A._test={sourceVertexAlphaEnabled=sourceVertexAlphaEnabled,gen2Night=gen2Night,audienceDt=audienceDt,vertex=VERTEX,pixel=PIXEL,mobileVertex=MOBILE_VERTEX,mobilePixel=MOBILE_PIXEL,androidSafeVertex=ANDROID_SAFE_VERTEX,androidSafePixel=ANDROID_SAFE_PIXEL,withNormals=withNormals,materialMode=materialMode,texture=texture,dropGhostLayer=dropGhostLayer,sourceFobjValue=sourceFobjValue,sourceTextureAnimationRows=sourceTextureAnimationRows,sourceMaterialAnimationValues=sourceMaterialAnimationValues,summitSemanticClass=summitSemanticClass,sourceFogEnabled=sourceFogEnabled,
+  summitRetailNumberCarrier=summitRetailNumberCarrier,summitRetailNumberPath=SUMMIT_RETAIL_NUMBER_PATH,summitRetailNumberTexture=summitRetailNumberTexture,
+  realgamSourceJointDescriptor=realgamSourceJointDescriptor,sourceJointRotationDelta=sourceJointRotationDelta,sourceJointModelFor=sourceJointModelFor,realgamSourceJoints=REALGAM_SOURCE_JOINTS}
 return A

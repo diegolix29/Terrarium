@@ -1,10 +1,10 @@
--- Relic Chamber foreground-presentation guard.
+-- Legacy Relic Chamber foreground-presentation guard.
 --
--- M3_shrine_1F_bf is a real retail battle scene, but its original camera rails
--- never put the lens through the large foliage/root carrier cards around the
--- shrine clearing. CBE's free battle camera can. The rule here is intentionally
--- strict: authentic perimeter foliage remains, but NO source card/branch/overhang
--- is allowed to sit between the camera and the protected battle frame.
+-- A direct retail M3_shrine_1F_bf audit proved that canonical source-shell mode
+-- must preserve the authored foliage/branch groups; retail HSD submission does
+-- not perform this CBE-specific projected-AABB readability cull. Arena.lua now
+-- bypasses this helper whenever sourceShellOnly is active. Keep it only for old
+-- non-source fallback definitions, where it must not be described as 1:1.
 local R={}
 
 local function finite(v)

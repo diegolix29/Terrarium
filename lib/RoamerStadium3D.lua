@@ -22,6 +22,7 @@ local StadiumPack = V.require("StadiumPack")
 local Stadium2Pack = V.require("Stadium2Pack")
 local StadiumRig = V.require("StadiumRig")
 local StadiumMon = V.require("StadiumMon")
+local ColosseumMon = V.require("ColosseumMon")
 
 local M = {}
 
@@ -78,17 +79,28 @@ local function loadModel(dex)
   return StadiumPack.load(dex, false)
 end
 
+-- Cache for Colosseum actors (per species, not per entity like wilds)
+local colosseumActorCache = {}
+
 -- Returns { rig, model } for a species string, building and caching by dex
 -- on first use. Returns nil if the species doesn't resolve to a dex, the
 -- dex is out of range, packs aren't installed, or the species has no
 -- riggable model (staticPose).
 local function speciesRig(species)
   local dex = dexOf(species)
-  if not dex or dex < 1 or dex > 251 then return nil end
+  if not dex or dex < 1 or dex > 386 then return nil end
 
   local cached = rigCache[dex]
   if cached then return cached end
 
+  -- Try Colosseum models first (covers all 1-386 Pokemon)
+  if ColosseumMon.available(dex, "normal") then
+    local entry = { isColosseum = true, dex = dex }
+    rigCache[dex] = entry
+    return entry
+  end
+
+  -- Fall back to Stadium models if Colosseum isn't available
   if not installAvailable() then return nil end
 
   local ok, model = pcall(loadModel, dex)
@@ -133,6 +145,21 @@ local YAW_BY_FACING = {
 function M.draw(species, x, y, facing, animTime, moving)
   local entry = speciesRig(species)
   if not entry then return false end
+
+  -- Handle Colosseum models for Gen 3 Pokemon
+  if entry.isColosseum then
+    local fx, fz = ColosseumMon.towardFor(facing)
+    local matrix = ColosseumMon.matrix(entry.dex, "normal", x, 0, y, fx, fz)
+    if not matrix then return false end
+
+    -- Update Colosseum actor
+    local dt = 1/60
+    ColosseumMon.update(entry.dex, "normal", dt)
+
+    return ColosseumMon.draw(entry.dex, "normal", matrix)
+  end
+
+  -- Handle Stadium models for Gen 1-2 Pokemon
   local rig, model = entry.rig, entry.model
 
   -- Anim 1 is idle in every Stadium pack (see StadiumFollower.lua); walk-cycle
@@ -173,8 +200,12 @@ function M.clearCache()
     if entry.rig then
       pcall(function() entry.rig:release() end)
     end
+    if entry.isColosseum then
+      pcall(function() ColosseumMon.release(dex, "normal") end)
+    end
   end
   rigCache = {}
+  pcall(ColosseumMon.clearCache)
 end
 
 return M

@@ -57,10 +57,14 @@ function A.has(id)
   if not A.verifiedIds[id] then return false end
   if A.presence[id]~=nil then return A.presence[id] end
   if not (Assets and Assets.info) then A.presence[id]=false;return false end
+  -- The v3 readyIds table is transaction-owned: the builder adds an id only
+  -- after writing and reading back a valid RIFF/WAVE derivative.  Membership
+  -- checks therefore need only prove that the committed payload still exists
+  -- with a plausible size.  Reading the entire WAV here duplicated the later
+  -- fileData/newSource materialization and made first-use MoveFX pay a large
+  -- cache I/O tax, especially on Android.  Decoder creation in loadSource()
+  -- remains the concrete corruption check before CBE suppresses native audio.
   local info=Assets.info(pathFor(id));local ok=type(info)=="table" and (tonumber(info.size) or 0)>=44
-  if ok and Assets.read then
-    local bytes=Assets.read(pathFor(id));ok=type(bytes)=="string" and #bytes>=44 and bytes:sub(1,4)=="RIFF" and bytes:sub(9,12)=="WAVE"
-  end
   A.presence[id]=ok and true or false
   return A.presence[id]
 end

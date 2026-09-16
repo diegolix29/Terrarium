@@ -35,7 +35,6 @@ function B.classify(screen)
   for _,value in ipairs(keys) do local key=normalized(value);if key and CLASSES[key] then return CLASSES[key] end end
   return nil,'ordinary trainer'
 end
-local function now() return love and love.timer and love.timer.getTime and love.timer.getTime() end
 local function sourceCall(source,key,...)
   if source and type(source[key])=='function' then return pcall(source[key],source,...) end
 end
@@ -106,7 +105,7 @@ function B.begin(screen)
   duration=durationOK and tonumber(duration) or 0
   if not duration or duration<1 then sourceCall(source,'release');B.lastSkip='invalid fanfare duration';return nil end
   local s={screen=screen,category=category,source=source,music=Music,elapsed=0,
-    duration=math.min(24,duration),lastTime=now(),cue=CUE}
+    duration=math.min(24,duration),cue=CUE}
   B.byScreen[screen]=s;B.current=s;B.starts=B.starts+1;B.lastSkip=nil
   screen.__cbeBossIntroActive=true
   sourceCall(source,'setLooping',false);sourceCall(source,'setPitch',1);musicVolume(s)
@@ -115,8 +114,9 @@ function B.begin(screen)
 end
 function B.update(s,dt)
   if not s or s.closed then return false end
-  local t=now()
-  if t then dt=t-(s.lastTime or t);s.lastTime=t end
+  -- Visual intro progression follows battle fixed-step time so high BATTLE SPEED
+  -- does not leave the battle waiting on a real-time cinematic gate. The audio
+  -- source keeps pitch=1 and remains on the engine's independent audio clock.
   dt=math.max(0,math.min(.1,tonumber(dt) or 0));s.elapsed=s.elapsed+dt
   local input=s.screen.game and s.screen.game.input
   local press=input and input.wasPressed and (input:wasPressed('a') or input:wasPressed('b') or input:wasPressed('start'))
@@ -156,6 +156,31 @@ function B.camera(base,context)
     return {eye={a[1]+dx*19-dz*pan,a[2]+2.8,a[3]+dz*19+dx*pan},focus={a[1],a[2],a[3]},fov=.72,curve=0}
   end
   return base
+end
+-- Fast battle speed shortens the prelude's native gate, but must not squeeze
+-- three hard trainer cuts into that interval. The optical layer is independent
+-- of B.update: fanfare playback, skip input and native battle timing are intact.
+local directedCamera=B.camera
+function B.camera(base,context)
+  local raw=directedCamera(base,context)
+  local pacing=V.CameraPacing
+  if not (raw and pacing) then return raw end
+  local s=B.active(context.battle);if not s then return raw end
+  local speed=pacing.speed(context,{screen=s.screen},V.mod)
+  local cfg=pacing.config(speed)
+  if cfg.wide then raw={eye={base.eye[1],base.eye[2],base.eye[3]},focus={base.focus[1],base.focus[2],base.focus[3]},fov=base.fov,curve=0} end
+  local seed=base
+  if cfg.active and V.Camera and V.Camera.guardPacedPose then
+    raw=V.Camera:guardPacedPose(raw,context.arena);seed=V.Camera:guardPacedPose(base,context.arena)
+  end
+  local phase=s.elapsed/math.max(.1,s.duration)
+  local key=cfg.wide and 'intro-wide' or (phase<.34 and 'intro' or (phase<.63 and 'enemy' or (phase<.90 and 'player' or 'return')))
+  local out
+  out,s.cameraComfort=pacing.apply(s.cameraComfort,raw,{speed=speed,clock=s.elapsed,key=key,seed=seed})
+  -- Transfer the last AUTOMATIC lens, never a free-look result, to the first
+  -- regular battle shot after the intro relinquishes ownership.
+  if s.cameraComfort.adapted then context.__cbeBossCameraComfort=s.cameraComfort end
+  return out or raw
 end
 function B.install()
   if B.installed then return end

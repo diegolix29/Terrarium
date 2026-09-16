@@ -24,10 +24,12 @@ local function remove(mod,path)
   return true
 end
 local function osName()
+  if F._platformOS then return F._platformOS end
   if love and love.system and type(love.system.getOS)=="function" then
-    local ok,n=pcall(love.system.getOS);if ok then return tostring(n or "") end
+    local ok,n=pcall(love.system.getOS);if ok then F._platformOS=tostring(n or "");return F._platformOS end
   end
-  return "Unknown"
+  F._platformOS="Unknown"
+  return F._platformOS
 end
 function F.preference(mod)
   local raw=read(mod,F.configPath)
@@ -89,7 +91,18 @@ function F.record(mod,path,bytes,quality,generated)
 end
 function F.status(mod)
   local raw=read(mod,F.reportPath) or ""
-  return {preference=F.preference(mod),effective=F.resolve(mod),pending=F.pending(mod),
+  -- BattleSettings can ask for this status repeatedly while its options surface
+  -- is open. Resolve the preference once: F.resolve(mod) would otherwise reread
+  -- the same tiny quality file immediately after F.preference(mod), which still
+  -- crosses the host cache boundary on installs whose registry has not learned
+  -- this build/ path. Platform identity is already process-invariant/memoized.
+  local preference=F.preference(mod)
+  local effective=preference
+  if effective=="auto" then
+    local name=osName()
+    effective=(name=="Android" or name=="iOS") and "fast" or "high"
+  end
+  return {preference=preference,effective=effective,pending=F.pending(mod),
     state=raw:match("state=([^\n]+)"),complete=tonumber(raw:match("complete=(%d+)")),
     total=tonumber(raw:match("total=(%d+)")),lastQuality=raw:match("quality=(%a+)"),
     error=raw:match("error=([^\n]+)")}

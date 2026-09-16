@@ -45,8 +45,8 @@ function L.ensure(b,g,atAction)
   if not atAction and candidate(b,g) then return end
   local p,e=b.player,b.enemy
   if not (p and e) then return end
-  local ps=g==1 and (p.curStats and p.curStats.speed or 0) or b:effectiveSpeed(p)
-  local es=g==1 and (e.curStats and e.curStats.speed or 0) or b:effectiveSpeed(e)
+  local ps=g==1 and (p.curStats and p.curStats.speed or 0) or (type(b.effectiveSpeed)=="function" and b:effectiveSpeed(p, b) or (p.curStats and p.curStats.speed or 0))
+  local es=g==1 and (e.curStats and e.curStats.speed or 0) or (type(b.effectiveSpeed)=="function" and b:effectiveSpeed(e, b) or (e.curStats and e.curStats.speed or 0))
   if es>ps then L.enter(b,g,e);L.enter(b,g,p) else L.enter(b,g,p);L.enter(b,g,e) end
 end
 function L.onStarted(event)
@@ -62,6 +62,20 @@ function L.onSwitched(event)
   end
   if g==1 then L.enter(b,g,value)
   else state(b).pending=value end -- native spikesDamage is immediately next
+end
+function L.onTurnEnded(event)
+  local b,g=normalize(event and event.battle)
+  if g~=2 or not valid(b) then return end
+  local turn=(event and event.turn) or b.turn or 0
+  local s=state(b)
+  if s.turn==turn then return end
+  s.turn=turn
+  G2.onEndOfTurn(b,A.actives(b))
+  -- Gen II emits battle.turn_ended after runTurn has already drained the
+  -- native event queue. Remember that this lifecycle callback queued events
+  -- so the takeTurn wrapper below can return them with the turn that caused
+  -- them instead of leaking them into the next command.
+  s.flushTurn=turn
 end
 function L.install(mod,generation)
   -- Production always supplies the active game. nil is an explicit test seam
@@ -105,17 +119,17 @@ function L.install(mod,generation)
     local take=B2.takeTurn
     B2.takeTurn=function(self,...)
       if valid(self) then L.ensure(self,2,true) end
-      return take(self,...)
-    end
-    local close=B2.closeTurn
-    B2.closeTurn=function(self,events)
-      if valid(self) and self.turnOpen and state(self).turn~=self.turn then
-        state(self).turn=self.turn
-        G2.onEndOfTurn(self,A.actives(self))
-        events=events or {}
-        for _,e in ipairs(self:takeEvents())do events[#events+1]=e end
+      local results=pack(pcall(take,self,...))
+      if not results[1]then error(results[2],0)end
+      local s=states[self]
+      if s and s.flushTurn~=nil then
+        s.flushTurn=nil
+        local events=results[2]
+        if type(events)=='table' then
+          for _,e in ipairs(self:takeEvents())do events[#events+1]=e end
+        end
       end
-      return close(self,events)
+      return unpack(results,2,results.n)
     end
     local spikes=B2.spikesDamage
     B2.spikesDamage=function(self,mon,...)
@@ -131,6 +145,7 @@ function L.install(mod,generation)
   if not listenersInstalled and mod and mod.events and type(mod.events.on)=='function' then
     mod.events:on('battle.started',L.onStarted)
     mod.events:on('battle.battler_switched',L.onSwitched)
+    mod.events:on('battle.turn_ended',L.onTurnEnded)
     mod.events:on('battle.ended',function(e)
       local b=normalize(e and e.battle);if b then states[b]=nil;A.reset(b) end
     end)

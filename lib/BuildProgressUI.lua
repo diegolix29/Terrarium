@@ -105,15 +105,87 @@ local function short(v,n)
   return v
 end
 
+-- The source-runtime cache policy is intentionally a separate first screen,
+-- not another build-failure action.  Its geometry is derived from the current
+-- viewport so keyboard, mouse and touch all address the same three choices on
+-- desktop and narrow mobile screens.
+local function cacheChoiceButtonsForDimensions(w,h)
+  w,h=tonumber(w),tonumber(h);if not (w and h) then return nil end
+  local panelW=math.min(w-48,760);local panelH=math.min(h-48,520)
+  local x=(w-panelW)/2;local y=(h-panelH)/2
+  local bx=x+28;local bw=panelW-56;local bh=38;local gap=7
+  local first=y+panelH-28-(bh*3+gap*2)
+  return {
+    reuse={x=bx,y=first,w=bw,h=bh},
+    rebuild={x=bx,y=first+bh+gap,w=bw,h=bh},
+    delete={x=bx,y=first+(bh+gap)*2,w=bw,h=bh},
+  },{panelW=panelW,panelH=panelH,x=x,y=y}
+end
+local function cacheChoiceButtons()
+  if not (love and love.graphics and type(love.graphics.getDimensions)=="function") then return nil end
+  local w,h=love.graphics.getDimensions();return cacheChoiceButtonsForDimensions(w,h)
+end
+local function cacheChoiceActionAtDimensions(x,y,w,h)
+  x,y=tonumber(x),tonumber(y);if not x or not y then return nil end
+  local rows=cacheChoiceButtonsForDimensions(w,h);if not rows then return nil end
+  for action,r in pairs(rows) do if x>=r.x and x<=r.x+r.w and y>=r.y and y<=r.y+r.h then return action end end
+  return nil
+end
+local function cacheChoiceActionAt(x,y)
+  if not (love and love.graphics and type(love.graphics.getDimensions)=="function") then return nil end
+  local w,h=love.graphics.getDimensions();return cacheChoiceActionAtDimensions(x,y,w,h)
+end
+
+local function cacheChoiceFrame()
+  if not graphicsReady() then return false end
+  local ok=pcall(function()
+    local g,panelW,panelH,x,y=beginFrame(520);U.active=true
+    g.setColor(0.90,0.86,0.65,1);g.print("COLOSSEUM SOURCE CACHE",x+28,y+24)
+    g.setColor(0.94,0.92,0.78,1);g.print("EXISTING GENERATED CACHE FOUND",x+28,y+58)
+    g.setColor(0.72,0.75,0.70,1)
+    if panelH<390 then
+      printWrapped(g,"Choose before any compatibility repair or rebuild writes. WIPE ALL is destructive to this mod's generated caches only; your imported GC6E01 source is always kept.",x+28,y+86,panelW-56)
+    else
+      printWrapped(g,"Choose how CBE should handle the saved generated runtime before any compatibility repair or rebuild writes occur.",x+28,y+90,panelW-56)
+      g.setColor(0.62,0.66,0.61,1)
+      printWrapped(g,"USE EXISTING keeps compatible payloads.  REBUILD refreshes needed payloads while preserving replaced bytes.  WIPE ALL removes every Colosseum Overhaul cache iteration, including legacy preservation copies; the imported Colosseum source and other mods are untouched.",x+28,y+130,panelW-56)
+    end
+    local rows=cacheChoiceButtons()
+    local function button(r,label,warning)
+      g.setColor(warning and 0.20 or 0.13,warning and 0.11 or 0.15,warning and 0.10 or 0.13,1);g.rectangle("fill",r.x,r.y,r.w,r.h,5,5)
+      g.setColor(warning and 0.94 or 0.84,warning and 0.75 or 0.84,warning and 0.68 or 0.75,1);g.print(label,r.x+12,r.y+10)
+    end
+    button(rows.reuse,"USE EXISTING CACHE   [ENTER]",false)
+    button(rows.rebuild,"REBUILD CACHE / PRESERVE OLD BYTES   [R]",false)
+    button(rows.delete,"WIPE ALL CBE CACHES (DESTRUCTIVE)   [D]",true)
+    endFrame(g)
+  end)
+  if not ok then U.disabled=true return false end
+  return true
+end
+
+local function failureButtonsForDimensions(w,h)
+  w,h=tonumber(w) or 640,tonumber(h) or 480
+  local panelW=math.max(280,math.min(w-48,760));local panelH=math.max(260,math.min(h-48,520))
+  local x=(w-panelW)/2;local y=(h-panelH)/2;local bx=x+28;local bw=panelW-56
+  local bh=math.max(28,math.min(36,math.floor(panelH*.075)));local gap=6
+  local total=bh*4+gap*3;local first=y+panelH-14-total
+  return {
+    retry={x=bx,y=first,w=bw,h=bh},
+    delete_rebuild={x=bx,y=first+bh+gap,w=bw,h=bh},
+    continue={x=bx,y=first+(bh+gap)*2,w=bw,h=bh},
+    exit={x=bx,y=first+(bh+gap)*3,w=bw,h=bh},
+  }
+end
 local function failureButtons()
   if not (love and love.graphics and type(love.graphics.getDimensions)=="function") then return nil end
-  local w,h=love.graphics.getDimensions();local panelW=math.min(w-48,760);local panelH=math.min(h-48,470)
-  local x=(w-panelW)/2;local y=(h-panelH)/2;local bx=x+28;local bw=panelW-56;local bh=34
-  return {
-    retry={x=bx,y=y+348,w=bw,h=bh},
-    continue={x=bx,y=y+386,w=bw,h=bh},
-    exit={x=bx,y=y+424,w=bw,h=bh},
-  }
+  local w,h=love.graphics.getDimensions();return failureButtonsForDimensions(w,h)
+end
+local function failureActionAtDimensions(x,y,w,h)
+  x,y=tonumber(x),tonumber(y);if not x or not y then return nil end
+  local rows=failureButtonsForDimensions(w,h)
+  for action,r in pairs(rows) do if x>=r.x and x<=r.x+r.w and y>=r.y and y<=r.y+r.h then return action end end
+  return nil
 end
 local function actionAt(x,y)
   x,y=tonumber(x),tonumber(y);if not x or not y then return nil end
@@ -125,7 +197,7 @@ end
 local function failureFrame(state,message,trainerFirst,trainerSource)
   if not graphicsReady() then return false end
   local ok=pcall(function()
-    local g,panelW,_,x,y=beginFrame(470)
+    local g,panelW,panelH,x,y=beginFrame(520)
     g.setColor(0.90,0.86,0.65,1);g.print("COLOSSEUM SOURCE CACHE",x+28,y+24)
     g.setColor(0.86,0.70,0.64,1);g.print("GENERATED RUNTIME IS NOT READY",x+28,y+58)
     g.setColor(0.94,0.92,0.78,1);g.print(tostring(state or "CACHE BUILD FAILED"),x+28,y+104)
@@ -138,15 +210,22 @@ local function failureFrame(state,message,trainerFirst,trainerSource)
       g.setColor(0.86,0.82,0.68,1);g.print("SOURCE DETAIL",x+28,y+236)
       g.setColor(0.68,0.71,0.66,1);printWrapped(g,short(trainerSource,210),x+166,y+236,panelW-194)
     end
-    g.setColor(0.58,0.62,0.57,1);g.print("CBE will not initialize an incomplete generated runtime.",x+28,y+314)
     local rows=failureButtons()
-    local function button(r,label)
-      g.setColor(0.13,0.15,0.13,1);g.rectangle("fill",r.x,r.y,r.w,r.h,5,5)
-      g.setColor(0.84,0.84,0.75,1);g.print(label,r.x+12,r.y+9)
+    local noteY=math.max(y+266,rows.retry.y-50)
+    g.setColor(0.58,0.62,0.57,1)
+    if panelH<390 then
+      printWrapped(g,"CBE will not initialize an incomplete runtime. DELETE + REBUILD keeps the imported GC6E01 source.",x+28,noteY,panelW-56)
+    else
+      printWrapped(g,"CBE will not initialize an incomplete generated runtime. DELETE + REBUILD clears the failed generated CBE cache scope and rebuilds it from the retained GC6E01 source; the imported source is not deleted.",x+28,noteY,panelW-56)
     end
-    button(rows.retry,"RETRY CACHE BUILD   [R]")
-    button(rows.continue,"CONTINUE WITHOUT CBE   [ENTER]")
-    button(rows.exit,"EXIT GAME   [ESC]")
+    local function button(r,label,warning)
+      g.setColor(warning and 0.20 or 0.13,warning and 0.11 or 0.15,warning and 0.10 or 0.13,1);g.rectangle("fill",r.x,r.y,r.w,r.h,5,5)
+      g.setColor(warning and 0.94 or 0.84,warning and 0.75 or 0.84,warning and 0.68 or 0.75,1);g.print(label,r.x+12,r.y+math.max(6,(r.h-16)/2))
+    end
+    button(rows.retry,"RETRY CACHE BUILD   [R]",false)
+    button(rows.delete_rebuild,"DELETE GENERATED CACHE + REBUILD   [D]",true)
+    button(rows.continue,"CONTINUE WITHOUT CBE   [ENTER]",false)
+    button(rows.exit,"EXIT GAME   [ESC]",false)
     endFrame(g)
   end)
   if not ok then U.disabled=true return false end
@@ -168,12 +247,64 @@ function U.finish(state,message)
   draw(label,7,7,true,message or state)
 end
 
+-- Existing caches are never mutated until this gate returns. There is no
+-- preselected destructive action; callers may use a conservative reuse fallback
+-- only when graphics are genuinely unavailable (for example a headless test).
+function U.cacheChoiceGate()
+  if not cacheChoiceFrame() then return nil,"graphics unavailable" end
+  local prevEnter,prevR,prevD,prevPointer=true,true,true,true
+  local armedAt=((love.timer and love.timer.getTime and love.timer.getTime()) or os.clock())+0.20
+  while true do
+    local now=(love.timer and love.timer.getTime and love.timer.getTime()) or os.clock()
+    if love.event and love.event.pump then pcall(love.event.pump) end
+    if love.event and type(love.event.poll)=="function" then
+      local ok,iter=pcall(love.event.poll)
+      if ok and iter then
+        for name,a,b,c in iter do
+          if name=="quit" then return "exit" end
+          if name=="mousepressed" and tonumber(c or 1)==1 then
+            local action=cacheChoiceActionAt(a,b);if action and now>=armedAt then return action end
+          elseif name=="touchpressed" then
+            local action=cacheChoiceActionAt(b,c);if action and now>=armedAt then return action end
+          elseif name=="keypressed" and now>=armedAt then
+            if a=="return" or a=="kpenter" then return "reuse"
+            elseif a=="r" then return "rebuild"
+            elseif a=="d" then return "delete" end
+          end
+        end
+      end
+    end
+    local ent=isDown("return") or isDown("kpenter")
+    local r=isDown("r");local d=isDown("d")
+    local pointerAction=nil;local pointerDown=false
+    if now>=armedAt and love.touch and type(love.touch.getTouches)=="function" and type(love.touch.getPosition)=="function" then
+      local ok,ids=pcall(love.touch.getTouches)
+      if ok and type(ids)=="table" then
+        for _,id in ipairs(ids) do pointerDown=true;local okp,x,y=pcall(love.touch.getPosition,id);if okp then pointerAction=cacheChoiceActionAt(x,y);if pointerAction then break end end end
+      end
+    end
+    if not pointerAction and now>=armedAt and love.mouse and type(love.mouse.isDown)=="function" and type(love.mouse.getPosition)=="function" then
+      local okd,down=pcall(love.mouse.isDown,1)
+      if okd and down then pointerDown=true;local okp,x,y=pcall(love.mouse.getPosition);if okp then pointerAction=cacheChoiceActionAt(x,y) end end
+    end
+    if now>=armedAt then
+      if pointerAction and not prevPointer then return pointerAction end
+      if ent and not prevEnter then return "reuse" end
+      if r and not prevR then return "rebuild" end
+      if d and not prevD then return "delete" end
+    end
+    prevEnter,prevR,prevD,prevPointer=ent,r,d,pointerDown
+    cacheChoiceFrame()
+    if love.timer and love.timer.sleep then love.timer.sleep(0.05) end
+  end
+end
+
 -- Startup is synchronous, so a failed first-run build needs its own tiny event
 -- loop. This prevents an incomplete CBE runtime from silently falling through
 -- into gameplay while still allowing an explicit vanilla-game escape hatch.
 function U.failureGate(state,message,trainerFirst,trainerSource)
   if not failureFrame(state,message,trainerFirst,trainerSource) then return "continue" end
-  local prevR,prevEnter,prevEsc=true,true,true
+  local prevR,prevD,prevEnter,prevEsc=true,true,true,true
   local armedAt=((love.timer and love.timer.getTime and love.timer.getTime()) or os.clock())+0.20
   while true do
     local now=(love.timer and love.timer.getTime and love.timer.getTime()) or os.clock()
@@ -188,11 +319,20 @@ function U.failureGate(state,message,trainerFirst,trainerSource)
             local action=actionAt(a,b);if action and now>=armedAt then return action end
           elseif name=="touchpressed" then
             local action=actionAt(b,c);if action and now>=armedAt then return action end
+          elseif name=="keypressed" and now>=armedAt then
+            if a=="r" then return "retry"
+            elseif a=="d" then return "delete_rebuild"
+            elseif a=="return" or a=="kpenter" then return "continue"
+            elseif a=="escape" then
+              if love.event and love.event.quit then pcall(love.event.quit) end
+              return "exit"
+            end
           end
         end
       end
     end
     local r=isDown("r")
+    local d=isDown("d")
     local ent=isDown("return") or isDown("kpenter")
     local esc=isDown("escape")
     local pointerAction=nil
@@ -209,16 +349,20 @@ function U.failureGate(state,message,trainerFirst,trainerSource)
     if now>=armedAt then
       if pointerAction then return pointerAction end
       if r and not prevR then return "retry" end
+      if d and not prevD then return "delete_rebuild" end
       if ent and not prevEnter then return "continue" end
       if esc and not prevEsc then
         if love.event and love.event.quit then pcall(love.event.quit) end
         return "exit"
       end
     end
-    prevR,prevEnter,prevEsc=r,ent,esc
+    prevR,prevD,prevEnter,prevEsc=r,d,ent,esc
     failureFrame(state,message,trainerFirst,trainerSource)
     if love.timer and love.timer.sleep then love.timer.sleep(0.05) end
   end
 end
+
+U._test={cacheChoiceButtonsForDimensions=cacheChoiceButtonsForDimensions,cacheChoiceActionAtDimensions=cacheChoiceActionAtDimensions,
+  failureButtonsForDimensions=failureButtonsForDimensions,failureActionAtDimensions=failureActionAtDimensions}
 
 return U

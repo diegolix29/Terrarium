@@ -1,11 +1,10 @@
 -- Screen-space cache UI shared by Gen I/II. No source reads, GPU model loads or
 -- save writes. The controller renders this AFTER the cartridge palette pass.
-local Screen={version=3}
+local Screen={version=5}
 local fonts={}
 local color={bg={.028,.044,.049,1},panel={.065,.10,.11,1},edge={.29,.40,.39,1},
   inset={.039,.064,.069,1},ink={.92,.94,.88,1},muted={.60,.72,.70,1},
   accent={1,.31,.15,1},ok={.45,.80,.66,1},error={1,.53,.38,1}}
-local function clamp(n,a,b)return math.max(a,math.min(b,n))end
 local function font(size)
   size=math.max(7,math.floor(size+.5))
   if not fonts[size] then
@@ -37,16 +36,44 @@ local function plate(x,y,w,h,c,line)
   G.rectangle(line and 'line' or 'fill',x,y,w,h)
 end
 function Screen.layout(w,h)
-  local portrait=h>w*1.25
+  if Screen._platformOS==nil then
+    Screen._platformOS=''
+    if love and love.system and type(love.system.getOS)=='function' then
+      local ok,value=pcall(love.system.getOS)
+      if ok then Screen._platformOS=tostring(value or '') end
+    end
+  end
+  local mobile=Screen._platformOS=='Android' or Screen._platformOS=='iOS'
+  -- Near-square foldable screens also carry the virtual pad over the lower
+  -- viewport. Treat them as a stack, not a short desktop window.
+  local portrait=mobile and w/h<1.35 or h>w*1.25
   local margin=math.max(8,math.min(34,w*.035,h*.04))
-  local pw=math.min(portrait and 650 or 980,w-2*margin)
-  -- Reserve the lower portrait band for mobile controls, not for tiny GB text.
-  local avail=portrait and h*.76 or h
-  local ph=math.min(portrait and 550 or 590,avail-2*margin)
-  local s=portrait and math.min(pw/400,ph/490,1.1) or math.min(pw/620,ph/460,1.2)
+  local pw=mobile and (w-2*margin) or math.min(portrait and 650 or 980,w-2*margin)
+  local avail=mobile and h*(portrait and .72 or .85) or (portrait and h*.76 or h)
+  local ph=mobile and (avail-2*margin) or math.min(portrait and 550 or 590,avail-2*margin)
+  local s
+  if mobile then s=math.min(pw/(portrait and 410 or 620),ph/(portrait and 500 or 460),2.2)
+  else s=portrait and math.min(pw/400,ph/490,1.1) or math.min(pw/620,ph/460,1.2) end
   local pad=math.max(10,24*s)
-  return {x=(w-pw)/2,y=portrait and margin or (h-ph)/2,w=pw,h=ph,
-    s=s,pad=pad,portrait=portrait}
+  return {x=(w-pw)/2,y=(mobile or portrait) and margin or (h-ph)/2,w=pw,h=ph,
+    s=s,pad=pad,portrait=portrait,mobile=mobile,controlY=avail}
+end
+-- Show the actual failure rather than ellipsizing the old generic error on one
+-- line. Very long paths remain bounded; the full diagnostic persists on disk.
+local function wrapped(t,x,y,w,size,c,lines)
+  local f=font(size);local line='';local rows={}
+  for word in tostring(t or ''):gsub('[\r\n\t]+',' '):gmatch('%S+') do
+    local trial=line=='' and word or (line..' '..word)
+    if line~='' and f:getWidth(trial)>w then rows[#rows+1]=line;line=word else line=trial end
+  end
+  if line~='' then rows[#rows+1]=line end
+  local count=math.min(lines,#rows);local step=f:getHeight()*1.22
+  for i=1,count do
+    local value=rows[i]
+    if i==count and #rows>count then value=value..' ...' end
+    text(value,x,y+(i-1)*step,w,size,c)
+  end
+  return y+count*step
 end
 local function elapsed(s,now)
   local n=math.max(0,math.floor((s.finishedAt or now)-(s.startedAt or now)))
@@ -79,18 +106,24 @@ function Screen.draw(s,w,h,inventory,now)
   plate(l.x,l.y,math.max(3,4*z),l.h,color.accent)
   text('COLOSSEUM / MODEL LIBRARY',x,y,bw,12*z,color.muted)
   local title=s.selector and 'Battle cache' or (s.error and 'Preparation paused' or
-    (s.complete and (#s.rows==0 and 'Catalog complete' or 'Batch saved') or
-      (s.mode=='quick' and 'Quick Start' or (s.full and 'Full catalog' or 'Preparing models'))))
+    (s.complete and (s.mode=='mtbattle' and 'Mt. Battle cache ready' or (s.full and 'Full catalog ready' or (#s.rows==0 and 'Catalog complete' or 'Batch saved'))) or
+      (s.mode=='mtbattle' and 'Mt. Battle cache' or
+        (s.mode=='quick' and 'Quick Start' or (s.full and 'Full catalog' or 'Preparing models')))))
   text(title,x,y+23*z,bw,30*z,color.ink)
   local sub=s.selector and ((not s.reuseChecked)
       and 'Checking saved cache. No model extraction starts until you select a mode.'
       or 'Choose a mode. No model extraction starts until you select it.') or
     (s.complete and 'Completed models are stored on this device.' or
-      (s.mode=='quick' and (l.portrait and '30 new models. Saved for future sessions.' or 'Adding up to 30 uncached models for your save.') or
-        (s.full and 'Preparing all normal and shiny appearances.' or 'Loading the exact models this session needs.')))
+      (s.mode=='mtbattle' and 'Preparing required cross-generation models. Existing valid files are reused.' or
+        (s.mode=='quick' and (l.portrait and ((tostring(s.batchLimit or 30)..' new models. Saved for future sessions.')) or ('Adding up to '..tostring(s.batchLimit or 30)..' uncached models for your save.')) or
+          (s.full and 'Preparing all 386 normal models. Existing valid files are reused; battle actions stay on-demand.' or 'Loading the exact models this session needs.'))))
   text(sub,x,y+66*z,bw,14*z,color.muted)
   local contentY=y+106*z
-  local footerY=l.y+l.h-p-30*z
+  local recoveryGrid=s.error and l.portrait
+  local buttonH=recoveryGrid and math.max(34,32*z) or 30*z
+  local buttonGap=10*z
+  local recoveryRows=recoveryGrid and 2 or 1
+  local footerY=l.y+l.h-p-buttonH*recoveryRows-buttonGap*(recoveryRows-1)
   local contentEnd=footerY-34*z
   local function button(key,label,bx,by,bw2,bh,focused,detail)
     local selected=focused or false
@@ -112,8 +145,10 @@ function Screen.draw(s,w,h,inventory,now)
       labels={{'wait','CHECKING SAVED CACHE','Looking for 30+ reusable models. This check does not extract or write models.'}}
     else
       labels={
-        {'quick','QUICK START / 30 NEW','Team, caught, seen, nearby and level-relevant.'},
-        {'full','FULL CATALOG','All 251 species, normal + shiny. Optional.'},
+        {'quick','SMART CACHE / +30','Team, caught, seen, nearby and level-relevant.'},
+        {'batch60','SMART CACHE / +60','Same relevance ranking, with a larger persistent batch.'},
+        {'batch120','SMART CACHE / +120','Broader coverage while still avoiding a forced full build.'},
+        {'full','FULL CATALOG / 386','All 386 normal models. Existing valid cache is reused; action banks stay on-demand.'},
         {'b','MAIN MENU','Leave now. Your existing cache stays saved.'}}
       if s.startupRequest then
         if s.reuseEligible then
@@ -125,23 +160,31 @@ function Screen.draw(s,w,h,inventory,now)
             s.startupRequest.newGame and 'Prepare native starters, then begin New Game.' or 'Reuse / prepare your team, then Continue.'})
         end
       elseif s.reuseEligible then
-        table.insert(labels,1,{'reuse','REUSE CACHE','Reuse saved models; load only the current team. No 30-model batch.'})
+        table.insert(labels,1,{'reuse','REUSE CACHE','Reuse saved models; load only the current team. No new smart-cache batch.'})
       end
     end
     local rowH=math.min(64*z,(contentEnd-contentY-(#labels-1)*gap)/#labels)
+    -- Short landscape windows can fit six choices only if the explanatory second
+    -- line is suppressed. Keep the full descriptions on portrait/tablet layouts,
+    -- but never let detail text overlap the next touch target on mobile landscape.
+    local compactRows=rowH<46*z
     for i,row in ipairs(labels)do
-      button(row[1],row[2],x,contentY+(i-1)*(rowH+gap),bw,rowH,s.reuseChecked and s.choice==i,row[3])
+      button(row[1],row[2],x,contentY+(i-1)*(rowH+gap),bw,rowH,s.reuseChecked and s.choice==i,compactRows and nil or row[3])
     end
     local status
     if s.reuseEligible then
-      local n=s.reuseInfo and tonumber(s.reuseInfo.cachedModels) or 30
-      status=('Reusable cache detected: %d+ saved models. Reuse skips the 30-new batch.'):format(math.max(30,n or 30))
+      if s.reuseInfo and s.reuseInfo.certified then
+        status='Previous cache save detected. Reuse loads only the models this session requires.'
+      else
+        local n=s.reuseInfo and tonumber(s.reuseInfo.cachedModels) or 30
+        status=('Reusable cache detected: %d+ saved models. Pick +30 / +60 / +120 / 386, or reuse only.'):format(math.max(30,n or 30))
+      end
     elseif not s.reuseChecked then
       status='Checking existing cache (read only). Completed model files are preserved.'
     elseif s.reuseChecked and s.reuseProbeError then
       status='Existing-cache check unavailable. Team/starter-only and manual cache modes remain available.'
     elseif inventory then
-      status=('Saved: %d / 270 models | %d / 502 appearances'):format(inventory.cachedModels,inventory.cachedAppearances)
+      status=('Saved: %d / 386 normal models'):format(inventory.cachedModels)
     else
       status='Completed files are checked before selecting each batch.'
     end
@@ -160,39 +203,66 @@ function Screen.draw(s,w,h,inventory,now)
     local q=total>0 and done/total or (s.complete and 1 or 0)
     if q>0 then plate(x,barY,bw*q,8*z,s.error and color.error or color.ok)end
     local row=s.rows[s.index]
-    local model=s.complete and 'Quick Start will select the next new batch.' or nameFor(s,row)
+    local model=s.complete and (s.mode=='mtbattle' and 'Cross-generation library is ready.' or 'Quick Start will select the next new batch.') or nameFor(s,row)
     if row and row.variant=='shiny' then model=model..' / shiny' end
     text(model,x,barY+25*z,bw,18*z,color.ink)
     local stage=s.error and tostring(s.error) or (s.complete and 'No re-extraction on restart.' or s.label or 'Checking generated data...')
-    text(stage,x,barY+53*z,bw,12*z,s.error and color.error or color.muted)
+    local stageBottom=barY+67*z
+    if s.error then
+      local fs=l.mobile and math.max(11,12*z) or 12*z
+      local available=math.max(1,math.floor((contentEnd-36*z-(barY+53*z))/(font(fs):getHeight()*1.22)))
+      stageBottom=wrapped(stage,x,barY+53*z,bw,fs,color.error,math.min(4,available))
+    else text(stage,x,barY+53*z,bw,12*z,color.muted) end
     local info=s.batchInfo or inventory
-    local by=math.min(barY+91*z,contentEnd-29*z)
+    local by=math.min(math.max(barY+91*z,stageBottom+8*z),contentEnd-29*z)
     if info then
-      text(('DISK CACHE  %d / 270 models  |  %d / 502 appearances'):format(info.cachedModels,info.cachedAppearances),x,by,bw,12*z,color.ok)
+      text(('DISK CACHE  %d / 386 normal models'):format(info.cachedModels),x,by,bw,12*z,color.ok)
     else text('Disk files persist. Graphics memory is session-only.',x,by,bw,12*z,color.muted)end
     text(elapsed(s,now),x,by+23*z,bw,12*z,color.muted,'right')
+    if s.error then text('Details: model-cache-error.txt',x,by+23*z,bw*.68,11*z,color.muted) end
     local note=s.battle and 'Exact Colosseum models required. No sprite substitution.' or
-      (s.error and 'Error details are saved in the model-cache log.' or 'Leaving preserves every completed model.')
+      (s.error and 'Retry repairs the failed action. Rebuild affects only this model.' or 'Leaving preserves every completed model.')
     text(note,x,footerY-24*z,bw,12*z,color.muted)
     local keys={}
     if s.error then keys[#keys+1]={'a','A: RETRY'} end
+    if s.error and row and row.dex then keys[#keys+1]={'select','SELECT: WIPE MODEL + REBUILD'} end
     if not s.battle then keys[#keys+1]={s.complete and 'a' or 'b',s.complete and 'A: MAIN MENU' or 'B: MAIN MENU'} end
     if s.error then keys[#keys+1]={'start','EXIT GAME'} end
-    local gap=10*z;local buttonW=(bw-math.max(0,#keys-1)*gap)/math.max(1,#keys)
-    for i,k in ipairs(keys)do button(k[1],k[2],x+(i-1)*(buttonW+gap),footerY,buttonW,30*z,i==1)end
+    local gap=buttonGap;local columns=recoveryGrid and 2 or math.max(1,#keys)
+    local buttonW=(bw-(columns-1)*gap)/columns
+    local mobileLabels={a='A: RETRY',select='SELECT: REBUILD',b='B: MAIN MENU',start='START: EXIT'}
+    for i,k in ipairs(keys)do
+      local label=(s.error and l.mobile) and mobileLabels[k[1]] or k[2]
+      if recoveryGrid and k[1]=='select' then label='SELECT: REBUILD' end
+      button(k[1],label,x+((i-1)%columns)*(buttonW+gap),
+        footerY+math.floor((i-1)/columns)*(buttonH+gap),buttonW,buttonH,i==1)
+    end
   end
   G.pop()
 end
-Screen._test={shorten=shorten}
+Screen._test={shorten=shorten,layout=Screen.layout}
 -- Faults keep the native battle visible and paused. This compact message is
 -- never used for ordinary cache misses or successful model buffering.
-function Screen.drawRuntimeError(w,h)
+function Screen.drawRuntimeError(w,h,detail)
   if not (love and love.graphics) then return end
   local G=love.graphics;if not w then w,h=G.getDimensions() end
+  detail=type(detail)=='table' and detail or {}
   local size=math.max(10,math.min(18,w/45));local f=font(size)
-  local message='Model unavailable. A: retry | START: exit.\nDetails: model-cache-error.txt'
+  local pad=math.min(12,w*.025);local width=math.max(1,w-pad*2)
+  local maxReasonLines=math.max(1,math.min(3,math.floor((h*.32-24)/f:getHeight())-4))
+  local panelH=math.min(h,24+f:getHeight()*(4+maxReasonLines*1.22))
+  local identity=detail.species and tostring(detail.species) or 'MODEL UNAVAILABLE'
+  if detail.dex then identity=identity..' # '..tostring(detail.dex) end
+  if detail.variant then identity=identity..' / '..tostring(detail.variant) end
+  if detail.kind then identity=identity..' / '..tostring(detail.kind) end
   G.push('all');G.origin();G.setShader();if G.setScissor then G.setScissor() end
-  G.setFont(f);G.setColor(color.panel);G.rectangle('fill',0,0,w,f:getHeight()*3+16)
-  G.setColor(color.error);G.printf(message,12,8,math.max(1,w-24),'center');G.pop()
+  plate(0,0,w,panelH,color.panel)
+  text('COLOSSEUM / MODEL DIAGNOSTIC',pad,6,width,size,color.muted,'center')
+  text(identity,pad,8+f:getHeight(),width,size,color.error,'center')
+  local bottom=wrapped(detail.error or 'Failure detail unavailable; see saved log.',
+    pad,10+f:getHeight()*2,width,size,color.error,maxReasonLines)
+  text('A: RETRY    START: EXIT',pad,bottom+2,width,size,color.ink,'center')
+  text('Log: build/model-cache-error.txt',pad,bottom+4+f:getHeight(),width,size,color.muted,'center')
+  G.pop()
 end
 return Screen

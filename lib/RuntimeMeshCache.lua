@@ -1,5 +1,6 @@
 local V=...
 local Assets=V.GeneratedAssets
+local Persist,mod=V.PayloadPreserver,V.mod
 local R={version=2}
 local luaMemo={}
 local luaMemoHits=0
@@ -7,10 +8,11 @@ local luaMemoLoads=0
 local unpackArgs=table.unpack or unpack
 
 function R.packSupported()
-  return love and love.data and type(love.data.pack)=="function"
+  return (love and love.data and type(love.data.pack)=="function")
+    or type(string.pack)=="function"
 end
 function R.supported()
-  return R.packSupported() and type(love.data.newByteData)=="function"
+  return R.packSupported() and love and love.data and type(love.data.newByteData)=="function"
     and love.graphics and type(love.graphics.newMesh)=="function"
 end
 
@@ -25,6 +27,13 @@ end
 -- Pokemon body is tens of thousands of rows, so this removes the dominant
 -- allocation cost of writing a runtime sidecar. Output bytes are unchanged.
 local PACK_BATCH=64
+-- Lua/LuaJIT builds do not all expose the same practical vararg/result ceiling.
+-- A Waza morph vertex has 44 floats; PACK_BATCH=64 used to expand that to 2,816
+-- scalar call arguments, and unpack() is evaluated *before* pcall(love.data.pack,
+-- ...), so a mobile stack-limit failure escaped the pack error guard entirely.
+-- Keep batching, but cap scalar arguments well below the common 255-register
+-- boundary. This changes only call granularity; emitted f32 bytes are identical.
+local PACK_SCALAR_LIMIT=192
 
 function R.packRows(rows,stride,checkpoint)
   stride=math.max(1,math.floor(tonumber(stride) or 0))
@@ -33,12 +42,13 @@ function R.packRows(rows,stride,checkpoint)
   local count=#rows
   if count==0 then return nil,"no vertex rows" end
   local rowFmt=string.rep("f",stride)
-  local batchFmt=string.rep(rowFmt,PACK_BATCH)
+  local rowsPerBatch=math.max(1,math.min(PACK_BATCH,math.floor(PACK_SCALAR_LIMIT/stride)))
+  local batchFmt=string.rep(rowFmt,rowsPerBatch)
   local buf={}
   local chunks,chunkCount={},0
   local i=1
   while i<=count do
-    local take=count-i+1;if take>PACK_BATCH then take=PACK_BATCH end
+    local take=count-i+1;if take>rowsPerBatch then take=rowsPerBatch end
     local k=0
     for r=i,i+take-1 do
       local row=rows[r]
@@ -49,9 +59,15 @@ function R.packRows(rows,stride,checkpoint)
         k=k+1;buf[k]=v
       end
     end
-    local ok,bytes=pcall(love.data.pack,"string",
-      take==PACK_BATCH and batchFmt or string.rep(rowFmt,take),unpackArgs(buf,1,k))
-    if not ok or type(bytes)~="string" then return nil,tostring(bytes or "love.data.pack failed") end
+    local fmt=take==rowsPerBatch and batchFmt or string.rep(rowFmt,take)
+    local ok,bytes
+    if love and love.data and type(love.data.pack)=="function" then
+      ok,bytes=pcall(love.data.pack,"string",fmt,unpackArgs(buf,1,k))
+    end
+    if (not ok or type(bytes)~="string") and type(string.pack)=="function" then
+      ok,bytes=pcall(string.pack,"<"..fmt,unpackArgs(buf,1,k))
+    end
+    if not ok or type(bytes)~="string" then return nil,tostring(bytes or "float32 pack failed") end
     chunkCount=chunkCount+1;chunks[chunkCount]=bytes
     i=i+take
     if checkpoint then checkpoint() end
@@ -59,9 +75,13 @@ function R.packRows(rows,stride,checkpoint)
   return table.concat(chunks,"",1,chunkCount)
 end
 
-function R.writeRows(path,rows,stride,checkpoint)
+function R.writeRows(path,rows,stride,checkpoint,preserveExisting)
   if not (Assets and Assets.write) then return false,"generated cache writer unavailable" end
   local bytes,err=R.packRows(rows,stride,checkpoint);if not bytes then return false,err end
+  if preserveExisting and Persist then
+    local _,why=Persist.preserve(mod,"runtime_mesh",path,bytes)
+    if why then return false,why end
+  end
   local ok,why=Assets.write(path,bytes)
   return ok~=false and ok~=nil,why,#bytes
 end
@@ -115,10 +135,15 @@ local function serialize(v,seen,depth)
   out[#out+1]="}";seen[v]=nil
   return table.concat(out)
 end
-function R.writeLua(path,value)
+function R.writeLua(path,value,preserveExisting)
   if not (Assets and Assets.write) then return false,"generated cache writer unavailable" end
   path=tostring(path or "")
-  local ok,err=Assets.write(path,"return "..serialize(value).."\n")
+  local bytes="return "..serialize(value).."\n"
+  if preserveExisting and Persist then
+    local _,why=Persist.preserve(mod,"runtime_mesh",path,bytes)
+    if why then return false,why end
+  end
+  local ok,err=Assets.write(path,bytes)
   if ok~=false and ok~=nil then luaMemo[path]=value end
   return ok~=false and ok~=nil,err
 end

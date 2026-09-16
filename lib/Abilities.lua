@@ -5,6 +5,7 @@
 -- no new save schema, nothing re-rolled on load.
 local V=... or {}
 local AbilityData=V.AbilityData or error("Abilities.lua requires AbilityData to load first")
+local Source=V.ColosseumPokemonMoveData
 local A={}
 
 local function prefs(game)
@@ -47,14 +48,39 @@ local function hashMon(mon, dex)
   return h
 end
 
+local function sourceAbilityIds(dex)
+  local row=Source and Source.species and Source.species[tonumber(dex)]
+  local ids=row and row.abilityIds
+  if type(ids)~="table" then return nil end
+  local out={}
+  for _,id in ipairs(ids) do
+    id=tonumber(id)
+    if id and id>0 then out[#out+1]=id end
+  end
+  if #out==0 then return nil end
+  return out
+end
+
 -- Pure: same mon+dex always resolves to the same id. Does not mutate mon.
+-- Native 001-251 retain the established table exactly. ColosseumDex species
+-- use the ability ids decoded straight from GC6E01 PokemonStats; importantly,
+-- the raw slot is selected BEFORE checking whether its mechanic is supported,
+-- so an unresolved second ability fails closed instead of silently turning into
+-- the species' other implemented ability.
 function A.resolve(mon, dex)
   dex=tonumber(dex)
   local options=dex and AbilityData.bySpecies[dex]
-  if not options or #options==0 then return nil end
-  if #options==1 then return options[1] end
-  local h=hashMon(mon, dex)
-  return options[(h%2)+1]
+  if options and #options>0 then
+    if #options==1 then return options[1] end
+    local h=hashMon(mon,dex)
+    return options[(h%2)+1]
+  end
+  local raw=sourceAbilityIds(dex)
+  if not raw then return nil end
+  local slot=1
+  if #raw>1 then slot=(hashMon(mon,dex)%#raw)+1 end
+  local id=AbilityData.byNumeric and AbilityData.byNumeric[raw[slot]]
+  return id and AbilityData.byId[id] and id or nil
 end
 
 -- Read-only resolution. Never stamp saved party records: Trace and cached
@@ -115,6 +141,30 @@ function A.types(battle,value)
   local d=mon and battle.data and battle.data.pokemon and battle.data.pokemon[mon.species]
   return (value and value.curTypes) or (mon and mon.types) or (d and d.types) or {}
 end
+
+-- Resolve a live host move back to the authoritative GC6E01 CommonMoveData
+-- row without mutating the host definition. Native Gen-I/II definitions carry
+-- their cartridge move number in `.index`; source-backed >251 registrations
+-- carry `.colosseumMoveId`. This lets ability mechanics such as Soundproof use
+-- the retail per-move flags for both native and extended moves instead of a
+-- hand-maintained name list.
+function A.sourceMoveRow(move)
+  if type(move)~="table" then return nil end
+  local raw=tonumber(move.colosseumMoveId or move.index)
+  if not raw then return nil end
+  local row=Source and Source.moves and Source.moves[raw]
+  if type(row)~="table" or tonumber(row.rawMoveId)~=raw then return nil end
+  return row
+end
+
+function A.isSoundMove(move)
+  if type(move)~="table" then return false end
+  -- Verified >251 registrations cache the exact source bit directly; honor it
+  -- even in focused tests where the full source table is intentionally absent.
+  if move.colosseumSoundBased~=nil then return move.colosseumSoundBased==true end
+  local row=A.sourceMoveRow(move)
+  return row~=nil and tonumber(row.soundBased)==1
+end
 function A.cure(battle,value)
   local mon=value and (value.mon or value); if not mon then return end
   mon.status=nil;mon.statusTurns=nil;mon.toxicCounter=nil
@@ -137,7 +187,18 @@ function A.displayName(id)
 end
 
 function A.speciesOptions(dex)
-  return dex and AbilityData.bySpecies[tonumber(dex)]
+  dex=tonumber(dex)
+  local native=dex and AbilityData.bySpecies[dex]
+  if native then return native end
+  local raw=sourceAbilityIds(dex)
+  if not raw then return nil end
+  local out,seen={},{}
+  for _,numeric in ipairs(raw) do
+    local id=AbilityData.byNumeric and AbilityData.byNumeric[numeric]
+    -- UI/catalog surfaces advertise only mechanics this runtime actually owns.
+    if id and AbilityData.byId[id] and not seen[id] then seen[id]=true;out[#out+1]=id end
+  end
+  return #out>0 and out or nil
 end
 
 -- Species-level label for contexts with no live mon (Pokedex dossier):
@@ -152,7 +213,10 @@ function A.speciesLabel(dex)
   return table.concat(names, " / ")
 end
 
-function A.isContactMove(moveId)
+function A.isContactMove(moveId,moveDef)
+  if type(moveDef)=="table" and type(moveDef.makesContact)=="boolean" then
+    return moveDef.makesContact
+  end
   return moveId~=nil and AbilityData.contactMoves[moveId]==true
 end
 

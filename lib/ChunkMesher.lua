@@ -55,6 +55,7 @@ local Structures = V.require("Structures")
 local TileShape = V.require("TileShape")
 local Voxel3D = V.require("Voxel3D")
 local Budget = V.require("BuildBudget")
+local Gen3 = V.require("Gen3")
 
 -- Persistent geometry cache. Optional on purpose: a build without the module
 -- (or one whose option is off) simply meshes every time, exactly as before.
@@ -102,20 +103,6 @@ end
 local RING = 3
 
 -- A sliver of a texel, to keep a quad's sampling inside its own tile.
--- Without any inset the perspective rasteriser lands on a NEIGHBOURING
--- tile's texel along the shared edge and stitches bright seams across the
--- whole map.
---
--- It has to be a sliver and not, as it first was, half a texel. A tile is
--- 8 texels of art across 8 world pixels -- one texel per pixel exactly --
--- and insetting the uv by half a texel at each end squeezes that art into
--- a 7-texel sample range while the quad still covers 8 world pixels. The
--- art then advances 7/8 of a texel per pixel: boundaries drift off the
--- pixel grid, one art pixel gets sampled twice and another never at all.
--- Nothing showed it until the voxel wireframe drew the grid those pixels
--- were supposed to be sitting on. Interpolation error is nowhere near a
--- fiftieth of a texel, so this is as safe against bleed and costs 0.25% of
--- a pixel of drift across a whole tile.
 local INSET = 0.02
 
 -- The south face of a volume is the artwork itself, so it draws at full
@@ -140,8 +127,6 @@ local function keyOf(tx, ty)
 end
 
 -- Face sign: -1 for up-facing quads (pointing at the sky), +1 otherwise.
--- This encodes the face normal's Y component in the sign of the shade value,
--- which the shader splits apart again (see Voxel3D shader's vUp calculation).
 local function faceSign(c, sky)
   if sky ~= nil then return sky and -1 or 1 end
   local a, b, d = c[1], c[2], c[3]
@@ -151,64 +136,7 @@ local function faceSign(c, sky)
   return (ny > 1e-6 or ny < -1e-6) and -1 or 1
 end
 
--- ------------------------------------------------------- spatial chunking
---
--- The module has been called ChunkMesher since the first cut, but until now
--- there were no chunks: a map's terrain was ONE mesh, and every frame
--- submitted all of it -- plus all of every connected neighbour's -- whether
--- or not any of it was on screen, and then again from the sun. The mesher's
--- own note puts a route-sized mesh at 10 to 20 MB of vertices. A house is
--- a few hundred kilobytes, which is why indoors was always fine and a route
--- never was: the cost is not the camera, it is the map.
---
--- So the geometry walk now feeds a sink per spatial bucket instead of one
--- for the map, and a draw submits only the buckets whose bounds meet the
--- camera's. Nothing in runGeometry knows about it -- a quad is routed by
--- where its first corner landed, which is the one thing every quad in this
--- mesher has in common.
---
--- The cells are WIDE AND SHALLOW on purpose, and that is not arbitrary:
--- Gen 1 overworld maps are narrow and tall (a route is ten blocks across
--- and twenty down), while the view is the other way round -- wide, and
--- shallow in the direction the camera looks. So almost all of the culling
--- that is there to be had is along Z, and paying for fine cells along X
--- would buy nothing but draw calls.
-local CHUNK_X = 256          -- world pixels: eight blocks across
-local CHUNK_Z = 64           -- two blocks deep
-
--- Slack on a cell's bounds, in world pixels. A quad is filed by its first
--- corner, and a few of the things this mesher emits -- a stamped tree
--- hull, a prop's prism -- reach past the cell that corner landed in. This
--- is bigger than any of them; over-generous bounds cost a little culling
--- and nothing else, while short ones would clip geometry out of a frame it
--- belongs in.
-local CHUNK_MARGIN = 96
-
--- A finished map's terrain: the list of chunk meshes and their bounds.
---
--- It carries a `release` of its own, which is what lets every existing
--- caller keep treating a map's terrain as one opaque thing -- the cache's
--- swapSlot and releaseEntry call `mesh.release` and neither has to learn
--- that there is now more than one mesh under it.
-local Group = {}
-Group.__index = Group
-
-function Group:release()
-  for _, ch in ipairs(self.chunks) do
-    if ch.mesh and ch.mesh.release then pcall(ch.mesh.release, ch.mesh) end
-  end
-  self.chunks = {}
-end
-
 -- ------------------------------------------------------------ vertex sinks
-
--- A sink accepts quads (4 corners, 4 uv pairs, flat or per-corner shade)
--- and finishes into a drawable mesh. The TABLE sink reproduces the
--- historical pure-Lua output -- geometry() returns its arrays for the
--- headless suite. The FFI sink packs the same six floats per vertex
--- straight into one growing native buffer, unindexed (v1 v2 v3 v1 v3 v4),
--- skipping ~a million short-lived Lua tables per route and LOVE's slow
--- table-by-table vertex upload.
 
 local function newTableSink()
   local verts, indices, quads = {}, {}, 0
@@ -227,10 +155,6 @@ local function newTableSink()
     results = function()
       return verts, indices, quads
     end,
-    -- Vertices as the GPU would see them: the table sink is INDEXED, so its
-    -- drawn vertex count is three per triangle, not #verts. Only the FFI
-    -- sink's unindexed stream can be persisted; this exists so a caller can
-    -- ask either sink the same question.
     vertexCount = function()
       return quads * 6
     end,
@@ -244,7 +168,7 @@ local TRI_ORDER = { 1, 2, 3, 1, 3, 4 }
 
 local function newFfiSink(cap0)
   local capQuads = cap0 or 4096
-  local buf = ffi.new("float[?]", capQuads * 4 * 7)      -- 4 verts/quad, 7 floats/vert (added water flag)
+  local buf = ffi.new("float[?]", capQuads * 4 * 7)      -- 4 verts/quad, 7 floats/vert
   local ibuf = ffi.new("uint32_t[?]", capQuads * 6)      -- 6 indices/quad
   local nQuads = 0
   local sink
@@ -280,19 +204,15 @@ local function newFfiSink(cap0)
     end,
     finish = function()
       if nQuads == 0 then return nil end
-      local n = nQuads * 4          -- vertex count
-      -- upload in slices with budget ticks between: a route-sized mesh
-      -- is ~10-20MB and one atomic setVertices was the last remaining
-      -- frame spike. The mesh is not cached (so never drawn) until the
-      -- whole upload lands, and LuaJIT yields fine across pcall.
+      local n = nQuads * 4
       local ok, mesh = pcall(function()
         local m = love.graphics.newMesh(Voxel3D.FORMAT, n,
                                         "triangles", "static")
-        local CHUNK = 65536              -- vertices per slice (~1.5MB)
+        local CHUNK = 65536
         local i = 0
         while i < n do
           local count = math.min(CHUNK, n - i)
-          local bytes = count * 7 * 4  -- 7 floats per vertex now
+          local bytes = count * 7 * 4
           local data = love.data.newByteData(bytes)
           ffi.copy(data:getFFIPointer(), buf + i * 7, bytes)
           m:setVertices(data, i + 1)
@@ -300,12 +220,6 @@ local function newFfiSink(cap0)
           i = i + count
           Budget.check()
         end
-        -- the index buffer: LOVE auto-picks uint16 vs uint32 by vertex
-        -- count when setVertexMap gets a Lua table, but the raw-Data
-        -- overload (used here to avoid building a several-hundred-
-        -- thousand-entry Lua table) takes the width explicitly, so this
-        -- mirrors that same rule (vertex::getIndexDataTypeFromMax in
-        -- LOVE's own source) by hand.
         local nIdx = nQuads * 6
         Budget.check()
         if n <= 65535 then
@@ -342,46 +256,12 @@ local function newSink(cap0)
   return newTableSink()
 end
 
-
 -- ------------------------------------------------------- spatial chunking
---
--- The module has been called ChunkMesher since the first cut, but until now
--- there were no chunks: a map's terrain was ONE mesh, and every frame
--- submitted all of it -- plus all of every connected neighbour's -- whether
--- or not any of it was on screen, and then again from the sun. The mesher's
--- own note puts a route-sized mesh at 10 to 20 MB of vertices. A house is
--- a few hundred kilobytes, which is why indoors was always fine and a route
--- never was: the cost is not the camera, it is the map.
---
--- So the geometry walk now feeds a sink per spatial bucket instead of one
--- for the map, and a draw submits only the buckets whose bounds meet the
--- camera's. Nothing in runGeometry knows about it -- a quad is routed by
--- where its first corner landed, which is the one thing every quad in this
--- mesher has in common.
---
--- The cells are WIDE AND SHALLOW on purpose, and that is not arbitrary:
--- Gen 1 overworld maps are narrow and tall (a route is ten blocks across
--- and twenty down), while the view is the other way round -- wide, and
--- shallow in the direction the camera looks. So almost all of the culling
--- that is there to be had is along Z, and paying for fine cells along X
--- would buy nothing but draw calls.
-local CHUNK_X = 256          -- world pixels: eight blocks across
-local CHUNK_Z = 64           -- two blocks deep
 
--- Slack on a cell's bounds, in world pixels. A quad is filed by its first
--- corner, and a few of the things this mesher emits -- a stamped tree
--- hull, a prop's prism -- reach past the cell that corner landed in. This
--- is bigger than any of them; over-generous bounds cost a little culling
--- and nothing else, while short ones would clip geometry out of a frame it
--- belongs in.
+local CHUNK_X = 256
+local CHUNK_Z = 64
 local CHUNK_MARGIN = 96
 
--- A finished map's terrain: the list of chunk meshes and their bounds.
---
--- It carries a `release` of its own, which is what lets every existing
--- caller keep treating a map's terrain as one opaque thing -- the cache's
--- swapSlot and releaseEntry call `mesh.release` and neither has to learn
--- that there is now more than one mesh under it.
 local Group = {}
 Group.__index = Group
 
@@ -401,9 +281,6 @@ local function newChunkedSink()
     local k = bz * 8192 + bx
     local b = buckets[k]
     if not b then
-      -- a small starting buffer, unlike the single-sink case: there are
-      -- tens of these alive at once during a build and the FFI sink grows
-      -- by doubling anyway
       b = { sink = newSink(512), ymax = 0,
             x0 = bx * CHUNK_X - CHUNK_MARGIN,
             z0 = bz * CHUNK_Z - CHUNK_MARGIN,
@@ -419,18 +296,6 @@ local function newChunkedSink()
     push = function(c, uv, shade, sky, water)
       local corner = c[1]
       local b = bucketFor(corner[1], corner[3])
-      -- How TALL this cell gets, which is the other half of culling it.
-      --
-      -- The camera looks north and down, so a cell is not out of frame just
-      -- because its GROUND is past where the camera can still see ground: a
-      -- building standing there projects upward, into the sky above the
-      -- horizon, and is plainly visible. Height therefore reads as extra
-      -- northward reach at the draw (see drawGroup).
-      --
-      -- Tracked per cell rather than assumed for all of them, because the
-      -- assumption has to be the WORST case -- a 160px gabled roof -- and
-      -- applying that to open grass would push the cull line most of a
-      -- route further out than flat ground needs. Most cells are flat.
       local y = c[1][2]
       if c[2][2] > y then y = c[2][2] end
       if c[3][2] > y then y = c[3][2] end
@@ -441,9 +306,6 @@ local function newChunkedSink()
     finish = function()
       local chunks = {}
       for _, b in ipairs(order) do
-        -- finish() is where the upload happens, and it yields to the build
-        -- budget partway through a big one -- so this loop is already a
-        -- sliced operation and needs no ticking of its own
         local mesh = b.sink.finish()
         if mesh then
           chunks[#chunks + 1] = { mesh = mesh, x0 = b.x0, z0 = b.z0,
@@ -458,30 +320,6 @@ end
 
 -- -------------------------------------------------------------- geometry
 
--- Emit the raw geometry for `map` into `sink`. `bodyOnly` skips the
--- border ring -- the shape the 2D path's drawMapOnly has always had: a
--- neighbour map contributes its body, and only the CURRENT map supplies
--- the ring around the view.
---
--- `masks` (full variant only) lists rectangles, in this map's world
--- pixels, where connected neighbour BODIES sit: ring geometry inside them
--- is suppressed. The 2D renderer never needed this because it painted
--- neighbour bodies OVER the ring; with a depth buffer the ring's standing
--- trees would rise straight through the neighbour's flat ground -- cross
--- into Route 1 and a wall of border trees sprouts over Pallet.
---
--- Kept free of any GPU call so it can be exercised headless -- the
--- geometry is the part with the interesting invariants, and a suite that
--- needed a real GL context to check them would never run in CI.
--- `waterSink`, when given, takes the WATER SURFACE quads instead of the
--- main sink -- the one class in this world that is drawn as its own pass
--- (see Water: a mirror cannot be drawn until what it reflects exists).
--- Nothing else moves: the quads are the same quads, emitted by the same
--- corner and uv arithmetic at the same recessed height, and the shoreline
--- faces around them still belong to the GROUND that exposes them.
---
--- Omitted, water stays in the terrain mesh exactly as it always did, which
--- is what the headless geometry() below and the sun's own pass both want.
 local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   local push = sink.push
   local waterPush = waterSink and waterSink.push or nil
@@ -491,17 +329,13 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   local atlasW = tileset.imageWidth or (perRow * 8)
   local atlasH = tileset.imageHeight or 48
 
-  -- ------------------------------------------------------------- ledge lips
-  --
-  -- A hop-down ledge is a LIP, not a kerb.  TileShape resolves the class per
-  -- CELL (its HOP_LIP rule), but the drop is only DRAWN across the 8px tile
-  -- row the rim occupies -- the rest of the cell is the turf above it.  Read
-  -- at cell granularity the whole square rose, so a ledge line came out as a
-  -- kerb of grass with a rim printed on its side.
-  --
-  -- Which half rises is the ROM's own answer: DoPlayerMovement.TryJump keys
-  -- the hop off classes $A0-$AF, and the class sits on the cell you jump
-  -- FROM, so the neighbour holding it names the side the lip faces.
+  if Gen3 and Gen3.isGen3(tileset) then
+    local okD, info = pcall(Gen3.describe, tileset)
+    if okD and info then
+      perRow, atlasW, atlasH = info.perRow, info.width, info.height
+    end
+  end
+
   local LEDGE_HOP = {
     { -1, 0, { [0xA0] = true, [0xA4] = true }, "right" },
     { 1, 0, { [0xA1] = true, [0xA5] = true }, "left" },
@@ -524,9 +358,9 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return d
   end
 
-  -- s.h for the tile the rim is drawn on, 0 for the rest of its cell
   local function shapeHeight(tx, ty, s)
     if s.class ~= "ledge" then return s.h end
+    if S.isGen3 then return s.h end
     local d = ledgeDrop(math.floor(tx / 2), math.floor(ty / 2))
     local onDrop
     if d == "up" then onDrop = ty % 2 == 0
@@ -536,70 +370,74 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return onDrop and s.h or 0
   end
 
+  local stampH = {}
   local function heightAt(tx, ty)
     local k = keyOf(tx, ty)
-    if S.skip[k] then return 0 end
+    if S.skip[k] then
+      local hit = stampH[k]
+      if hit == nil then
+        local okS, z = pcall(Structures.stampGround, map, tx, ty)
+        hit = (okS and tonumber(z)) or 0
+        stampH[k] = hit
+      end
+      return hit
+    end
     local run = S.runs[k]
     if run then return run.h end
     local s = S.shapeAt[k]
     return s and shapeHeight(tx, ty, s) or 0
   end
 
-    local function isWaterAt(tx, ty)
+  local HULL_CLASS = {
+    cylinder = true, canopy = true, stump = true, can = true,
+    planter = true, billboard = true, post = true,
+  }
+  
+  local SEAM_DATUM = -16
+  local function occludeH(tx, ty)
+    if not S.isGen3 then return heightAt(tx, ty) end
+    local k = keyOf(tx, ty)
+    if S.seamOpen and S.seamOpen[k] then return SEAM_DATUM end
+    if S.skip[k] or S.runs[k] then return heightAt(tx, ty) end
+    local s = S.shapeAt[k]
+    if s and HULL_CLASS[s.class] then
+      local b = s.base or 0
+      local h = shapeHeight(tx, ty, s)
+      return (b < h) and b or h
+    end
+    return heightAt(tx, ty)
+  end
+
+  local function isWaterAt(tx, ty)
     local k = keyOf(tx, ty)
     local s = S.shapeAt[k]
     if not s then return false end
     return s.class == "water"
   end
 
-  -- one atlas-rect UV, optionally cropped to art rows [vTop, vBot] of 8
+  local function tileOrigin(tile)
+    return (tile % perRow) * 8, math.floor(tile / perRow) * 8
+  end
+
   local function uvRect(tile, vTop, vBot)
-    local ax = (tile % perRow) * 8
-    local ay = math.floor(tile / perRow) * 8
-    local vi = math.min(INSET, (vBot - vTop) / 4)
+    local ax, ay = tileOrigin(tile)
+    local vi = math.min(INSET, ((vBot or 8) - (vTop or 0)) / 4)
     return (ax + INSET) / atlasW, (ax + 8 - INSET) / atlasW,
-           (ay + vTop + vi) / atlasH, (ay + vBot - vi) / atlasH
+           (ay + (vTop or 0) + vi) / atlasH, (ay + (vBot or 8) - vi) / atlasH
   end
 
   -- ------------------------------------------------------ ambient occlusion
-  --
-  -- Ambient light is what reaches a surface from the sky at large, so it is
-  -- blocked by how much geometry crowds a point rather than by where the
-  -- sun happens to be -- which makes it the exact complement of the shadow
-  -- pass, and the reason both are worth having. The shadow map draws the
-  -- long directional shadow a building throws; this draws the dark seam in
-  -- every corner the sky cannot see into, at every scale finer than a
-  -- shadow map texel.
-  --
-  -- Baked per vertex, the classic voxel way: each corner counts the
-  -- neighbours that crowd it and steps down once per neighbour, and the
-  -- rasteriser interpolates the steps into a smooth falloff. Costs exactly
-  -- nothing at draw time, and it is resolution-independent -- a screen
-  -- space pass would blur across the pixel grid this whole mode is built
-  -- to keep crisp.
-  --
-  -- (What was here before was a one-directional contact shadow keyed to a
-  -- sun in the northwest: two neighbours, one corner, top faces only.)
 
-  -- Intensity. Both terms below are DARKENING amounts rather than
-  -- multipliers, so this one number scales the whole effect: 1.0 is the
-  -- barely-there first cut, and everything is expressed against it.
   local AO_STRENGTH = 2.4
-  local AO_STEP = 0.09 * AO_STRENGTH      -- per crowding neighbour, max 3
-  local AO_EDGE = 1 - 0.14 * AO_STRENGTH  -- creases / corners on a face
-  local AO_GROUND = 0.12 * AO_STRENGTH    -- a prop's contact with the floor
-  local AO_RISE = 6                       -- px over which the floor lets go
-  local AO_FLOOR = 0.25                   -- never let a vertex reach black
+  local AO_STEP = 0.09 * AO_STRENGTH
+  local AO_EDGE = 1 - 0.14 * AO_STRENGTH
+  local AO_GROUND = 0.12 * AO_STRENGTH
+  local AO_RISE = 6
+  local AO_FLOOR = 0.25
 
-  -- Both sinks copy a per-corner shade straight out into the vertex stream
-  -- and keep no reference, so these two scratch rows are reused for every
-  -- quad on the map rather than allocating a table per face -- a route
-  -- builds a few hundred thousand of them.
   local aoTop = { 0, 0, 0, 0 }
   local aoSide = { 0, 0, 0, 0 }
 
-  -- A top face's four corners, each occluded by the three cells that touch
-  -- it: two edge neighbours and the diagonal between them.
   local function aoShades(tx, ty, h, shade)
     local n = heightAt(tx, ty - 1) > h
     local s = heightAt(tx, ty + 1) > h
@@ -614,40 +452,21 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
       local k = 0
       if a then k = k + 1 end
       if b then k = k + 1 end
-      -- a diagonal wedged behind both of its edges adds nothing: the
-      -- corner is already as enclosed as it can get, and counting it
-      -- again is what turns an ordinary inside corner black
       if d and not (a and b) then k = k + 1 end
-      -- floored, so cranking AO_STRENGTH deepens the seams instead of
-      -- punching holes of pure black through the world
       return shade * math.max(AO_FLOOR, 1 - AO_STEP * k)
     end
-    -- corners in topQuad order: NW, NE, SE, SW
     aoTop[1], aoTop[2] = corner(n, w, nw), corner(n, e, ne)
     aoTop[3], aoTop[4] = corner(s, e, se), corner(s, w, sw)
     return aoTop
   end
 
-  -- The same idea on an upright face, where the crowding is of two kinds:
-  -- the CREASE it rises out of (the band sitting on the ground, or on
-  -- whatever lower neighbour exposed the face) and the INSIDE CORNERS
-  -- where the columns flanking it stand proud of the band. `hl`/`hr` are
-  -- those flanking heights in FACE order -- left then right as seen from
-  -- outside, per LATERAL below -- so the shades line up with sideQuad's
-  -- corners without the caller thinking about compass directions.
   local LATERAL = {
     [1] = { 0, 1, 0, -1 },    -- east face:  left south, right north
     [2] = { 0, -1, 0, 1 },    -- west face:  left north, right south
     [5] = { -1, 0, 1, 0 },    -- south face: left west,  right east
     [6] = { 1, 0, -1, 0 },    -- north face: left east,  right west
   }
-  -- Ground contact for the prebuilt prop quads -- the per-pixel plants,
-  -- signs and lone trees, and the round-tree stamps. Those arrive from
-  -- Structures already finished, so the neighbour counting above has no
-  -- columns to count. What it CAN say is that the ground plane itself
-  -- blocks half the sky, so the closer a voxel sits to it the less ambient
-  -- light reaches it -- which is what plants a prop on the floor instead
-  -- of leaving it looking pasted over the top.
+  
   local aoProp = { 0, 0, 0, 0 }
   local function groundShades(c, shade)
     if type(shade) == "table" then return shade end
@@ -660,10 +479,9 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return aoProp
   end
 
-  local AO_CORNER = math.max(AO_FLOOR, AO_EDGE * AO_EDGE)  -- crease AND flank
+  local AO_CORNER = math.max(AO_FLOOR, AO_EDGE * AO_EDGE)
   local function sideShades(hl, hr, y0, y1, crease, shade)
     if not (crease or hl > y0 or hr > y0) then return shade end
-    -- corners run bottom-left, bottom-right, top-right, top-left
     local base = crease and AO_EDGE or 1
     aoSide[1] = shade * (hl > y0 and (crease and AO_CORNER or AO_EDGE) or base)
     aoSide[2] = shade * (hr > y0 and (crease and AO_CORNER or AO_EDGE) or base)
@@ -672,31 +490,24 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return aoSide
   end
 
-  -- `to` routes the quad somewhere other than the main sink -- the water
-  -- surface is the only caller that ever does (see runGeometry's header).
-  local function topQuad(x0, z0, h, tile, shade, water, to)
-    local u0, u1, v0, v1 = uvRect(tile, 0, 8)
+  local function topQuad(x0, z0, h, tile, shade, water, to, vTop, vBot)
+    local u0, u1, v0, v1 = uvRect(tile, vTop or 0, vBot or 8)
     ;(to or push)({ { x0, h, z0 }, { x0 + 8, h, z0 },
                     { x0 + 8, h, z0 + 8 }, { x0, h, z0 + 8 } },
                   { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
-         aoShades(x0 / 8, z0 / 8, h, shade), nil, water)
+                  aoShades(x0 / 8, z0 / 8, h, shade), nil, water)
   end
 
-  -- vertical quad for face direction `d` of the tile column at (x0, z0),
-  -- spanning heights [y0, y1] and showing art rows [vTop, vBot] of `tile`.
-  -- Corners run bottom-left, bottom-right, top-right, top-left as seen
-  -- from outside; u follows +X on the north/south faces so a door or sign
-  -- never draws mirrored.
   local function sideQuad(d, x0, z0, y0, y1, tile, vTop, vBot, shade, water)
     local x1, z1 = x0 + 8, z0 + 8
     local c
-    if d == 5 then                                       -- south, at z1
+    if d == 5 then
       c = { { x0, y0, z1 }, { x1, y0, z1 }, { x1, y1, z1 }, { x0, y1, z1 } }
-    elseif d == 6 then                                   -- north, at z0
+    elseif d == 6 then
       c = { { x1, y0, z0 }, { x0, y0, z0 }, { x0, y1, z0 }, { x1, y1, z0 } }
-    elseif d == 1 then                                   -- east, at x1
+    elseif d == 1 then
       c = { { x1, y0, z1 }, { x1, y0, z0 }, { x1, y1, z0 }, { x1, y1, z1 } }
-    else                                                 -- west, at x0
+    else
       c = { { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 } }
     end
     local u0, u1, v0, v1 = uvRect(tile, vTop, vBot)
@@ -704,10 +515,9 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   end
 
   local def = map.def
-  local tw, th = def.width * 4, def.height * 4         -- map size in tiles
+  local tw, th = def.width * 4, def.height * 4
   local r = bodyOnly and 0 or RING * 4
 
-  -- true when the (ring) position lies under a connected neighbour's body
   local function masked(px0, pz0, px1, pz1)
     if not masks then return false end
     for _, mk in ipairs(masks) do
@@ -718,11 +528,6 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return false
   end
 
-  -- The inclusive variant for OBJECT quads: a quad TOUCHING a neighbour
-  -- body counts as under it. The old test took the quad's center with
-  -- strict bounds, and a quad whose center sat exactly on the body's
-  -- edge line escaped the mask -- stringing stray pixel fragments of
-  -- otherwise-dropped border trees along every map seam.
   local function maskedClosed(px0, pz0, px1, pz1)
     if not masks then return false end
     for _, mk in ipairs(masks) do
@@ -743,38 +548,25 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
         s = nil
       end
 
-      -- Under the TREES fill the border wall is MODELLED or it is not there
-      -- (see Structures' hullRingOnly): a ring cell nothing claimed would
-      -- be a flat-topped box standing beside carved trunks, which reads as
-      -- a painted-on plateau rather than forest. Structures already stops
-      -- the ring at the carve distance; this catches the odd cell inside it
-      -- that the 2x2 grouping could not take -- a canopy whose partners
-      -- fall outside the shortened ring is left unclaimed, and one strip of
-      -- boxes along an edge is the whole artefact this avoids.
       if not inBody and S.hideBareRing and not S.skip[k] then
-        s = nil
+        if s == nil or s.apron or not S.outdoor then
+          if not S.outdoor and s and not s.apron then s = nil end
+        else
+          s = { class = "ground", art = "flat", flat = true,
+                h = s.h or 0, base = s.base or 0, gen3 = s.gen3,
+                apron = true }
+        end
       end
 
       if s and S.skip[k] then
-        -- an object stands here; paint its synthesized ground and let the
-        -- prebuilt prism quads (appended below) carry the art
         local g = S.ground[k]
         if g then
-          -- ...at the DATUM the object stands on, not at zero.  A building
-          -- claim carries the height its ground vote found (Buildings.stamp),
-          -- so a house on a terrace paints its floor on the terrace instead
-          -- of on the world datum sixteen pixels below it.
-          local gy = s.base or 0
-          topQuad(tx * 8, ty * 8, 0, g, 1, false)
-          -- the claimed tile is still ground at height 0, and water next
-          -- door still recesses below it: without the same below-ground
-          -- side bands ordinary ground emits, the two-pixel shoreline
-          -- face is a slit into the sky behind the mesh -- which is
-          -- exactly what a building plot or a sign standing at the
-          -- waterline showed. Same bands, cut from the synthesized
-          -- ground's own art
+          local gy = heightAt(tx, ty)
+          if type(gy) ~= "number" then gy = s.base or 0 end
+          topQuad(tx * 8, ty * 8, gy, g, 1, false)
+          
           for _, side in ipairs(SIDES) do
-            local nh = heightAt(tx + side[1], ty + side[2])
+            local nh = occludeH(tx + side[1], ty + side[2])
             if nh < gy then
               local d = side[3]
               local lat = LATERAL[d]
@@ -794,47 +586,28 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           end
         end
       elseif s and s.sub and s.sub.res and s.sub.h then
-        -- ------------------------------------------------ SUB-TILE HEIGHTS
-        --
-        -- A tile's height is normally ONE number: `topQuad` plants all four
-        -- corners of the 8px square at it and the side faces span from the
-        -- neighbour up to it. That is the whole contract everything below
-        -- assumes, which is why finer heights could not simply be a smaller
-        -- number -- they need their own emitter.
-        --
-        -- This is it: the tile is divided into `res` x `res` sub-columns
-        -- (res 2 = 4px squares, 4 = 2px, 8 = 1px) and each is emitted as its
-        -- own little box. Sides are drawn only where the neighbouring
-        -- sub-column is LOWER, exactly as the tile-sized path does, so the
-        -- inside of a flat patch costs nothing and only the steps between
-        -- levels produce faces.
-        --
-        -- GATED ON A FIELD THAT IS NIL EVERYWHERE. A tile with no `sub` takes
-        -- the original branch below, unchanged, so nothing that renders today
-        -- can render differently because this exists.
-        --
-        -- THE COST IS REAL AND IT IS THE READER'S TO SPEND. At res 8 one tile
-        -- is up to 64 boxes; a whole map of them would be a hundred times the
-        -- geometry. It is a sparse override on the few tiles that need
-        -- sculpting, and the editor writes it nowhere else.
         local res = math.max(1, math.min(8, math.floor(s.sub.res)))
         local step = 8 / res
         local hs = s.sub.h
-        local base = run and run.h or shapeHeight(tx, ty, s)
+        local base = S.runs[k] and S.runs[k].h or shapeHeight(tx, ty, s)
         local x0, z0 = tx * 8, ty * 8
         local tile = S.tileAt[k]
 
-        local function subH(i, j)
-          if i < 0 or j < 0 or i >= res or j >= res then return nil end
-          local v = hs[j * res + i + 1]
-          return tonumber(v) or base
+        local shift = 0
+        do
+          local z0 = s.sub.z0
+          if type(z0) == "number" then shift = base - z0 end
         end
 
-        -- The art under one sub-square, so a sculpted tile keeps its drawing
-        -- instead of repeating the whole tile per box.
+        local function subH(i, j)
+          if i < 0 or j < 0 or i >= res or j >= res then return nil end
+          local v = tonumber(hs[j * res + i + 1])
+          if v == nil then return base end
+          return v + shift
+        end
+
         local function subUV(i, j)
-          local ax = (tile % perRow) * 8
-          local ay = math.floor(tile / perRow) * 8
+          local ax, ay = tileOrigin(tile)
           local u0 = (ax + i * step) / atlasW
           local u1 = (ax + (i + 1) * step) / atlasW
           local v0 = (ay + j * step) / atlasH
@@ -852,15 +625,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                    { sx + step, hh, sz + step }, { sx, hh, sz + step } },
                  { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } },
                  aoShades(tx, ty, hh, 1))
-            -- sides, only where the neighbour is lower. Off the tile's own
-            -- edge the neighbour is the NEXT TILE's height, so a sculpted
-            -- tile still closes against the flat ground beside it rather
-            -- than leaving a slot you can see through.
+            -- sides
             for _, side in ipairs(SIDES) do
               local ni, nj = i + side[1], j + side[2]
               local nh = subH(ni, nj)
               if nh == nil then
-                nh = heightAt(tx + side[1], ty + side[2])
+                nh = occludeH(tx + side[1], ty + side[2])
               end
               if nh < hh then
                 local d = side[3]
@@ -887,58 +657,214 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
         local h = run and run.h or shapeHeight(tx, ty, s)
         local x0, z0 = tx * 8, ty * 8
 
-        -- top face. A roofed volume gets a GABLE segment: the roof rises
-        -- from the facade top at the south eave to a ridge across the
-        -- footprint's middle, then falls back to the facade at the north
-        -- edge -- so the far side sits LOW. (The first cut was a shed
-        -- plane rising all the way north, which turns a building into a
-        -- ramp.) The south slope wears the structure's roof rows (ridge
-        -- art at the ridge, eaves art at the eave); the back slope
-        -- mirrors them. Exposed east/west flanks hip: their outer edge
-        -- drops toward the eave, rounding the drawn corner tiles into 45
-        -- degree corners. Flat-topped volumes wear their top rows;
-        -- everything else its own art.
         if run and run.rise > 0 then
-          local mid = run.extent / 2
-          local function gableH(d)     -- d = rows north of the south eave
-            local t = d <= mid and d / mid or (run.extent - d) / (run.extent - mid)
+          local gext = run.gableExtent or run.extent
+          local mid = gext / 2
+          local shed = run.shedRoof
+          local shedDepth = shed
+
+          local function gableH(d)
+            local t
+            if shed then
+              t = d / shedDepth
+            else
+              t = d <= mid and d / mid or (gext - d) / (gext - mid)
+            end
             return run.h + run.rise * math.max(0, math.min(1, t))
           end
-          local d0 = run.front - ty                -- rows from the south edge
+          
+          local d0 = run.front - ty
           local hS = gableH(d0)
           local hN = gableH(d0 + 1)
-          -- art by proximity to the ridge, mirrored over the back
-          local rel = 1 - math.abs(d0 + 0.5 - mid) / math.max(mid, 0.5)
-          local idx = math.min(run.roofRows - 1,
-                               math.floor((1 - rel) * run.roofRows))
-          local roofTile = map:tileAt(tx, run.north + idx)
+          
+          local roofTile, rv0, rv1
+          if S.isGen3 and (run.roofRows or 0) > 0 then
+            local span = math.max(mid, 0.5)
+            local artRows = run.roofArtRows or run.roofRows
+            local artTop = run.roofArtTop or run.north
+            local band = artRows * 8
+            local artDepth = math.max(1, math.min(gext, artRows))
+            if S.isGen3 and run.gen3RoofRows then artDepth = math.max(1, gext) end
+            
+            local function artPix(d)
+              local t
+              if shed then
+                t = 1 - d / artDepth
+              else
+                t = math.abs(d - mid) / span
+              end
+              return math.max(0, math.min(1, t)) * band
+            end
+            
+            local a, b = artPix(d0), artPix(d0 + 1)
+            local p0, p1 = math.min(a, b), math.max(a, b)
+            if p1 - p0 < 0.5 then
+              if p0 <= 0.001 then p0, p1 = 4, 8 else p1 = p0 + 0.5 end
+            end
+            local ai = math.floor(((p0 + p1) / 2) / 8)
+            if ai < 0 then ai = 0 end
+            if ai > artRows - 1 then ai = artRows - 1 end
+            roofTile = S.tileAt[keyOf(tx, artTop + ai)] or Gen3.tileAt(map, tx, artTop + ai)
+            rv0 = math.max(0, math.min(7.5, p0 - ai * 8))
+            rv1 = math.max(rv0 + 0.5, math.min(8, p1 - ai * 8))
+          else
+            local rel = 1 - math.abs(d0 + 0.5 - mid) / math.max(mid, 0.5)
+            local idx = math.min(run.roofRows - 1, math.floor((1 - rel) * run.roofRows))
+            roofTile = S.tileAt[keyOf(tx, run.north + idx)] or Gen3.tileAt(map, tx, run.north + idx)
+            rv0, rv1 = 0, 8
+          end
+          
           local swY, seY, neY, nwY = hS, hS, hN, hN
-          if heightAt(tx - 1, ty) < run.h then     -- west flank: hip
+          local hipW = heightAt(tx - 1, ty) < run.h
+          local hipE = heightAt(tx + 1, ty) < run.h
+          if hipW then
             swY = math.max(run.h, hS - 8)
             nwY = math.max(run.h, hN - 8)
           end
-          if heightAt(tx + 1, ty) < run.h then     -- east flank: hip
+          if hipE then
             seY = math.max(run.h, hS - 8)
             neY = math.max(run.h, hN - 8)
           end
-          local u0, u1, v0, v1 = uvRect(roofTile, 0, 8)
+          local u0, u1, v0, v1 = uvRect(roofTile, rv0, rv1)
           push({ { x0, swY, z0 + 8 }, { x0 + 8, seY, z0 + 8 },
                  { x0 + 8, neY, z0 }, { x0, nwY, z0 } },
                { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95, nil, s.class == "water")
+
+          local function profileH(nr, d)
+            local ne = nr.gableExtent or nr.extent
+            local ndepth = nr.shedRoof
+            local t
+            if ndepth then
+              t = d / ndepth
+            else
+              local nm = ne / 2
+              t = d <= nm and d / nm or (ne - d) / (ne - nm)
+            end
+            return nr.h + (nr.rise or 0) * math.max(0, math.min(1, t))
+          end
+          
+          local function roofEdge(ntx)
+            local nr = S.runs[keyOf(ntx, ty)]
+            if not nr then return nil end
+            if (nr.rise or 0) <= 0 then return nr.h, nr.h end
+            local nd = nr.front - ty
+            return profileH(nr, nd), profileH(nr, nd + 1)
+          end
+          
+          local function flank(nsY, nnY, sY, nY, east)
+            local bS = math.max(run.h, math.min(nsY or run.h, sY))
+            local bN = math.max(run.h, math.min(nnY or run.h, nY))
+            if sY - bS < 0.5 and nY - bN < 0.5 then return end
+            local fx = east and (x0 + 8) or x0
+            if east then
+              push({ { fx, bS, z0 + 8 }, { fx, bN, z0 },
+                     { fx, nY, z0 }, { fx, sY, z0 + 8 } },
+                   { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
+                   Voxel3D.FACE_SHADE[1], nil, s.class == "water")
+            else
+              push({ { fx, bN, z0 }, { fx, bS, z0 + 8 },
+                     { fx, sY, z0 + 8 }, { fx, nY, z0 } },
+                   { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
+                   Voxel3D.FACE_SHADE[2], nil, s.class == "water")
+            end
+          end
+          
+          if hipW then
+            flank(nil, nil, swY, nwY, false)
+          else
+            local ns, nn = roofEdge(tx - 1)
+            flank(ns, nn, swY, nwY, false)
+          end
+          if hipE then
+            flank(nil, nil, seY, neY, true)
+          else
+            local ns, nn = roofEdge(tx + 1)
+            flank(ns, nn, seY, neY, true)
+          end
+
+          local function rowEdge(nty, southSide)
+            local nr = S.runs[keyOf(tx, nty)]
+            if not nr then return nil end
+            if (nr.rise or 0) <= 0 then return nr.h, nr.h end
+            local nd = nr.front - nty
+            local e = southSide and profileH(nr, nd + 1) or profileH(nr, nd)
+            local w, ee = e, e
+            if heightAt(tx - 1, nty) < nr.h then w = math.max(nr.h, e - 8) end
+            if heightAt(tx + 1, nty) < nr.h then ee = math.max(nr.h, e - 8) end
+            return w, ee
+          end
+          
+          local function rowFlank(nw, nee, wY, eY, south)
+            local bW = math.max(run.h, math.min(nw or run.h, wY))
+            local bE = math.max(run.h, math.min(nee or run.h, eY))
+            if wY - bW < 0.5 and eY - bE < 0.5 then return end
+            if south then
+              push({ { x0, bW, z0 + 8 }, { x0 + 8, bE, z0 + 8 },
+                     { x0 + 8, eY, z0 + 8 }, { x0, wY, z0 + 8 } },
+                   { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
+                   Voxel3D.FACE_SHADE[5], nil, s.class == "water")
+            else
+              push({ { x0 + 8, bE, z0 }, { x0, bW, z0 },
+                     { x0, wY, z0 }, { x0 + 8, eY, z0 } },
+                   { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
+                   Voxel3D.FACE_SHADE[6], nil, s.class == "water")
+            end
+          end
+          
+          local sw, se = rowEdge(ty + 1, true)
+          rowFlank(sw, se, swY, seY, true)
+          local nw2, ne2 = rowEdge(ty - 1, false)
+          rowFlank(nw2, ne2, nwY, neY, false)
+
         elseif run then
+          local roomTop = nil
+          if S.isGen3 and not S.outdoor and S.gen3RoomWallTop
+             and not run.gen3RoofRows and s.class == "wall" then
+            roomTop = S.gen3RoomWallTop[(ty % 2) * 2 + (tx % 2) + 1]
+          end
           local m = math.min(2, run.extent)
-          local topTile = map:tileAt(tx, run.north + ((ty - run.north) % m))
-          topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, s.class == "water")
+          local artTop = run.north
+          if S.isGen3 and (run.roofArtRows or 0) > 0 and run.roofArtTop
+             and run.roofArtTop <= run.front then
+            artTop = run.roofArtTop
+            m = math.min(run.roofArtRows, run.front - artTop + 1)
+          end
+          if roomTop then
+            topQuad(x0, z0, h, roomTop, VOLUME_TOP_SHADE, s.class == "water")
+          elseif S.isGen3 and run.extent > m then
+            local d = ty - run.north
+            local band = m * 8
+            local p0 = (d / run.extent) * band
+            local p1 = ((d + 1) / run.extent) * band
+            local ai = math.floor(((p0 + p1) / 2) / 8)
+            if ai < 0 then ai = 0 end
+            if ai > m - 1 then ai = m - 1 end
+            local topTile = S.tileAt[keyOf(tx, artTop + ai)] or Gen3.tileAt(map, tx, artTop + ai)
+            local tv0 = math.max(0, math.min(7.5, p0 - ai * 8))
+            local tv1 = math.max(tv0 + 0.5, math.min(8, p1 - ai * 8))
+            topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, s.class == "water", nil, tv0, tv1)
+          else
+            local topTile = S.tileAt[keyOf(tx, artTop + ((ty - run.north) % m))] or Gen3.tileAt(map, tx, artTop + ((ty - run.north) % m))
+            topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, s.class == "water")
+          end
         else
           local topTile = tile
-          if s.art == "upright" and s.authored then
-            -- Top art for a pinned box.  A furniture drawing is top-view
-            -- rows over floor(h/8) face-on rows the fold stands upright;
-            -- a face row's top would repeat its front art lying flat, so
-            -- it wears the nearest row above the face block instead --
-            -- the drawn tabletop (and whatever sits on it) stays on top,
-            -- and a fully-folded structure (wall, desk) tops with its
-            -- northmost row.
+          local capV0, capV1 = nil, nil
+          if s.furnCap and s.art == "upright" and s.authored then
+            local cap = s.furnCap
+            local dRow = ty - cap.north
+            if dRow < 0 then dRow = 0 end
+            if dRow > cap.ext - 1 then dRow = cap.ext - 1 end
+            local capBand = cap.rows * 8
+            local cp0 = (dRow / cap.ext) * capBand
+            local cp1 = ((dRow + 1) / cap.ext) * capBand
+            local ci = math.floor(((cp0 + cp1) / 2) / 8)
+            if ci < 0 then ci = 0 end
+            if ci > cap.rows - 1 then ci = cap.rows - 1 end
+            topTile = S.tileAt[keyOf(tx, cap.n + ci)] or topTile
+            capV0 = math.max(0, math.min(7.5, cp0 - ci * 8))
+            capV1 = math.max(capV0 + 0.5, math.min(8, cp1 - ci * 8))
+          elseif s.art == "upright" and s.authored then
             local north, front = ty, ty
             while ty - north < 6 do
               local bs = S.shapeAt[keyOf(tx, north - 1)]
@@ -958,75 +884,127 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             end
             local row = math.min(ty, front - math.floor(h / 8))
             if row < north then
-              -- the whole run folded onto the face: top with the drawn
-              -- row just above it when that row is furniture too (a
-              -- bookcase wearing its shelf-top trim), else with the
-              -- run's own top row
               local above = S.shapeAt[keyOf(tx, north - 1)]
               row = (above and above.authored and above.art == "upright")
                     and (north - 1) or north
             end
             topTile = S.tileAt[keyOf(tx, row)]
           end
-          -- water's surface, and only water's: the recessed sheet itself,
-          -- never the ground's shoreline bands around it. A cell an object
-          -- stands on took the branch above and paints synthesized GROUND,
-          -- which is right -- a sign at the waterline stands on a plot, not
-          -- on the pond.
           topQuad(x0, z0, h, topTile,
                   s.art == "upright" and VOLUME_TOP_SHADE or 1, s.class == "water",
-                  (s.class == "water") and waterPush or nil)
+                  (s.class == "water") and waterPush or nil, capV0, capV1)
         end
 
-        -- sides: 8px bands wherever the neighbour is lower. Band k spans
-        -- heights [8k, 8k+8) and shows one full tile of art; a partial
-        -- band crops the art rows to match, so nothing ever stretches.
+        if s.class == "bridge" then
+          local floorH, floorT = nil, nil
+          for _, side in ipairs(SIDES) do
+            local ntx, nty = tx + side[1], ty + side[2]
+            local ns = S.shapeAt[keyOf(ntx, nty)]
+            if ns and ns.class ~= "bridge" then
+              local nh2 = heightAt(ntx, nty)
+              if floorH == nil or nh2 < floorH then
+                floorH = nh2
+                floorT = S.tileAt[keyOf(ntx, nty)]
+              end
+            end
+          end
+          if floorT and floorH and h - floorH > 8 then
+            topQuad(x0, z0, floorH, floorT, 1, false)
+          end
+        end
+
         for _, side in ipairs(SIDES) do
-          local nh = heightAt(tx + side[1], ty + side[2])
-          if nh < h then
+          local nh = occludeH(tx + side[1], ty + side[2])
+          local bottom = nh
+          if s.class == "bridge" and h - nh > 8 then bottom = h - 8 end
+          if bottom < h then
             local d = side[3]
-            -- the columns flanking this face, for the inside-corner term:
-            -- fixed for the whole face, so they are read once rather than
-            -- once per 8px band
             local lat = LATERAL[d]
             local hl = lat and heightAt(tx + lat[1], ty + lat[2]) or 0
             local hr = lat and heightAt(tx + lat[3], ty + lat[4]) or 0
-            for band = math.floor(nh / 8), math.ceil(h / 8) - 1 do
-              local y0 = math.max(nh, band * 8)
+            for band = math.floor(bottom / 8), math.ceil(h / 8) - 1 do
+              local y0 = math.max(bottom, band * 8)
               local y1 = math.min(h, band * 8 + 8)
               if y1 > y0 then
                 local src, shade = tile, Voxel3D.FACE_SHADE[d]
+                local vT, vB = nil, nil
                 if run then
-                  -- fold the structure's artwork up this face: band k
-                  -- samples the map row k tiles north of the structure's
-                  -- front, clamped to its extent. The south face is the
-                  -- drawing itself (full brightness); the other sides wear
-                  -- the same rows darkened, so a building's flank matches
-                  -- its face instead of smearing one tile
-                  -- band is an ABSOLUTE 8px course, so a run standing on a
-                  -- terrace starts at band 2 rather than band 0 -- and
-                  -- sampling row north+2 for its first visible course would
-                  -- slide the whole drawing two rows up the face.  Count
-                  -- courses from the run's own datum instead.
                   local bb = band - math.floor((run.base or 0) / 8)
                   if bb < 0 then bb = 0 end
-                  if d == 6 then
-                    src = map:tileAt(tx, math.min(run.front,
-                                                  run.north + bb))
+                  local function foldTile(row)
+                    return S.tileAt[keyOf(tx, row)] or Gen3.tileAt(map, tx, row)
+                  end
+                  local period = nil
+                  if S.isGen3 and not run.gen3RoofRows and (run.unit or 0) > 0 and run.extent > run.unit then
+                    if run.fromRepeat then
+                      period = run.unit
+                    elseif run.extent >= 16 then
+                      period = run.unit
+                    end
+                  end
+                  local artNorth = run.gen3ArtNorth or run.north
+                  if artNorth > run.north then artNorth = run.north end
+                  local roomWall = nil
+                  if S.isGen3 and not S.outdoor and S.gen3RoomWallTop
+                     and not run.gen3RoofRows and s.class == "wall" then
+                    roomWall = S.gen3RoomWallTop
+                  end
+                  local stretched = false
+                  if S.isGen3 and not roomWall
+                     and not run.gen3RoofRows and not period
+                     and not run.door and (run.front or 0) >= (artNorth or 0)
+                  then
+                    local faceH = h - bottom
+                    local rows = run.front - artNorth + 1
+                    if rows >= 1 and faceH > rows * 8 then stretched = true end
+                  end
+
+                  if run.face then
+                    local faceH = h - bottom
+                    local rows = run.face.rows or 1
+                    local idx = 0
+                    if faceH > 0 and rows > 0 then
+                      local tm = ((h - y1) + (h - y0)) / (2 * faceH)
+                      idx = math.floor(tm * rows)
+                      if idx < 0 then idx = 0 end
+                      if idx > rows - 1 then idx = rows - 1 end
+                    end
+                    if run.face.dir == "north" then
+                      src = foldTile(run.front - idx)
+                    else
+                      src = foldTile(run.north + idx)
+                    end
+                  elseif stretched then
+                    local faceH = h - bottom
+                    local rows = run.front - artNorth + 1
+                    local tm = ((h - y1) + (h - y0)) / (2 * faceH)
+                    local idx = math.floor(tm * rows)
+                    if idx < 0 then idx = 0 end
+                    if idx > rows - 1 then idx = rows - 1 end
+                    if d == 6 then
+                      src = foldTile(artNorth + idx)
+                    else
+                      src = foldTile(run.front - idx)
+                    end
+                  elseif d == 6 then
+                    if period then
+                      src = foldTile(artNorth + (bb % period))
+                    elseif roomWall and artNorth + bb > run.front then
+                      src = roomWall[((artNorth + bb) % 2) * 2 + (tx % 2) + 1] or src
+                    else
+                      src = foldTile(math.min(run.front, artNorth + bb))
+                    end
                   else
-                    src = map:tileAt(tx, math.max(run.north,
-                                                  run.front - bb))
+                    if period then
+                      src = foldTile(run.front - (bb % period))
+                    elseif roomWall and run.front - bb < artNorth then
+                      src = roomWall[((run.front - bb) % 2) * 2 + (tx % 2) + 1] or src
+                    else
+                      src = foldTile(math.max(artNorth, run.front - bb))
+                    end
                   end
                   if d == 5 then shade = 1 end
                 elseif s.art == "upright" then
-                  -- profile-authored upright (a pinned wall or furniture
-                  -- box): fold the drawing up the face, band 0 the
-                  -- structure's southmost same-class row and higher bands
-                  -- the rows north of it, repeating past the top.  The
-                  -- south face is the drawing itself (full brightness);
-                  -- flanks and back wear the same front stack darkened, so
-                  -- a desk's side matches its face instead of smearing a
-                  -- different jumble per row.
                   if d == 5 then shade = 1 end
                   local front = ty
                   while front < ty + 6 do
@@ -1037,14 +1015,47 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                       break
                     end
                   end
-                  local fk = keyOf(tx, front - band)
-                  local fs = S.shapeAt[fk]
-                  if fs and fs.authored and fs.class == s.class then
-                    src = S.tileAt[fk]
+                  local rows = 0
+                  while rows < 6 do
+                    local rk = keyOf(tx, front - rows)
+                    local rs = S.shapeAt[rk]
+                    if rs and rs.class == s.class and not S.runs[rk] and not S.skip[rk] then
+                      rows = rows + 1
+                    else
+                      break
+                    end
+                  end
+                  if S.isGen3 and rows > 0 and h > 0 then
+                    local artH = rows * 8
+                    local p0 = (y0 / h) * artH
+                    local p1 = (y1 / h) * artH
+                    local ri = math.floor(((p0 + p1) / 2) / 8)
+                    if ri < 0 then ri = 0 end
+                    if ri > rows - 1 then ri = rows - 1 end
+                    local sk = keyOf(tx, front - ri)
+                    src = S.tileAt[sk] or src
+                    vB = math.min(8, math.max(0.5, 8 - (p0 - ri * 8)))
+                    vT = math.max(0, math.min(vB - 0.5, 8 - (p1 - ri * 8)))
+                  else
+                    local fk = keyOf(tx, front - band)
+                    local fs = S.shapeAt[fk]
+                    if fs and fs.authored and fs.class == s.class then
+                      src = S.tileAt[fk]
+                    end
                   end
                 end
+                
+                if s.rock and vT == nil and vB == nil then
+                  local faceH = h - bottom
+                  if faceH > 8 then
+                    vT = 8 * (h - y1) / faceH
+                    vB = 8 * (h - y0) / faceH
+                  end
+                end
+                
                 sideQuad(d, x0, z0, y0, y1, src,
-                         (band * 8 + 8) - y1, (band * 8 + 8) - y0,
+                         vT or ((band * 8 + 8) - y1),
+                         vB or ((band * 8 + 8) - y0),
                          sideShades(hl, hr, y0, y1, y0 <= nh, shade), s.class == "water")
               end
             end
@@ -1054,19 +1065,6 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     end
   end
 
-  -- Prebuilt quads from Structures (per-pixel voxel props, lathed
-  -- columns) plus the round-tree stamps expanded in place. Keep rules,
-  -- by the quad's own extent:
-  --   body-only   the quad must overlap the OPEN body interval -- a
-  --               neighbour's ring props must not march past its edge
-  --               into this map, and a quad lying exactly ON the edge
-  --               plane would z-fight the map that owns that plane.
-  --   full        anything overlapping the body stays whole (props that
-  --               straddle the edge no longer shed their outer half);
-  --               pure ring quads drop when they touch a neighbour body
-  --               (maskedClosed), which is what strings of seam pixels
-  --               were: fragments of dropped border trees whose centers
-  --               sat exactly on the boundary line.
   local bw, bh = tw * 8, th * 8
   local function keepQuad(x0, z0, x1, z1)
     local overBody = x1 > 0 and x0 < bw and z1 > 0 and z0 < bh
@@ -1074,17 +1072,6 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return overBody or not maskedClosed(x0, z0, x1, z1)
   end
 
-  -- A face lying EXACTLY on a body boundary plane is ambiguous to the
-  -- rect tests above: a body structure's outward facade (a Saffron row
-  -- house whose front row is the map's last row, its south wall on the
-  -- shared plane with Route 6) and the inward face of a ring scrap
-  -- occupy the same degenerate rect, and the strict overBody plus the
-  -- closed mask dropped BOTH -- which is why those facades were missing.
-  -- The winding tells them apart: a face pointing AWAY from the body
-  -- belongs to this map's own edge-row structure and nothing in the
-  -- neighbour will ever draw that plane, so it stays; a face pointing
-  -- INTO the body is the scrap the mask rules exist to kill, and falls
-  -- through to them.
   local function outwardOnEdge(q, x0, z0, x1, z1)
     if z0 == z1 and (z0 == 0 or z0 == bh) and x1 > 0 and x0 < bw then
       local nz = (q[2][1] - q[1][1]) * (q[3][2] - q[1][2])
@@ -1114,18 +1101,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     local x1 = math.max(q[1][1], q[2][1], q[3][1], q[4][1])
     local z0 = math.min(q[1][3], q[2][3], q[3][3], q[4][3])
     local z1 = math.max(q[1][3], q[2][3], q[3][3], q[4][3])
-    -- q.own: a body-anchored structure's own quad (a building placed by
-    -- Buildings.build, whose scan never leaves the body). Exempt from
-    -- the edge keep-rules entirely: its eave legitimately overhangs the
-    -- boundary plane into the neighbour's airspace, and no variant of
-    -- the neighbour will ever draw that geometry
     if q.own or outwardOnEdge(q, x0, z0, x1, z1)
        or keepQuad(x0, z0, x1, z1) then
       push({ q[1], q[2], q[3], q[4] }, quadUV(q), groundShades(q, q.shade), nil, false)
     end
   end
 
-  -- true when the rect sits entirely inside one neighbour-body rect
   local function containedInMask(x0, z0, x1, z1)
     if not masks then return false end
     for _, mk in ipairs(masks) do
@@ -1136,18 +1117,21 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     return false
   end
 
-  -- round-tree stamps: the shared hull template translated per cell,
-  -- through reusable scratch corners so expansion allocates nothing.
-  -- A hull spans at most its own footprint -- one 16px cell unless the
-  -- stamp carries a wider radius (the 2x2-cell canopy groups) -- so one
-  -- rect test usually answers for the whole stamp: strictly interior
-  -- stamps keep every quad, ring stamps buried under a neighbour body
-  -- (or, body-only, ring stamps full stop) skip without touching their
-  -- quads. Only stamps crossing a boundary walk quad by quad.
   local sc = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }
   for _, st in ipairs(S.roundStamps or {}) do
     local mx, mz = st.mx, st.mz
+    local my = st.my or 0
     local sr = st.r or 8
+    
+    if S.isGen3 then
+      local acx = math.floor((mx - sr) / 16) * 2
+      local acz = math.floor((mz - sr) / 16) * 2
+      if S.skip[keyOf(acx, acz)] then
+        local fy = heightAt(acx, acz)
+        if type(fy) == "number" then my = fy end
+      end
+    end
+    
     local sx0, sz0, sx1, sz1 = mx - sr, mz - sr, mx + sr, mz + sr
     local interior = sx0 > 0 and sx1 < bw and sz0 > 0 and sz1 < bh
     local overBody = sx1 > 0 and sx0 < bw and sz1 > 0 and sz0 < bh
@@ -1159,13 +1143,14 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
       keepAll = interior or not maskedClosed(sx0, sz0, sx1, sz1)
       skipAll = not overBody and containedInMask(sx0, sz0, sx1, sz1)
     end
+    
     if not skipAll then
       for _, q in ipairs(st.quads) do
         Budget.tick()
         for i = 1, 4 do
           local c, s2 = q[i], sc[i]
           s2[1] = c[1] + mx
-          s2[2] = c[2]
+          s2[2] = c[2] + my
           s2[3] = c[3] + mz
         end
         local ok = keepAll
@@ -1184,15 +1169,6 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   end
 end
 
--- The raw geometry for `map`: (vertex list, triangle index list, quad
--- count). Synchronous and GPU-free -- the headless suite and the probes
--- exercise the invariants through this.
---
--- `split` lifts the water surface out, as it is lifted out for the
--- reflective pass, and appends that sink's own three values -- so the suite
--- can check the same separation the GPU path relies on without a GPU.
--- Without it the water is in the first list, which is what every existing
--- caller reads.
 function ChunkMesher.geometry(map, bodyOnly, masks, split)
   local sink = newTableSink()
   local waterSink = split and newTableSink() or nil
@@ -1203,12 +1179,6 @@ function ChunkMesher.geometry(map, bodyOnly, masks, split)
   return v, i, n, wv, wi, wn
 end
 
--- Build the mesh for `map` synchronously. Returns nil when there is
--- nothing to draw or meshes are unavailable (headless).
---
--- Uses a chunked sink for spatial culling: the terrain is divided into
--- chunks that can be culled by the camera's view box, which is what made
--- routes renderable in the first place.
 function ChunkMesher.build(map, bodyOnly, masks)
   local sink = newChunkedSink()
   runGeometry(map, bodyOnly, masks, sink)
@@ -1217,16 +1187,6 @@ end
 
 -- ---------------------------------------------------------------- prebake
 
--- Mesh `map` STRAIGHT TO DISK and throw the geometry away.
---
--- The difference from build() is that nothing is uploaded: no GPU mesh is
--- created, nothing enters the in-memory cache, and no slot is swapped. That
--- is what makes it safe to run over the whole map list -- baking two hundred
--- maps into VRAM would be a very expensive way to run out of it.
---
--- Returns true when an entry was written, false plus a reason otherwise.
--- "cached" is not a failure: it is the answer for a map already baked under
--- the current rules, which is what makes a second prebake pass cheap.
 function ChunkMesher.bake(map, slot, masks)
   slot = slot or "body"
   if not DiskCache then return false, "no disk cache" end
@@ -1239,7 +1199,7 @@ function ChunkMesher.bake(map, slot, masks)
   end
   local sink = newSink()
   if type(sink.writeRaw) ~= "function" then
-    return false, "no ffi sink"          -- the table sink cannot be persisted
+    return false, "no ffi sink"
   end
   local waterSink = newSink()
   local okGeom, err = pcall(runGeometry, map, slot == "body", masks, sink, waterSink)
@@ -1253,9 +1213,6 @@ local function quadsMesh(quads)
   if #quads == 0 then return nil end
   local verts, indices, n = {}, {}, 0
   for _, q in ipairs(quads) do
-    -- the same up-face sign the sinks apply (see faceSign): this mesh is
-    -- drawn in a pass that has the snow on, so a tuft that skipped it would
-    -- be the one thing in a white field taking a wall's share of it
     local s = faceSign(q, q.sky)
     for i = 1, 4 do
       local c = q[i]
@@ -1268,14 +1225,6 @@ local function quadsMesh(quads)
   return Voxel3D.newMesh(verts, indices)
 end
 
--- The tall-grass rows as their own mesh: VoxelScene draws it AFTER the
--- characters so the southern row of a grass cell still overdraws a
--- walker's feet (characters stamp over terrain, Gen 1 style, so ordinary
--- terrain could never do this).
---
--- When assets/ground/grass/ ships a 3D tuft bake (Grass3D), the mesh is a
--- triangle stamp of that model per grass tile and carries its own texture.
--- Otherwise the classic tileset-slab quads.
 local function buildGrassMesh(map)
   local S = Structures.forMap(map)
   if S.grassInstances and #S.grassInstances > 0 then
@@ -1288,7 +1237,6 @@ local function buildGrassMesh(map)
   return quadsMesh(S.grassQuads)
 end
 
--- Decorative grass mesh (no effects)
 local function buildDecorMesh(map)
   local S = Structures.forMap(map)
   if S.decorInstances and #S.decorInstances > 0 then
@@ -1300,7 +1248,6 @@ local function buildDecorMesh(map)
   return nil
 end
 
--- Road mesh using Grass3D with road texture and 0.05 height
 local function buildRoadMesh(map)
   local S = Structures.forMap(map)
   if S.roadInstances and #S.roadInstances > 0 then
@@ -1312,7 +1259,6 @@ local function buildRoadMesh(map)
   return nil
 end
 
--- Ground mesh using Grass3D with ground texture and 0.1 height
 local function buildGroundMesh(map)
   local S = Structures.forMap(map)
   if S.groundInstances and #S.groundInstances > 0 then
@@ -1324,19 +1270,10 @@ local function buildGroundMesh(map)
   return nil
 end
 
--- The flower billboards as their own mesh, for the same reason as the
--- grass one: it draws AFTER the characters WITH the same camera-ward
--- pull, so a flower south of a walker occludes their feet and one north
--- of them hides behind them. Baked into the terrain mesh they lost that
--- depth fight against the pulled character card whenever the player
--- stood among flowers. Unlike grass this mesh still CASTS shadows (the
--- sun pass draws it): a handful of flowers per meadow, not thousands of
--- tufts.
 local function buildFlowerMesh(map)
   return quadsMesh(Structures.forMap(map).flowerQuads)
 end
 
--- Custom surfaces (road and ground) as their own mesh
 local function buildCustomSurfaceMesh(map)
   local S = Structures.forMap(map)
   if S.customSurfaceMesh then
@@ -1345,14 +1282,6 @@ local function buildCustomSurfaceMesh(map)
   return nil
 end
 
--- Authored FIGURES (a person drawn into furniture) as one mesh each, in
--- the card's own local space -- because each one is placed by its own
--- matrix at draw time, leaned back by the camera pitch exactly like a
--- character card (VoxelScene). A figure baked into the terrain mesh could
--- not lean, and a shared mesh could not carry per-figure placement.
---
--- A list, not a mesh: `{ mesh, wx, wz, y }` per figure. Maps have one or
--- none, so the loop that draws them is shorter than the terrain's.
 local function buildFigureMeshes(map)
   local out = {}
   for _, f in ipairs(Structures.forMap(map).figures or {}) do
@@ -1364,15 +1293,12 @@ local function buildFigureMeshes(map)
   return out
 end
 
--- Figure lists hold their meshes one level down, so the generic slot
--- release cannot reach them.
 local function releaseFigures(list)
   for _, f in ipairs(type(list) == "table" and list or {}) do
     if f.mesh and f.mesh.release then pcall(f.mesh.release, f.mesh) end
   end
 end
 
--- Replace a cached slot, releasing whatever mesh it held.
 local function swapSlot(c, slot, mesh)
   local old = c[slot]
   if old and old ~= mesh and old.release then pcall(old.release, old) end
@@ -1412,6 +1338,12 @@ local function jobKey(id, slot)
   return id .. ":" .. slot
 end
 
+local buildErrors = {}
+
+function ChunkMesher.buildFailure(mapId)
+  return buildErrors[mapId]
+end
+
 local function finishJob(job, ok, err)
   jobIndex[jobKey(job.id, job.slot)] = nil
   for i, j in ipairs(jobs) do
@@ -1421,7 +1353,7 @@ local function finishJob(job, ok, err)
     end
   end
   if not ok then
-    -- name the reason: in a real session a lost build is a black map
+    buildErrors[job.id] = tostring(err)
     print("[warn] voxel mesh build failed for " .. tostring(job.id)
           .. ": " .. tostring(err))
     if (gen[job.id] or 0) == job.gen then
@@ -1430,9 +1362,6 @@ local function finishJob(job, ok, err)
   end
 end
 
--- A build only lands if the map's generation still matches the one the
--- job was queued under -- invalidate/evict bump it to cancel in-flight
--- work whose inputs went stale.
 local function runJob(job)
   local map = job.map
   local c = entry(job.id)
@@ -1448,9 +1377,7 @@ local function runJob(job)
     local okD, decor = pcall(buildDecorMesh, map)
     if (gen[job.id] or 0) ~= job.gen then
       if okG and grass and grass.release then pcall(grass.release, grass) end
-      if okF and flowers and flowers.release then
-        pcall(flowers.release, flowers)
-      end
+      if okF and flowers and flowers.release then pcall(flowers.release, flowers) end
       if okX then releaseFigures(figures) end
       if okC and custom and custom.release then pcall(custom.release, custom) end
       if okR and road and road.release then pcall(road.release, road) end
@@ -1487,13 +1414,6 @@ local function runJob(job)
   end
 end
 
--- Queue a build unless the slot is already cached or queued. Returns the
--- cached mesh when there is one (false-cached misses return nil).
--- `urgent` marks the current map's meshes: pump() gives those a bigger
--- slice and runs them before neighbour jobs. A slot refresh() marked
--- stale queues its rebuild AND keeps handing back the old mesh, so a
--- one-block edit never drops the scene to the flat 2D path while the
--- replacement cooks.
 function ChunkMesher.request(map, bodyOnly, masks, urgent)
   local slot = bodyOnly and "body" or "full"
   local c = cache[map.id]
@@ -1516,30 +1436,17 @@ function ChunkMesher.pending()
   return #jobs
 end
 
--- Advance queued builds inside a per-frame time budget. Urgent jobs (the
--- current map) come first and get the larger slice -- the first voxel
--- frame after a toggle is worth more milliseconds than a neighbour
--- popping in one frame later. `covered` says the world pass is hidden
--- this frame (a warp's fade, a menu): nothing visible can hitch, so the
--- slice opens up and a door fade swallows most of a destination build.
 local URGENT_SLICE = 0.012
 local IDLE_SLICE = 0.005
 local COVERED_SLICE = 0.030
+local COLD_SLICE = 0.024
 
--- The fixed slices above are a CEILING, not a target. On a machine with room
--- to spare they are never reached; on a machine already missing its frame,
--- spending a flat 12 ms on top of an already-full frame is what turns a busy
--- frame into a dropped one. So measure what the rest of the frame costs and
--- hand meshing a share of what is actually left, with a floor so builds still
--- finish on a machine with no headroom at all.
 local FRAME_TARGET = 1 / 60
 local SHARE = 0.75
 local MIN_SLICE = 0.0015
 
 ChunkMesher.frameTarget = FRAME_TARGET
 
--- Hosts that run at something other than 60 (a 30 Hz handheld mode, a 120 Hz
--- panel) can move the target the headroom is measured against.
 function ChunkMesher.setFrameTarget(seconds)
   seconds = tonumber(seconds)
   if seconds and seconds > 0 then
@@ -1551,8 +1458,6 @@ local lastSpend = 0    -- seconds this module burned last pump
 local avgOther = nil   -- smoothed seconds the REST of the frame costs
 
 local function sliceFor(urgent, covered)
-  -- A covered frame draws no world, so there is nothing to hitch and the
-  -- adaptive measurement does not apply: take the whole fade.
   if covered then return COVERED_SLICE end
   local cap = urgent and URGENT_SLICE or IDLE_SLICE
   local dt = (love and love.timer and love.timer.getDelta
@@ -1563,10 +1468,21 @@ local function sliceFor(urgent, covered)
   return math.max(MIN_SLICE, math.min(cap, headroom * SHARE))
 end
 
--- Seconds the last pump actually spent; for probes and overlays.
 function ChunkMesher.lastSlice() return lastSpend end
 
 function ChunkMesher.pump(covered)
+  local seamDirty = Structures.gen3SeamDirty
+  if seamDirty then
+    local due = nil
+    for id in pairs(seamDirty) do
+      seamDirty[id] = nil
+      if cache[id] then due = due or {}; due[#due + 1] = id end
+    end
+    if due then
+      for _, id in ipairs(due) do ChunkMesher.refresh(id) end
+    end
+  end
+  
   if #jobs == 0 then lastSpend = 0 return end
   local pick = jobs[1]
   for _, j in ipairs(jobs) do
@@ -1576,7 +1492,12 @@ function ChunkMesher.pump(covered)
     end
   end
   local started = clock()
-  local slice = sliceFor(pick.urgent, covered)
+  local cold = false
+  if pick.urgent and not covered then
+    local cc = cache[pick.id]
+    if not (cc and (cc.full or cc.body)) then cold = true end
+  end
+  local slice = cold and COLD_SLICE or sliceFor(pick.urgent, covered)
   local deadline = started + slice
   while pick do
     if not pick.co then
@@ -1591,7 +1512,7 @@ function ChunkMesher.pump(covered)
       finishJob(pick, true)
     else
       lastSpend = clock() - started
-      return   -- slice spent mid-build; resume next frame
+      return
     end
     if clock() >= deadline or #jobs == 0 then
       lastSpend = clock() - started
@@ -1608,12 +1529,6 @@ function ChunkMesher.pump(covered)
   lastSpend = clock() - started
 end
 
--- Meshes for `map`, built SYNCHRONOUSLY on first use -- the historical
--- contract, kept for probes and any direct caller. `false` is cached for
--- a map whose mesh could not be built so a headless run does not retry
--- every frame. `masks` (the full variant's neighbour-body rects) is
--- static per map id -- a map's connections never change -- so it caches
--- like everything else.
 function ChunkMesher.get(map, bodyOnly, masks)
   local slot = bodyOnly and "body" or "full"
   local c = entry(map.id)
@@ -1652,7 +1567,6 @@ function ChunkMesher.get(map, bodyOnly, masks)
   return c[slot] or nil
 end
 
--- The cached mesh, or nil -- never builds. The async path's read side.
 function ChunkMesher.peek(map, bodyOnly)
   local c = cache[map.id]
   local mesh = c and c[bodyOnly and "body" or "full"]
@@ -1689,23 +1603,15 @@ function ChunkMesher.ground(map)
   return c and c.ground or nil
 end
 
--- Authored figures as `{ mesh, wx, wz, y }` records -- each placed by its
--- own leaning matrix at draw time, so they cannot share one mesh.
 function ChunkMesher.figures(map)
   local c = cache[map.id]
   local list = c and c.figures
   return (type(list) == "table") and list or nil
 end
 
--- Rebuild a map's meshes IN PLACE: the stale meshes keep drawing while
--- replacements cook, and each slot swaps as its build lands. This is
--- the block-edit path (a cut tree, a door stamp) -- invalidate() drops
--- the mesh outright, and until the async rebuild landed the scene fell
--- to the flat 2D path, a whole-world blink for a one-block edit.
 function ChunkMesher.refresh(mapId)
   if not mapId then return ChunkMesher.invalidate() end
   local c = cache[mapId]
-  -- nothing drawable cached: the plain drop costs nothing visible
   if not (c and (c.full or c.body)) then
     return ChunkMesher.invalidate(mapId)
   end
@@ -1718,24 +1624,11 @@ function ChunkMesher.refresh(mapId)
       table.remove(jobs, i)
     end
   end
-  -- false-cached slots count as stale too: a retry after a failed build
-  -- is exactly a rebuild
   c.stale = { aux = true,
               full = (c.full ~= nil) or nil,
               body = (c.body ~= nil) or nil }
 end
 
--- Evict everything outside `live` (a set of map ids): far maps' meshes
--- are released -- GPU buffer and LOVE's CPU copy both -- and their
--- Structures analysis dropped. The live set is the current map plus its
--- rendered neighbours, so memory stays bounded by what is on or near the
--- screen instead of growing with every area ever visited.
---
--- The PREVIOUS live set is retained too: warping into a building
--- collapses the set to one small interior, and evicting the town at the
--- door means rebuilding the whole neighbourhood on the way out -- a
--- flat-world flash after every house. One set of history makes the
--- round trip free while staying bounded at two neighbourhoods.
 local prevLive = {}
 
 function ChunkMesher.setLive(live)
@@ -1757,10 +1650,6 @@ function ChunkMesher.setLive(live)
   prevLive = live
 end
 
--- Drop one map's mesh (Cut swapped a block) or all of them (hot reload).
--- Structures' analysis is derived from the same block layer, so it drops
--- in the same breath; in-flight builds of the map are cancelled through
--- the generation counter.
 function ChunkMesher.invalidate(mapId)
   Structures.invalidate(mapId)
   if mapId then

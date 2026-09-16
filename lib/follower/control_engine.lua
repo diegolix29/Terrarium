@@ -34,6 +34,20 @@ local function tryRequire(path)
   return nil
 end
 
+local function tryTagEntityForColosseum(entity, species)
+  if not entity or not species then return end
+  
+  -- OverworldColosseum is part of this mod, access it directly
+  local ok, ow = pcall(V.require, "OverworldColosseum")
+  if not ok or not ow then
+    return
+  end
+  
+  if ow.tag then
+    pcall(ow.tag, entity, species)
+  end
+end
+
 local function logInfo(mod, fmt, ...)
   if DebugLog and DebugLog.info then
     DebugLog.info(mod, fmt, ...)
@@ -694,10 +708,13 @@ function ControlEngine:forceYellowStockPikachuArt(ow, game)
     frames = resolvedFrames,
     walker = resolvedWalker,
     trueColor = resolvedTrueColor,
+    dsSpecies = resolved.dsSpecies,
   }, npc.id or Constants.ENTITY_ID)
   if ok and sprite then
     npc.sprite = sprite
     npc.spriteId = Constants.SPRITE_ID
+    sprite._colosseumEntity = npc
+    tryTagEntityForColosseum(npc, species)
     npc.facing = preserved.facing
     npc.moving = preserved.moving
     npc.cellX, npc.cellY = preserved.cellX, preserved.cellY
@@ -1017,8 +1034,13 @@ function ControlEngine:makeTrailer(game, ow, x, y, facing, kind, mon, slot)
         walker = resolved.walker ~= false,
         trueColor = resolved.trueColor ~= false,
         pokepcShiny = npc.pokepcShiny,
+        dsSpecies = resolved.dsSpecies,
       }, npc.id)
-      if ok and sprite then npc.sprite = sprite end
+      if ok and sprite then
+        npc.sprite = sprite
+        sprite._colosseumEntity = npc
+        tryTagEntityForColosseum(npc, species)
+      end
     end
     npc._wildsFollowerSpecies = species
   end
@@ -2403,9 +2425,12 @@ function ControlEngine:_refreshTrailerWaterSprites(game, ow, surface)
           walker = resolved.walker ~= false,
           trueColor = resolved.trueColor ~= false,
           pokepcShiny = shiny and true or false,
+          dsSpecies = resolved.dsSpecies,
         }, npc.id)
         if ok and sprite then
           npc.sprite = sprite
+          sprite._colosseumEntity = npc
+          tryTagEntityForColosseum(npc, species)
           npc._wildsFollowerSpecies = species
         end
       end

@@ -1,8 +1,9 @@
 -- Read-only, deterministic progress-aware selection. No save writes, RNG, source
 -- extraction, or graphics calls. Heavy disk probes run on BattleCache's worker.
 local V=...
-local P={version=2,batchSize=30}
+local P={version=4,batchSize=30,batchOptions={30,60,120}}
 local Dex=V.ColosseumDex
+local CATALOG_MAX=386
 local function tableOrEmpty(t)return type(t)=='table' and t or {} end
 local function num(n)local v=tonumber(n);return v and v==v and v~=math.huge and v~=-math.huge and v or nil end
 local function egg(m)return m and (m.isEgg==true or m.egg==true or m.species=='EGG')end
@@ -10,10 +11,8 @@ local function unwrap(m)return type(m)=='table' and (type(m.mon)=='table' and m.
 local function key(d,v)return tostring(d)..((v=='shiny' and Dex.rare[d]) and ':shiny' or ':normal')end
 function P.units()
   local rows={}
-  for d=1,251 do
-    rows[#rows+1]={dex=d,variant='normal',key=key(d,'normal'),
-      variants=Dex.rare[d] and {'normal'} or {'normal','shiny'}}
-    if Dex.rare[d] then rows[#rows+1]={dex=d,variant='shiny',key=key(d,'shiny'),variants={'shiny'}} end
+  for d=1,CATALOG_MAX do
+    rows[#rows+1]={dex=d,variant='normal',key=key(d,'normal'),variants={'normal'}}
   end
   return rows
 end
@@ -32,12 +31,12 @@ function P.reuseInfo(probe,checkpoint,threshold)
       done=done+1;appearances=appearances+#(row.variants or {row.variant})
       if done>=threshold then
         return {eligible=true,cachedModels=done,cachedAppearances=appearances,
-          minimum=true,scanned=i,totalModels=#units,totalAppearances=502,threshold=threshold}
+          minimum=true,scanned=i,totalModels=#units,totalAppearances=CATALOG_MAX,threshold=threshold}
       end
     end
   end
   return {eligible=false,cachedModels=done,cachedAppearances=appearances,
-    minimum=false,scanned=#units,totalModels=#units,totalAppearances=502,threshold=threshold}
+    minimum=false,scanned=#units,totalModels=#units,totalAppearances=CATALOG_MAX,threshold=threshold}
 end
 function P.rank(game,save,checkpoint)
   local data=tableOrEmpty(game and game.data);save=tableOrEmpty(save)
@@ -51,7 +50,7 @@ function P.rank(game,save,checkpoint)
   for id,def in pairs(tableOrEmpty(data.pokemon))do
     if type(def)=='table' then
       local n=num(def.dex or def.index or def.number)
-      if n and n%1==0 and n>=1 and n<=251 then
+      if n and n%1==0 and n>=1 and n<=CATALOG_MAX then
         resolved[tostring(id):upper()]=n;defs[n]=def
         if def.id then resolved[tostring(def.id):upper()]=n end
         if def.name then resolved[tostring(def.name):upper()]=n end
@@ -64,7 +63,7 @@ function P.rank(game,save,checkpoint)
   local function dex(species)
     if species==nil then return nil end
     local n=resolved[tostring(species):upper()] or num(species)
-    return n and n%1==0 and n>=1 and n<=251 and n or nil
+    return n and n%1==0 and n>=1 and n<=CATALOG_MAX and n or nil
   end
   local function add(d,v,score,reason)
     local r=d and byKey[key(d,v)]
@@ -72,16 +71,15 @@ function P.rank(game,save,checkpoint)
   end
   local function species(d,score,reason)
     add(d,'normal',score,reason)
-    -- Unobserved rare shinies are lower priority, not lost. An owned shiny
-    -- receives the exact same top priority as an owned ordinary appearance.
-    if d and Dex.rare[d] then add(d,'shiny',math.max(1,score-500000),'shiny counterpart') end
   end
   local levels,owned,partyCount={}, {},0
   local function mon(m,score,reason,required)
     local raw=unwrap(m);if not raw or egg(raw)then return end
     local d,v=V.ModelIdentity.resolve(game,m)
     if not d then if required then return nil,v end;return end
-    add(d,v,score,reason)
+    -- Cache selection always prepares the normal source unit. The actual shiny
+    -- identity is preserved by gameplay and materializes on-demand.
+    add(d,'normal',score,reason)
     local level=num(raw.level)
     owned[d]=math.max(owned[d] or 0,level or 0)
     if required then
@@ -196,8 +194,9 @@ function P.rank(game,save,checkpoint)
   end)
   return units,{level=level,caught=caughtCount,seen=seenCount,map=current,partyCount=partyCount}
 end
-function P.select(game,save,probe,checkpoint)
+function P.select(game,save,probe,checkpoint,limit)
   checkpoint=checkpoint or function()end
+  limit=math.max(1,math.min(CATALOG_MAX,math.floor(tonumber(limit) or P.batchSize)))
   local ranked,profile=P.rank(game,save,checkpoint)
   if not ranked then return nil,profile end
   local rows,done,appearances={},0,0
@@ -205,9 +204,9 @@ function P.select(game,save,probe,checkpoint)
     checkpoint(('Checking saved cache %d / %d'):format(i,#ranked))
     local ready=probe(row.dex,row.variant,checkpoint)==true
     if ready then done=done+1;appearances=appearances+#row.variants
-    elseif #rows<P.batchSize then rows[#rows+1]=row end
+    elseif #rows<limit then rows[#rows+1]=row end
   end
   return rows,{profile=profile,cachedModels=done,cachedAppearances=appearances,
-    totalModels=#ranked,totalAppearances=502,batchLimit=P.batchSize}
+    totalModels=#ranked,totalAppearances=CATALOG_MAX,batchLimit=limit}
 end
 return P

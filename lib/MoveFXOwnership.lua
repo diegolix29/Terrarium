@@ -49,7 +49,7 @@ local function moveParts(payload)
     or type(payload.definition)=="table" and payload.definition or nil
   local id=payload.moveId or payload.index or payload.moveIndex or payload.id
   if id==nil and type(payload.move)~="table" then id=payload.move end
-  if id==nil and move then id=move.index or move.moveId or move.id or move.name end
+  if id==nil and move then id=move.index or move.colosseumMoveId or move.moveId or move.id or move.name end
   return id,move
 end
 local function specReady(spec)
@@ -72,7 +72,7 @@ local function specReady(spec)
       and MoveFXVM and type(MoveFXVM.hasRole)=="function") then return false end
   return MoveFXVM.hasRole(spec,"attack") or MoveFXVM.hasRole(spec,"damage")
 end
-local function selectedSpec(spec,ctx,payload)
+local function selectedSpec(spec,id,move,ctx,payload)
   if not (V and V.WazaPhasePolicy) then return spec end
   local side=type(payload)=="table" and payload.side
   if V.BattleSides and V.BattleSides.payload then
@@ -82,7 +82,8 @@ local function selectedSpec(spec,ctx,payload)
   local models=V.CurrentSpriteModels
   local rec=models and models.stadiumActors and models.stadiumActors[side]
   local actor=rec and rec.actor
-  return V.WazaPhasePolicy.select(spec,{dex=actor and actor.dex,
+  local moveSelectionId=tonumber(id) or (type(move)=="table" and (tonumber(move.index) or tonumber(move.colosseumMoveId))) or tonumber(spec and spec.moveId)
+  return V.WazaPhasePolicy.select(spec,{moveId=moveSelectionId,dex=actor and actor.dex,
     stage=type(payload)=="table" and payload.charging==true and "charge" or "attack"})
 end
 local function readySpec(id,move,ctx,payload)
@@ -90,7 +91,7 @@ local function readySpec(id,move,ctx,payload)
   local lastErr="source WZX unavailable"
   if type(MoveFX.peek)=="function" then
     local ok,spec,err=pcall(MoveFX.peek,id,move)
-    if ok then spec=selectedSpec(spec,ctx,payload) end
+    if ok then spec=selectedSpec(spec,id,move,ctx,payload) end
     if ok and specReady(spec) then return spec end
     lastErr=tostring(err or spec or lastErr)
   end

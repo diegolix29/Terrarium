@@ -20,6 +20,21 @@ local function service()
 end
 
 local function clamp(n,a,b) return math.max(a,math.min(b,n)) end
+local function typeLabel(value,fallback)
+  if T.typeLabel then return T.typeLabel(value,fallback) end
+  if type(value)=='table' then value=value.name or value.id or value.type end
+  if value==nil then return fallback or '—' end
+  local label=tostring(value):gsub('_+',' '):gsub('%-+',' ')
+    :gsub('(%l)(%u)','%1 %2'):upper():gsub('%s+',' ')
+    :gsub('^%s+',''):gsub('%s+$','')
+  local previous
+  repeat
+    previous=label
+    label=label:gsub('^TYPE%s+',''):gsub('%s+TYPE$','')
+      :gsub('%s+',' '):gsub('^%s+',''):gsub('%s+$','')
+  until label==previous
+  return label~='' and label or (fallback or '—')
+end
 local function rowFor(s,id)
   for _,row in ipairs(s.slots or {}) do if row.id==id then return row end end
 end
@@ -488,7 +503,7 @@ local function drawCard(game,g,row,L,commandOwner,targeted,event,generation)
   local available=math.max(0,detailW-statusW-(st and gap or 0))
   local tw=count>0 and math.min(57*u,(available-gap*(count-1))/count) or 0
   for i=1,count do
-    local name=tostring(typeNames[i]):upper():gsub('^TYPE_',''):gsub('_TYPE$','')
+    local name=typeLabel(typeNames[i],'')
     chip(g,name,tx,detailY,tw,detailH,u,T.typeColors and T.typeColors[name]);tx=tx+tw+gap
   end
   if left then
@@ -514,7 +529,9 @@ local function getRows(s,u)
         enabled=(m.pp or 0)<(m.maxPP or m.maxPp or math.huge)}
     end
   elseif u.page=='moves' then
-    for _,m in ipairs(s.moves or {}) do rows[#rows+1]={label=m.name,detail=m.type or '',right='PP '..(m.pp or 0)..'/'..(m.maxPP or 0),enabled=m.enabled} end
+    for _,m in ipairs(s.moves or {}) do
+      rows[#rows+1]={label=m.name,detail=typeLabel(m.type,''),right='PP '..(m.pp or 0)..'/'..(m.maxPP or 0),enabled=m.enabled}
+    end
   end
   return rows
 end
@@ -654,5 +671,5 @@ function U.draw(game,battle)
   end
   g.pop();return true
 end
-U._test={textMetrics=textMetrics,label=label,state=state,rows=getRows,service=service,partyNavigate=partyNavigate,drawCard=drawCard,targetRing=targetRing,clean=clean,bagEnabled=bagEnabled}
+U._test={textMetrics=textMetrics,label=label,state=state,rows=getRows,service=service,partyNavigate=partyNavigate,drawCard=drawCard,targetRing=targetRing,clean=clean,bagEnabled=bagEnabled,typeLabel=typeLabel}
 return U
