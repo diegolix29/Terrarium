@@ -470,6 +470,40 @@ local STYLES = { "classic", "twin", "globe" }
 -- key -> { {cx, cy, style, wx, wz}, ... }
 local cache = {}
 
+-- HOW HIGH THE GROUND IS UNDER A POST.
+--
+-- Every lamp was drawn at `Mat4.translate(s.wx, 0, s.wz)` -- Y hard-coded to
+-- the world datum -- so on any map whose terrain the mesher raises, the posts
+-- stayed on the floor and the street rose past them.  Reported as "the
+-- streetlamps theyre underground still" once the characters had been fixed,
+-- which is exactly right: characters go through VoxelScene.groundAt and these
+-- went through nothing.
+--
+-- Lazily, because VoxelScene requires THIS module at load time; a top-level
+-- require here would be a cycle.  Memoised in an upvalue so it resolves once.
+local VoxelScene = nil
+local function voxelScene()
+  if VoxelScene ~= nil then return VoxelScene or nil end
+  local ok, mod = pcall(V.require, "VoxelScene")
+  VoxelScene = (ok and type(mod) == "table" and mod) or false
+  return VoxelScene or nil
+end
+
+-- The floor a site stands on, memoised on the site itself.  Sites are built
+-- once per map and dropped by StreetLamps.invalidate(), which is also what
+-- runs when the map's shapes are rebuilt -- so the height cannot outlive the
+-- analysis it was read from.
+local function groundOf(map, site)
+  if site.gy ~= nil then return site.gy end
+  local VS = voxelScene()
+  local at = VS and VS.groundAt
+  if not at then return 0 end
+  local ok, y = pcall(at, map, site.cx, site.cy)
+  if not (ok and type(y) == "number") then return 0 end
+  site.gy = y
+  return y
+end
+
 local function sitesFor(map)
   if not map or not map.id then return {} end
   local hit = cache[map.id]
@@ -556,6 +590,9 @@ function StreetLamps.lights(map, wx, wz, limit)
     local dx, dz = site.wx - wx, site.wz - wz
     out[#out + 1] = {
       x = site.wx,
+      -- the post's own floor: a lamp on a terrace lights the terrace, not the
+      -- street below it
+      y = groundOf(map, site),
       z = site.wz,
       radius = StreetLamps.LIGHT_RADIUS,
       -- Tiny deterministic variation prevents a row of lamps reading like
@@ -604,7 +641,8 @@ function StreetLamps.draw(map, outdoor)
     local xf = {}
     for i, s in ipairs(sites) do
       local yaw = cellHash(map.id, s.cx, s.cy) * math.pi * 2
-      xf[i] = Mat4.mul(Mat4.translate(s.wx, 0, s.wz), Mat4.rotateY(yaw))
+      xf[i] = Mat4.mul(Mat4.translate(s.wx, groundOf(map, s), s.wz),
+                       Mat4.rotateY(yaw))
     end
 
     -- The ironwork, under the hour's own light. It is a dark object at night
@@ -641,7 +679,7 @@ function StreetLamps.draw(map, outdoor)
   for _, s in ipairs(sites) do
     local t = tpl[s.style] or tpl.classic
     if t and t.pole then
-      local m = Mat4.translate(s.wx, 0, s.wz)
+      local m = Mat4.translate(s.wx, groundOf(map, s), s.wz)
       Voxel3D.draw(t.pole, tex, m, 0, m)
     end
   end
@@ -655,7 +693,7 @@ function StreetLamps.draw(map, outdoor)
   for _, s in ipairs(sites) do
     local t = tpl[s.style] or tpl.classic
     if t and t.head then
-      local m = Mat4.translate(s.wx, 0, s.wz)
+      local m = Mat4.translate(s.wx, groundOf(map, s), s.wz)
       Voxel3D.draw(t.head, tex, m, 0, m)
     end
   end
@@ -679,7 +717,8 @@ function StreetLamps.castShadows(map)
     -- would print a shadow of the thing doing the lighting.
     for _, s in ipairs(sites) do
       local yaw = cellHash(map.id, s.cx, s.cy) * math.pi * 2
-      local m = Mat4.mul(Mat4.translate(s.wx, 0, s.wz), Mat4.rotateY(yaw))
+      local m = Mat4.mul(Mat4.translate(s.wx, groundOf(map, s), s.wz),
+                         Mat4.rotateY(yaw))
       pcall(ShadowMap.draw, authored.body, tex, ShadowMap.snug(m))
     end
     return
@@ -690,7 +729,7 @@ function StreetLamps.castShadows(map)
   for _, s in ipairs(sites) do
     local t = tpl[s.style] or tpl.classic
     if t and t.pole then
-      local m = Mat4.translate(s.wx, 0, s.wz)
+      local m = Mat4.translate(s.wx, groundOf(map, s), s.wz)
       pcall(ShadowMap.draw, t.pole, tex, ShadowMap.snug(m))
     end
   end

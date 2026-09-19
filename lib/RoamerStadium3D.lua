@@ -26,8 +26,12 @@ local ColosseumMon = V.require("ColosseumMon")
 
 local M = {}
 
--- Smaller than the player model, roughly follower-sized. Tune per playtest.
-M.SCALE = 0.9
+-- Was 0.9 ("smaller than the player model, roughly follower-sized"), applied
+-- only on this file's Stadium-pack branch -- the ColosseumMon branch below
+-- already draws roamers at plain battle scale, so size used to differ by
+-- species depending on which model source a roamer resolved to. 1.0 matches
+-- Colosseum battle size on both branches.
+M.SCALE = 1.0
 
 -- dex -> { rig = StadiumRig, model = <pack model> }
 local rigCache = {}

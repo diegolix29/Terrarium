@@ -1,5 +1,10 @@
 {
   "id": "DRAMATIC_SHAPE",
+  "generations": [
+    1,
+    2,
+    3
+  ],
   "name": "Advanced Terrarium Voxel Mod",
   "version": "1.6.0",
   "api": 2,
@@ -17,7 +22,6 @@
   "affects_link": false,
   "description": "A full 3D diorama overworld: extruded terrain, depth-buffered occlusion, voxel characters and a tilt-shift miniature pass -- and battles fought on the map itself, shot over the shoulder at the nearest clear ground with a slow parallax drift and a depth-of-field pass. Registers two render pipelines and claims hotkeys 3, 5, 6, 7, 8 and 9 -- 3 and 5 displace the engine's TILT and GBC FX keys, both still reachable on the OPTIONS menu. Presentational only: it changes what a battle is drawn over, never where anybody stands. Includes integrated Colosseum Overhaul functionality for Pokemon Colosseum battle environments and UI.",
   "assets_transforms": "transform_birds.lua",
-  "options": "options.lua",
   "required_imports": [
     {
       "id": "pokemon_colosseum_usa",
@@ -28,8 +32,7 @@
         "e3f389dc5662b9f941769e370195ec90",
         "a2d58d82c6b76b42653dcd25c8966de7"
       ],
-      "format": "raw",
-      "max_size": 2147483648
+      "magic": "474336453031"
     }
   ]
 }

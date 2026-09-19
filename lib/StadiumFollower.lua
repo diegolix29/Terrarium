@@ -85,8 +85,12 @@ local currentAnim = 1  -- 1 = idle
 
 -- ------- Configuration
 
--- Scale for the follower model (smaller than player)
-local FOLLOWER_SCALE = 0.9  -- 0.3 * 3 = 0.9 (3x larger)
+-- Scale for the follower model. Was 0.9, which only shrank the Stadium-pack
+-- branch below -- the ColosseumMon fallback a few lines down already draws
+-- at plain battle scale, so a follower's size used to jump depending on
+-- whether its species came from the Stadium pack or the Colosseum disc.
+-- 1.0 matches Colosseum battle size on both branches.
+local FOLLOWER_SCALE = 1.0
 
 -- Load a sprite as fallback for follower
 local function loadSpriteFallback(dex)

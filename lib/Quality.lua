@@ -138,8 +138,39 @@ end
 -- redraws the world every frame with it. At 2 the shadows are one frame
 -- stale half the time, which is not a thing anyone has ever seen, and the
 -- pass costs half of what it did.
+-- ...AND IT STRETCHES WHEN THE FRAME CANNOT AFFORD IT.
+--
+-- The base interval is the rung's: soft shadows redraw every frame, the hard
+-- rung every other one.  That is the right curve when the frame has room.
+-- Measured in a town it did not: the sun pass rasterises the whole world
+-- again for every frame of movement, and
+--
+--   world pass: voxel   178.17 ms/frame
+--     voxel: shadow map  83.49 ms/frame
+--
+-- is a frame spending nearly half of itself on light while the picture it is
+-- lighting arrives four times a second.  A shadow one frame behind the thing
+-- casting it is invisible at 60fps and unnoticeable at 15; a frame that takes
+-- 220 ms is neither.
+--
+-- So the interval doubles once the last frame missed 30fps and again at 15,
+-- and comes straight back as soon as the frame does.  Deferred rather than
+-- dropped -- ShadowMap.stale counts the frames a redraw has waited and takes
+-- it as soon as the interval allows -- so this bounds the staleness instead
+-- of making it a coin toss.
+local FRAME_OK, FRAME_BAD = 1 / 30, 1 / 15
+
 function Quality.shadowInterval()
-  return Quality.softShadows() and 1 or 2
+  local every = Quality.softShadows() and 1 or 2
+  local dt = nil
+  if love and love.timer and love.timer.getDelta then
+    local ok, d = pcall(love.timer.getDelta)
+    dt = ok and tonumber(d) or nil
+  end
+  if not dt then return every end
+  if dt > FRAME_BAD then return every * 4 end
+  if dt > FRAME_OK then return every * 2 end
+  return every
 end
 
 -- How many stars the night sky may paint (lib/Sky.lua). They are plain

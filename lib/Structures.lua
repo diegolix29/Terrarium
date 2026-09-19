@@ -264,6 +264,13 @@ Structures.SHAPE_REV = "g3-settee-308"
 -- treated as having one foundation
 local COURSE = 16
 
+-- Gen 3 elevation nibble: a LEVEL ID, not a height.  0 is "any level" (a
+-- transition cell that keeps whatever the walker arrived on), 1 is the surf
+-- level, 3 is ordinary dry land and the datum every other level is measured
+-- from, 4 and up are raised decks, 15 is a bridge span.  Only 3 and up are
+-- storeys; the rest are markers and must stay out of any ranking.
+local ELEV_ANY, ELEV_SURF, ELEV_GROUND, ELEV_MULTI = 0, 1, 3, 15
+
 local cache = {}
 
 -- ---------------------------------------------------------------- pixels --
@@ -835,6 +842,19 @@ end
 --- The height of a cell's FLAT FLOOR shape, or nil if it has none.
 --- Used by groundAt to ask "do all four of my walkable neighbours agree what
 --- floor they are on?" without the three-cell reach of standHeight.
+--- Has this map been through the build yet?
+---
+--- Everything else in this file answers nil for a map it has no state for --
+--- which is indistinguishable, to a caller, from "no opinion about that
+--- cell".  For entity placement the difference is the whole answer: before
+--- the build a character has to be put SOMEWHERE, and whatever is chosen
+--- must not then be cached as though it were settled, or a town that takes
+--- twenty seconds to mesh leaves everyone standing at the datum long after
+--- the ground under them has risen.
+function Structures.built(map)
+  return map ~= nil and cache[map.id] ~= nil
+end
+
 function Structures.flatGroundAt(map, tx, ty)
   local S = cache[map.id]
   if not S then return nil end
@@ -9258,22 +9278,31 @@ function Structures.flightEnds(map, cx, cy)
     -- MOTIVATED BY MOSSDEEP CITY'S SPACE CENTRE STEPS AND ITS SIX SHORE
     -- FLIGHTS, WHICH MESHED AS FLAT STRIPED PLATES LYING ON THE TERRACE FACE.
     --
-    -- `g3c.groundHeight` is the CARTRIDGE'S RANK, not the drawn floor, and
-    -- the two are built off different origins.  `buildGen3ElevationGround`
-    -- ranks the walkable elevations a map uses, excluding only 0 and 15, so
-    -- ELEV_SURF (1) -- the sea -- is rank zero and every land level sits one
-    -- course above it.  `Gen3.groundHeight` drops SURF and measures from
-    -- ELEV_DEFAULT (3).  So on every Hoenn map that has walkable water AND a
-    -- land level, the floor this file draws is EXACTLY ONE COURSE above the
-    -- number `groundHeight` answers.  Measured over the floor cells of the
-    -- tiered maps, `shape.h - groundHeight`:
+    -- `g3c.groundHeight` is the CARTRIDGE'S RANK, not the drawn floor, so it
+    -- knows nothing about what the art did with a level after it was placed.
+    --
+    -- THE TWO ORIGINS USED TO DISAGREE AS WELL, and the note that used to
+    -- stand here recorded it: `buildGen3ElevationGround` ranked the walkable
+    -- elevations excluding only 0 and 15, so ELEV_SURF (1) -- the sea -- was
+    -- rank zero and every land level sat one course above it, while
+    -- `Gen3.groundHeight` dropped SURF and measured from ELEV_GROUND (3).
+    -- The floor this file drew was EXACTLY ONE COURSE above the number
+    -- `groundHeight` answered, on every Hoenn map with walkable water AND a
+    -- land level -- 65 of the region's 518:
     --
     --     MossdeepCity  +16 on 863 of 939     EverGrandeCity +16 on 626/731
     --     Route119      +16 on 2069 of 2143   Route120       +16 on 1537/1663
     --     Route110      +16 on 1200 of 1453   Route114       +16 on  786/1017
     --
-    -- A flight footed on the rank is therefore built a whole course under the
-    -- terrace it climbs from, which is the flat plate in the report.  This is
+    -- THAT IS FIXED AT THE ORIGIN NOW: the ranking drops ELEV_SURF and
+    -- anchors on ELEV_GROUND, the same rule the engine's Gen3Elevation.ranks
+    -- has always used, so the two agree and the offset is zero.  Keep reading
+    -- the drawing first anyway -- the reason below is about Fortree and
+    -- Mossdeep, not about the offset, and it outlives the offset.
+    --
+    -- A flight footed on the rank was therefore built a whole course under
+    -- the terrace it climbs from, which was the flat plate in the report.
+    -- This is
     -- also why Sootopolis is right and Mossdeep is not: Sootopolis states one
     -- level, gets synthetic terraces, and `synthZ` IS the drawn floor there --
     -- shape.h equals synthZ on all 856 of its floor cells.  Ask the drawing
@@ -13539,12 +13568,20 @@ local TERRACE_EDGE = 3           -- cells of map border a tier may not touch
 --- land level.
 ---
 --- So where the profile pins `elevation_height`, a walkable cell's z is its
---- elevation and nothing else.  The distinct walkable elevations are RANKED
---- rather than multiplied: Emerald's values are layer ids (1 surf, 3 default,
---- then 4, 5, 7 upward), not a linear scale, so rank * COURSE is what turns
---- them into evenly spaced storeys.  ELEV_MULTI (15) is a bridge deck and
---- keeps out of the ranking -- it is not a layer, it is "whatever you
---- arrived on".
+--- elevation and nothing else.  The distinct walkable LAND elevations are
+--- RANKED rather than multiplied: Emerald's values are layer ids (1 surf, 3
+--- default, then 4, 5, 7 upward), not a linear scale, so rank * COURSE is
+--- what turns them into evenly spaced storeys.
+---
+--- THREE OF THE SIXTEEN VALUES ARE NOT LAYERS and keep out of the ranking:
+--- ELEV_ANY (0) matches anything, ELEV_MULTI (15) is a bridge deck --
+--- "whatever you arrived on" -- and ELEV_SURF (1) is the sea, which is drawn
+--- recessed by the water pass and is not a storey anyone stands on.
+---
+--- And the ranking is ANCHORED on ELEV_GROUND (3), the cartridge's datum,
+--- rather than counted up from whichever level happens to sort first, so
+--- ordinary dry land is always height 0 and a level below it comes out
+--- negative instead of pushing the world up.
 function Structures.buildGen3ElevationGround(S, map, x0, x1, y0, y1)
   if not S.isGen3 then return end
   local okG, g3c = pcall(Gen3.forMap, map)
@@ -13566,7 +13603,34 @@ function Structures.buildGen3ElevationGround(S, map, x0, x1, y0, y1)
       local okW, wk = pcall(map.isWalkableCell, map, cx, cy)
       if okW and wk then
         local okE, e = pcall(g3c.elevationAt, cx, cy)
-        if okE and e and e ~= 15 and e ~= 0 then seen[e] = true end
+        -- ELEVATION 1 IS THE SURF LEVEL, NOT A STOREY -- and counting it as
+        -- one is what put every character in Mauville City a course inside
+        -- the road.
+        --
+        -- The nibble is a LEVEL ID, not a height: 0 is "any level", 1 is
+        -- water, 3 is ordinary dry land, 4 and up are raised decks, 15 is a
+        -- bridge.  0 and 15 were already kept out because neither is a layer.
+        -- 1 was not, so on a map that has any surfable water -- which in
+        -- Hoenn is most of them -- the sorted order came out {1, 3, ...} and
+        -- ordinary ground landed at rank 1 instead of rank 0.  One course.
+        -- Sixteen pixels.  The whole town lifted off the datum while every
+        -- reader that answers "no opinion, use the floor" still answered 0,
+        -- and the gap between the two is a person buried to the eyebrows.
+        --
+        -- MEASURED OVER ALL 518 HOENN MAPS (blocks decoded straight from the
+        -- cartridge: metatile = u16 & 0x3FF, collision = bits 10-11,
+        -- elevation = bits 12-15): 65 maps ranked elevation 3 above zero,
+        -- every one of them by exactly one course, every one of them because
+        -- elevation 1 was in the list.  Mauville City (MAP_G00_N02) is the
+        -- clearest case -- 468 walkable cells at elevation 3, 8 at elevation
+        -- 1 -- and it is the map the bug was reported from.
+        --
+        -- This is also the rule the ENGINE already applies:
+        -- Gen3Elevation.ranks drops ELEV_ANY, ELEV_SURF and ELEV_MULTI and
+        -- anchors on ELEV_GROUND.  The two disagreeing by a course is why
+        -- WorldAPI.heightAt and the drawn terrain never matched.
+        if okE and e and e ~= ELEV_MULTI and e ~= ELEV_ANY
+           and e ~= ELEV_SURF then seen[e] = true end
       end
     end
   end
@@ -13574,8 +13638,26 @@ function Structures.buildGen3ElevationGround(S, map, x0, x1, y0, y1)
   for e in pairs(seen) do order[#order + 1] = e end
   table.sort(order)
   if #order == 0 then return end
+
+  -- ...AND ELEVATION 3 IS THE DATUM, not "whichever level sorts first".
+  --
+  -- Dropping the surf level fixes 64 of the 65 maps on its own, because on
+  -- those 3 becomes the lowest land level and sorts to index 1 anyway.  It
+  -- does NOT fix a map that states a level BELOW the ground: MAP_G24_N42 has
+  -- 28 walkable cells at elevation 2 under 58 at elevation 3 (the only such
+  -- map in the region), and ranking from the bottom would lift its ground a
+  -- course exactly as before.  Anchoring says what the cartridge says --
+  -- elevation 3 is the floor of the world, level 2 is a step down from it --
+  -- so that level comes out at -16 and the ground it is cut into stays at 0.
+  --
+  -- Negative is a height this build already carries: Hoenn draws its water
+  -- recessed into its own cell and `groundRaw` has a branch for exactly that.
+  local base = 1
+  for i, e in ipairs(order) do
+    if e == ELEV_GROUND then base = i break end
+  end
   local rank = {}
-  for i, e in ipairs(order) do rank[e] = i - 1 end
+  for i, e in ipairs(order) do rank[e] = i - base end
 
   -- A RANK IS AN ORDER, NOT A DISTANCE.
   --
@@ -13636,7 +13718,10 @@ function Structures.buildGen3ElevationGround(S, map, x0, x1, y0, y1)
     end
     local below = nil
     for i = 1, #order do
-      local r = i - 1
+      -- the SAME anchor the rank table uses: a level below the datum has a
+      -- negative rank and is drawn below the ground, rather than dragging the
+      -- ground up to make room for it
+      local r = i - base
       local want = r * COURSE
       local h = want
       local hh = r > 0 and hist[r] or nil
@@ -13657,6 +13742,17 @@ function Structures.buildGen3ElevationGround(S, map, x0, x1, y0, y1)
       levelH[r] = h
       below = h
     end
+  end
+
+  -- WHAT EACH LEVEL ENDED UP DRAWN AT, in the load line.  The bug this pass
+  -- carried for 65 maps -- ordinary ground ranked a course off the datum --
+  -- was invisible in "2 level(s), 1688 tile(s) set" and obvious in
+  -- "elev 3 -> 0px": one is a count, the other is the answer.  Costs one
+  -- concat per map load.
+  local drawnAt = {}
+  for i, e in ipairs(order) do
+    drawnAt[#drawnAt + 1] =
+      ("elev %d -> %dpx"):format(e, levelH[i - base] or ((i - base) * COURSE))
   end
 
   -- PUBLISHED, BECAUSE A BRIDGE BELONGS TO A STOREY TOO.
@@ -13734,7 +13830,8 @@ function Structures.buildGen3ElevationGround(S, map, x0, x1, y0, y1)
     if okL and Logger and Logger.info then
       pcall(Logger.info,
             "gen3 shapes: %s took ground height from the elevation grid -- "
-            .. "%d level(s), %d tile(s) set", tostring(map.id), #order, n)
+            .. "%d level(s) [%s], %d tile(s) set", tostring(map.id), #order,
+            table.concat(drawnAt, ", "), n)
     end
   end
 end

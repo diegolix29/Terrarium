@@ -60,6 +60,38 @@ local Map = require("src.world.Map")
 
 local AmbientLife = {}
 
+-- Generation-agnostic outdoor check that works for Gen1, Gen2, and Gen3
+-- Map.isOutdoor only understands Gen1/Gen2 def fields, but Gen3 uses different structures
+local function isMapOutdoor(map)
+  if not map or not map.def then return false end
+  
+  -- Try the engine's check first (works for Gen1/Gen2)
+  local engineSaysOutdoor = Map.isOutdoor(map.def)
+  if engineSaysOutdoor then return true end
+  
+  -- For Gen3, check if the Gen3 module can determine outdoor status
+  local okG, Gen3 = pcall(V.require, "Gen3")
+  if okG and Gen3 and Gen3.mapIsGen3(map) then
+    local okC, g3c = pcall(Gen3.forMap, map)
+    if okC and g3c and g3c.outdoor ~= nil then
+      return g3c.outdoor
+    end
+  end
+  
+  -- Fallback: if the engine says indoor but we have grass instances, assume outdoor
+  -- This pairs ambient life to the grass system which already works on all gens
+  local okS, Structures = pcall(V.require, "Structures")
+  if okS and Structures then
+    local S = Structures.forMap(map)
+    if S and ((S.grassInstances and #S.grassInstances > 0) or 
+              (S.decorInstances and #S.decorInstances > 0)) then
+      return true
+    end
+  end
+  
+  return false
+end
+
 AmbientLife.setting = ModSetting.new("ambient", "AMBIENT",
                                      { "on", "off" }, { "ON", "OFF" })
 
@@ -125,10 +157,37 @@ end
 -- system says is inhabited.
 local function grassCellNear(ow)
   local map, p = ow.map, ow.player
+  
+  -- First check if this map has grass instances at all (generation-agnostic)
+  local hasGrass = false
+  local okS, Structures = pcall(V.require, "Structures")
+  if okS and Structures then
+    local S = Structures.forMap(map)
+    if S and ((S.grassInstances and #S.grassInstances > 0) or 
+              (S.decorInstances and #S.decorInstances > 0)) then
+      hasGrass = true
+    end
+  end
+  
+  -- If no grass instances, try the engine check (Gen1)
+  if not hasGrass then
+    for _ = 1, CELL_TRIES do
+      local cx = p.cellX + rand(-RADIUS, RADIUS)
+      local cy = p.cellY + rand(-RADIUS, RADIUS)
+      if map:inBounds(cx, cy) and map:isGrassCell(cx, cy) then
+        return cx * 16 + rand(2, 14), cy * 16 + rand(2, 14)
+      end
+    end
+    return nil
+  end
+  
+  -- If map has grass instances, use walkable cells (more reliable than grass detection)
+  -- This pairs ambient life to maps that the grass system has already identified
   for _ = 1, CELL_TRIES do
     local cx = p.cellX + rand(-RADIUS, RADIUS)
     local cy = p.cellY + rand(-RADIUS, RADIUS)
-    if map:inBounds(cx, cy) and map:isGrassCell(cx, cy) then
+    if map:inBounds(cx, cy) and map:isWalkableCell(cx, cy) 
+       and not map:warpAtCell(cx, cy) then
       return cx * 16 + rand(2, 14), cy * 16 + rand(2, 14)
     end
   end
@@ -324,7 +383,7 @@ function AmbientLife.update(dt, voxelOn)
              and ow and ow.map and ow.player
              and Game.stack and Game.stack:top() == ow
              and not ow.transitioning
-             and Map.isOutdoor(ow.map.def)
+             and isMapOutdoor(ow.map)
   if not ok then
     if #critters > 0 and not (ow and Game.stack
                               and Game.stack:top() ~= ow) then

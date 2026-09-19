@@ -9,7 +9,7 @@
 -- mod setting, and this is the boilerplate two of them would otherwise
 -- each carry a copy of:
 --
---   options:define   a home in options.modOptions.DRAMALESS_SHAPE, plus a row
+--   options:define   a home in options.modOptions.DRAMATIC_SHAPE, plus a row
 --                    on this mod's page in the mod manager.
 --   ui.options.rows  the same setting on the OPTIONS menu, where the
 --                    player already goes for VOXEL and T-SHIFT.
@@ -27,7 +27,7 @@ ModSetting.__index = ModSetting
 
 local function modId()
   local mod = V.mod
-  return (mod and mod.id) or "DRAMALESS_SHAPE"
+  return (mod and mod.id) or "DRAMATIC_SHAPE"
 end
 
 -- `values` are the stored values in ladder order and `labels` what the row
@@ -161,6 +161,13 @@ function ModSetting:cycle(game, dir)
   return self:setIndex(i, game)
 end
 
+-- The label of the rung currently in force. Used by SettingsMenu to show
+-- the current value as a summary on category rows.
+function ModSetting:valueLabel()
+  local i = self:read()
+  return self.labels[self:allows(i) and i or 1]
+end
+
 -- Adopt a value set from somewhere else (the mod manager's settings page,
 -- which writes and persists on its own). Nothing to store: just move the
 -- cached index so the next read agrees with it.
@@ -173,7 +180,7 @@ end
 function ModSetting:row()
   local self_ = self
   return {
-    id = "DRAMALESS_SHAPE:" .. self.key,
+    id = "DRAMATIC_SHAPE:" .. self.key,
     label = self.label,
     -- the label of the rung actually in force, which is not the stored one
     -- when that rung has been gated away (see get)

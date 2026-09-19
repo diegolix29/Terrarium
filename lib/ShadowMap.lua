@@ -156,7 +156,6 @@ local canvasRes = 0           -- the edge `canvas` was made at
 local blank = nil             -- 1x1 stand-in so the sampler is never unbound
 local drawing = false
 local ready = false
-local lastSig = nil
 local prevBlend, prevAlphaMode = nil, nil
 local spriteCasters = false
 
@@ -347,6 +346,7 @@ local function fit(cx, cy, vw, vh)
 
   local reach = ShadowMap.HEIGHT
                 * math.max(math.abs(ShadowMap.KX), math.abs(ShadowMap.KZ)) + 24
+  -- arity-ok: capMul is optional and defaults to ShadowMap.FAR_CAP
   local north = groundReach(vh)
   -- the view widens with distance, so the far ground spans more than the
   -- near ground does; half the depth is a serviceable stand-in for the
@@ -494,11 +494,32 @@ ShadowMap.SNUG = 0.9
 -- Valid between begin() and the next begin(): `slack` and the sun hold
 -- still between redraws of the map, so a lit frame that reuses last
 -- frame's map computes the same displacement it was stored with.
+-- A TRANSLATION TIMES A MODEL IS THE MODEL WITH ITS FOURTH COLUMN MOVED.
+--
+-- Every thin card in the scene comes through here -- each actor, each
+-- flower, each authored figure -- once for the eye and once for the sun.  A
+-- full Mat4.mul is sixty-four multiplies plus two fresh tables to compute
+-- what is, for an affine model matrix, three additions.
+--
+-- Only valid while the model's bottom row is [0,0,0,1], which is true of
+-- every translate/scale/rotate chain but NOT of a projection, so that is
+-- checked rather than assumed: anything else falls back to the real product.
 function ShadowMap.snug(model)
   local f = sunDir()
   local s = -ShadowMap.slack * ShadowMap.SNUG
-  return Mat4.mul(Mat4.translate(f[1] * s, f[2] * s, f[3] * s),
-                  model or IDENTITY)
+  local dx, dy, dz = f[1] * s, f[2] * s, f[3] * s
+  if not model then
+    return { 1, 0, 0, dx,  0, 1, 0, dy,  0, 0, 1, dz,  0, 0, 0, 1 }
+  end
+  if model[13] ~= 0 or model[14] ~= 0 or model[15] ~= 0 or model[16] ~= 1 then
+    return Mat4.mul(Mat4.translate(dx, dy, dz), model)
+  end
+  return {
+    model[1],  model[2],  model[3],  model[4]  + dx,
+    model[5],  model[6],  model[7],  model[8]  + dy,
+    model[9],  model[10], model[11], model[12] + dz,
+    0,         0,         0,         1,
+  }
 end
 
 -- Whether the map has to be redrawn for `sig` -- a caller-built stamp of
@@ -520,9 +541,18 @@ end
 -- after standing still is never the one that gets skipped.
 local deferred = 0
 
-function ShadowMap.stale(sig)
+--- Does the sun pass have to run this frame?
+---
+--- Takes a BOOLEAN now, not a signature.  The caller builds the signature
+--- into a reused buffer and compares it element by element (see
+--- VoxelScene.shadowSignature), because with a town's cast the old string
+--- was several kilobytes concatenated every frame to answer this one
+--- question.  Keeping a copy here to compare against would have meant
+--- either holding that string or trusting a hash; the caller already has
+--- the exact answer, so it says so.
+function ShadowMap.stale(changed)
   if not ready then return true end
-  if sig == lastSig then return false end
+  if not changed then return false end
   local every = Quality.shadowInterval()
   if every > 1 then
     deferred = deferred + 1
@@ -573,7 +603,10 @@ function ShadowMap.draw(mesh, texture, model)
 end
 
 -- Close the pass and stamp it with the signature it was drawn for.
-function ShadowMap.finish(sig)
+--- Takes no signature: the caller commits its own once this returns (see
+--- ShadowMap.stale).  Leaving `lastSig` behind would be a second copy of the
+--- same fact, and the one that went stale quietly.
+function ShadowMap.finish()
   if not drawing then return end
   drawing = false
   love.graphics.setShader()
@@ -581,7 +614,6 @@ function ShadowMap.finish(sig)
   love.graphics.setCanvas()
   love.graphics.setBlendMode(prevBlend or "alpha", prevAlphaMode)
   love.graphics.setColor(1, 1, 1, 1)
-  lastSig = sig
   ready = true
   deferred = 0
 end
@@ -589,7 +621,7 @@ end
 -- Drop the GPU objects (window resize, hot reload).
 function ShadowMap.invalidate()
   canvas, canvasRes, blank = nil, 0, nil
-  drawing, ready, lastSig = false, false, nil
+  drawing, ready = false, false
   deferred = 0
 end
 

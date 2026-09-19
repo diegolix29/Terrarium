@@ -9,6 +9,7 @@
 local V = ...
 
 local PlayerModelInstall = V.require("PlayerModelInstall")
+local ColosseumDexNames = V.require("ColosseumDexNames")
 
 local PlayerModelPick = {}
 
@@ -282,6 +283,25 @@ PlayerModelPick.POPULAR_SPECIES = {
   { dex = 250, name = "Ho-Oh" },
   { dex = 251, name = "Celebi" },
 }
+
+-- Gen 3 Pokemon (252-386): Stadium/Stadium2 never shipped these, so
+-- cyclePokemonPlayer only reaches them at all because PlayerModel.loadStadium
+-- now falls back to a Colosseum-sourced model (ColosseumMon) for any dex it
+-- doesn't cover. Names come from ColosseumDexNames -- the same source-backed
+-- 386-row identity table ColosseumDex itself is built from -- rather than a
+-- second hand-typed roster that could drift from it.
+local function titleCase(shouty)
+  return (shouty:gsub("(%a)([%a]*)", function(first, rest)
+    return first:upper() .. rest:lower()
+  end))
+end
+
+for dex = 252, 386 do
+  local shouty = ColosseumDexNames[dex]
+  if shouty then
+    table.insert(PlayerModelPick.POPULAR_SPECIES, { dex = dex, name = titleCase(shouty) })
+  end
+end
 
 local PROMPT = "Choose your player model (.obj, .gltf, .glb)"
 

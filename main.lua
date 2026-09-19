@@ -354,6 +354,9 @@ local FollowersWaterCompat = V.require("followers_water_compat")
 -- Follower settings rows
 local FollowerSettings = V.require("follower/settings")
 
+-- Free Fly integration (ported from free_fly mod)
+local FreeFly = V.require("FreeFly")
+
 -- Instantiate water compat and attach to V namespace for follower system
 V.followersWater = FollowersWaterCompat.new(mod, {
   resolveWaterSprite = function(speciesId, shiny, form, o)
@@ -1400,6 +1403,29 @@ local SETTINGS = {
     .. "Stadium 2 models instead of sprites. When OFF, all Pokemon use sprites "
     .. "or Stadium 1 models (Gen 1 only). Pokemon Colosseum supports Gen 3 (252-386).",
     full = true, cat = "battles" },
+  -- ------- Free Fly settings
+  -- Free Fly flight mechanic integration
+  { V.require("FreeFly").settings.altitude,
+    "Flight altitude: LOW (32px), MED (56px), or HIGH (80px).",
+    cat = "freefly" },
+  { V.require("FreeFly").settings.speed,
+    "Flight speed: NORMAL, FAST, or TURBO movement while flying.",
+    cat = "freefly" },
+  { V.require("FreeFly").settings.encounters,
+    "Air encounters: whether flying Pokemon can trigger wild battles.",
+    cat = "freefly" },
+  { V.require("FreeFly").settings.spotted,
+    "Trainers spot you: hardcore mode where trainers can spot you while flying.",
+    cat = "freefly" },
+  { V.require("FreeFly").settings.gates,
+    "Story gates: badge-gated areas (Route 23) refuse airborne entry.",
+    cat = "freefly" },
+  { V.require("FreeFly").settings.badges,
+    "Badge checks: vanilla badge requirements for flight and water landing.",
+    cat = "freefly" },
+  { V.require("FreeFly").settings.quickstart,
+    "Quick start: Pallet Town gift Pidgeot with FLY for early flight access.",
+    cat = "freefly" },
   -- ------- ds_fp_ceiling integrated settings
   -- Interior ceiling and walls
   { Ceiling.setting,
@@ -1458,6 +1484,34 @@ local SETTINGS = {
   -- Movement
   { fpJump, "Jump feel: OFF, SUBTLE, or BIG.", cat = "world" },
   { fpDoorstep, "Step up/down when passing through doorways.", cat = "world" },
+  -- Free Fly settings
+  { altitudeSetting,
+    "Flight altitude: LOW (32px), MED (56px), or HIGH (80px). "
+    .. "Higher altitude clears more obstacles.",
+    cat = "world" },
+  { speedSetting,
+    "Flight speed: NORMAL (vanilla pace), FAST, or TURBO.",
+    cat = "world" },
+  { encountersSetting,
+    "Air encounters: brush against wild flying Pokemon to start battles "
+    .. "while airborne. OFF suppresses all airborne encounters.",
+    cat = "world" },
+  { spottedSetting,
+    "Trainers spot you: when ON, trainers can see and challenge you "
+    .. "while flying. OFF for safe overflight.",
+    cat = "world" },
+  { gatesSetting,
+    "Story gates: when ON, badge-gated areas (Route 23) refuse airborne entry. "
+    .. "OFF lets you fly anywhere.",
+    cat = "world" },
+  { badgesSetting,
+    "Badge checks: when ON, requires THUNDERBADGE/STORMBADGE to fly and "
+    .. "SOULBADGE/FOGBADGE to land on water. The gift Pidgeot is exempt.",
+    cat = "world" },
+  { quickstartSetting,
+    "Quick start: when ON, a gift Pidgeot knowing FLY appears in Pallet Town. "
+    .. "Exempt from badge checks for early flight access.",
+    cat = "world" },
 }
 
 -- Custom key binding system for jump key (must be defined before SettingsMenu hook)
@@ -2389,7 +2443,9 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
   local okMewtwo, mewtwoRow = pcall(function()
     local StadiumInstall = V.require("StadiumInstall")
     local Stadium2Install = V.require("Stadium2Install")
-    if StadiumInstall.available() or Stadium2Install.available() then
+    local ColosseumMon = V.require("ColosseumMon")
+    if StadiumInstall.available() or Stadium2Install.available()
+       or ColosseumMon.available(1, "normal") then
       return V.require("PlayerModelPick").mewtwoRow()
     end
     return nil
@@ -2401,7 +2457,9 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
   local okFollower, followerRow = pcall(function()
     local StadiumInstall = V.require("StadiumInstall")
     local Stadium2Install = V.require("Stadium2Install")
-    if StadiumInstall.available() or Stadium2Install.available() then
+    local ColosseumMon = V.require("ColosseumMon")
+    if StadiumInstall.available() or Stadium2Install.available()
+       or ColosseumMon.available(1, "normal") then
       return V.require("PlayerModelPick").followerRow()
     end
     return nil
@@ -2413,7 +2471,9 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
   local okWilds, wildsRow = pcall(function()
     local StadiumInstall = V.require("StadiumInstall")
     local Stadium2Install = V.require("Stadium2Install")
-    if StadiumInstall.available() or Stadium2Install.available() then
+    local ColosseumMon = V.require("ColosseumMon")
+    if StadiumInstall.available() or Stadium2Install.available()
+       or ColosseumMon.available(1, "normal") then
       return V.require("PlayerModelPick").wildsRow()
     end
     return nil
@@ -2698,6 +2758,16 @@ Interiors.install()
 -- a headless boot and in the manager's dry load, and the registry has the
 -- entries before anything can ask to play one.
 AmbientSound.register(mod)
+
+-- ------- Free Fly integration
+--
+-- Free Fly module allows party members that know FLY to carry the player
+-- around the overworld. This integrates the free_fly mod functionality
+-- directly into Terrarium Advance Mod.
+local FreeFly = V.require("FreeFly")
+if FreeFly and FreeFly.init then
+  pcall(function() FreeFly.init() end)
+end
 
 -- ------- quality of life
 --
@@ -3006,6 +3076,8 @@ mod.events:on("mods.loaded", function()
   pcall(function()
     followerInstance:reassertAfterModsLoaded(Game)
   end)
+  -- Initialize Free Fly after mods are loaded
+  pcall(function() FreeFly.init() end)
 end)
 
 -- Event handlers for follower lifecycle
@@ -3125,6 +3197,18 @@ local function installOverworldStadium()
     return false
   end
   V.OverworldStadium = OverworldStadium
+
+  -- Expose OverworldBattle on the shared V table too. It was only ever kept
+  -- as a local in this file (loaded via V.require above), so every other
+  -- module reading it as V.OverworldBattle directly (CurrentSpriteModels,
+  -- PokemonActors.service.selected, Arena, BattleCache, BattleSettings,
+  -- BattleSettingsGen3, ResidentPrewarm, StadiumBridge) was silently getting
+  -- nil and falling back to weaker logic -- which is what made 3D-BTL's
+  -- COLOSSEUM A/B rungs draw sprites instead of the Colosseum actor even
+  -- though Stadium.lua (which reads it via V.require, not V.OverworldBattle)
+  -- staged the fight correctly. See lib/Stadium.lua's Stadium.mode() for the
+  -- pattern this should have matched all along.
+  V.OverworldBattle = OverworldBattle
 
   -- Load OverworldColosseum for Colosseum 3D Pokemon models in overworld
   -- Note: Actual installation happens in initializeColosseumIntegration after ColosseumDex is loaded

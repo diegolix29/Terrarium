@@ -197,10 +197,70 @@ local YAW = {
   left = -math.pi / 2,
 }
 
+-- THE ENGINE'S FRAME PROFILER (F11), so this pass can say where its own time
+-- goes.  The engine already reports `world pass: voxel` as one number -- 32 to
+-- 43 ms of a 90 ms frame -- and one number is not something anybody can act
+-- on: it could be the shadow map, the terrain submit, the neighbours, or 155
+-- billboards, and those have nothing in common as fixes.
+--
+-- Resolved once, lazily, and every call is a no-op closure while the profiler
+-- is off, so this costs a table lookup per phase and nothing else.
+local Profile = nil
+local function profile()
+  if Profile ~= nil then return Profile or nil end
+  -- Plain `require` first: a mod chunk runs under the engine's own searcher,
+  -- so engine modules resolve by name.  `V.engineRequire` is tried after it
+  -- because it exists only on the Colosseum namespace in this mod and not on
+  -- the lib namespace -- which is why the first cut of this measured nothing
+  -- and reported no phases at all.
+  local ok, mod = pcall(require, "src.core.FrameProfile")
+  if not (ok and type(mod) == "table") then
+    local req = V and V.engineRequire
+    if type(req) == "function" then ok, mod = pcall(req, "src.core.FrameProfile") end
+  end
+  Profile = (ok and type(mod) == "table" and mod) or false
+  return Profile or nil
+end
+
+local function phase(name)
+  local P = profile()
+  if not (P and P.section) then return nil end
+  return P.section("        voxel: " .. name)
+end
+
+local NEIGHBOUR4 = { { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }
+
+-- Lazily, and through pcall: Structures pulls in other modules of this mod and
+-- the load order here is not ours to depend on.  Memoised in an upvalue so the
+-- lookup happens once rather than per cell per frame.
+local Structures = nil
+local function structures()
+  if Structures ~= nil then return Structures or nil end
+  local ok, mod = pcall(V.require, "Structures")
+  Structures = (ok and mod) or false
+  return Structures or nil
+end
+
 -- The ground height a cell stands at, so a character on a ledge stands on
 -- top of it rather than sunk into it. Uses the same bottom-left collision
 -- tile the engine walks on (Map:cellTile).
-local function groundAt(map, cellX, cellY)
+--
+-- `elev` is the walker's own elevation and `px`/`py` their world pixel
+-- position.  Both are optional -- plenty of callers ask about an empty cell --
+-- and both are what this function was missing:
+--
+--   * without `elev` a bridge cell has one height, so the walker on the deck
+--     and the walker on the street under it are answered the same number and
+--     one of them is inside the geometry;
+--   * without `px`/`py` a stair cell can only answer one height for the whole
+--     cell, so a flight is climbed in cell-sized jerks or not at all.
+--
+-- AND WITHOUT ANY OF THE BRANCHES BELOW it answers the TILESET ART's class
+-- height, which on Hoenn is 0 for ordinary ground -- while the mesher raises
+-- that same ground onto terraces (`gen3 shapes: ... 6708 tile(s) raised`).
+-- That gap is the whole of "it places me underground in some areas where the
+-- ground is raised": the terrain went up and the character did not.
+local function groundRaw(map, cellX, cellY, elev, px, py)
   -- Off the map, cellTile border-extends into the map's borderBlock --
   -- which on maps ringed with trees is a RAISED tile. The only entity
   -- ever standing off-map is the player mid seam-step (placed one cell
@@ -216,40 +276,288 @@ local function groundAt(map, cellX, cellY)
   -- class resolved some unrelated tile's box instead of the one actually
   -- underfoot, and stood every character above the floor/furniture they
   -- were standing on -- the "characters float above the ground" bug on
-  -- Gen 2 maps. map:tileAt(tx, ty) is the real tile id at the same
-  -- sub-cell TileShape.at expects; Gen 1 resolves identically either way,
-  -- since its cellTile already returns a tile id.
+  -- Gen 2 maps.
   local tx, ty = cellX * 2, cellY * 2 + 1
   local tile = map:tileAt(tx, ty)
-  -- Gen 3: use Gen3.tileAt to get the correct synthetic tile ID
-  if Gen3 and Gen3.mapIsGen3(map) then
-    tile = Gen3.tileAt(map, tx, ty) or tile
-  end
+  local isGen3 = Gen3 and Gen3.mapIsGen3(map) or false
+  if isGen3 then tile = Gen3.tileAt(map, tx, ty) or tile end
   local s = TileShape.at(map, shapes, tile, tx, ty)
   if not s then return 0 end
-  -- a recessed class (water) still supports whatever stands on it; only
-  -- raised ground lifts the model.  Stairs never do: the class height is
-  -- the flight's TALL end, but the player enters at floor level and the
-  -- warp fires as they step in -- lifting them onto the geometry read as
-  -- climbing an invisible block
-  if s.art == "stair" then return 0 end
-  -- Doors are the same "invisible block" bug as stairs, and for the same
-  -- root cause: a door tile carries no collision class of its own, so it
-  -- falls through to whatever generic class the tileset's table gives it
-  -- -- almost always `wall` (upright, 16px), since door art lives in the
-  -- wall band of the tileset. Structures' door fold already special-cases
-  -- these for the MESH (see doorFold), but that pass never touches
-  -- groundAt, so the entity walking onto/off of the tile was still being
-  -- placed at wall height instead of the floor. Force floor level here,
-  -- exactly like stairs above, so entering reads as walking through the
-  -- doorway instead of stepping up onto it, and exiting doesn't look like
-  -- dropping down off it.
+  local S = structures()
+
+  local okWalk, walkable = pcall(map.isWalkableCell, map, cellX, cellY)
+  walkable = okWalk and walkable or false
+
+  -- A BOX THE WALKER PASSES THROUGH rather than onto: a doorway is pinned
+  -- solid so the facade closes over it, and the cell it is cut into stays
+  -- walkable.  Answered at the height that box STANDS ON, not at the world
+  -- datum -- a doorway cut into a facade founded four courses up walks the
+  -- player out of the house and into the inside of the terrace below it.
+  if s.art == "upright" and walkable then
+    if S and S.standHeight then
+      local okH, h = pcall(S.standHeight, map, tx, ty)
+      if okH and type(h) == "number" then return h end
+    end
+    return 0
+  end
+
+  -- Doors carry no collision class of their own and fall through to the
+  -- tileset's generic `wall`, which would step the walker up onto the frame.
   if map.doorTiles and map.doorTiles[tile] then return 0 end
-  -- Recessed water sits at TileShape.water (-2).  Callers that need the
-  -- LIVE surface (swell under a surfer / water roamer) ask Water.surfaceAt
-  -- with the entity's pixel position; this answer is only the still floor.
-  if s.h and s.h < 0 then return s.h end
-  return s.h > 0 and s.h or 0
+
+  -- A FLIGHT CLIMBS.
+  --
+  -- This used to answer 0 -- so walking a staircase never raised the walker
+  -- at all: they slid along the bottom terrace with the treads drawn under
+  -- their feet and popped up a course on arrival.
+  --
+  -- Gen 3 has no stair art in the tileset: its flights are found by
+  -- Structures, from tread art and the profile's flight lists, and marked on
+  -- the cell -- so ask there too or this can never fire on a Hoenn map.
+  local marked = false
+  if S and S.stairAt then
+    local okS, m2 = pcall(S.stairAt, map, tx, ty)
+    marked = (okS and m2) or false
+  end
+  if s.art == "stair" or marked then
+    if S and S.flightEnds then
+      local okF, z0, z1, axis, heading, idx, n =
+        pcall(S.flightEnds, map, cellX, cellY)
+      if okF and z0 and z1 and n and n > 0 then
+        -- The flight's two LANDINGS give the gap, through the same ranked
+        -- elevation table the terraces are built from, so the top tread and
+        -- the terrace it serves are equal by construction.  Position along
+        -- the run gives the rest: a multi-cell flight spreads one rise over
+        -- all its cells rather than a course per tile.
+        local sub = 0.5
+        if px and py then
+          local off = (axis == "x") and (px % 16) or (py % 16)
+          sub = off / 16
+          if sub < 0 then sub = 0 elseif sub > 1 then sub = 1 end
+        end
+        -- WHICH TREAD IS THE BOTTOM ONE.  flightEnds returns its landings
+        -- SORTED (z0 is the low one) but `idx` counts from the run's START,
+        -- which is the high end whenever `heading` is -1.
+        local fromLow = (heading == 1) and idx or ((n - 1) - (idx or 0))
+        if not fromLow or fromLow < 0 then fromLow = 0 end
+        if heading and heading < 0 then sub = 1 - sub end
+        local t = (fromLow + sub) / n
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        -- VOLATILE: a flight interpolates on the walker's own pixel position
+        return z0 + (z1 - z0) * t, true
+      end
+    end
+    -- NOTHING TO CLIMB BETWEEN: a flight with one landing, or two at the
+    -- same level, still stands on a terrace.
+    if S and S.terraceAt then
+      local okT, tz = pcall(S.terraceAt, map, cellX, cellY)
+      if okT and type(tz) == "number" then return tz end
+    end
+    if S and S.standHeight then
+      local okH, h = pcall(S.standHeight, map, tx, ty)
+      if okH and type(h) == "number" then return h end
+    end
+    return 0
+  end
+
+  -- A DECK IS THE FLOOR ONLY FOR WHOEVER IS ON IT.
+  --
+  -- Keyed on the cartridge's own ELEV_MULTI (15) rather than on the voxel
+  -- class, because the class does not always say bridge: Victory Road's
+  -- crossings are ordinary floor metatiles whose only statement of "this is a
+  -- deck" is the elevation.  Emerald's MULTI cells keep the elevation you
+  -- arrived with -- that is the whole mechanism of walking UNDER the cycling
+  -- road while someone rides over your head.
+  --
+  -- ASKED BEFORE THE TERRACE, and it has to be: the terrace answers for ANY
+  -- walkable cell including a deck, so a walker on the street under Fortree's
+  -- rope walkway was lifted onto the planks over their head.
+  --
+  -- And the span is WALKED, not peeked at: the middle of a MULTI span has
+  -- MULTI on both sides and the ground it crosses on the other two, so a
+  -- four-neighbour test finds nothing and falls back to the datum -- a walker
+  -- on the deck drops through it.
+  local g3ctx = nil
+  if isGen3 and Gen3.forMap then
+    local okG3, ctx = pcall(Gen3.forMap, map)
+    g3ctx = okG3 and ctx or nil
+  end
+  local cellE = nil
+  if g3ctx and g3ctx.elevationAt then
+    local okE, e2 = pcall(g3ctx.elevationAt, cellX, cellY)
+    cellE = okE and e2 or nil
+  end
+  local isDeck = (s.class == "bridge" or s.class == "log") or cellE == 15
+  if isDeck and elev ~= nil and elev ~= 0 and elev ~= 15 and cellE ~= elev
+     and g3ctx and g3ctx.elevationAt and g3ctx.groundHeight then
+    local seen = { [cellY * 8192 + cellX] = true }
+    local queue, qi = { { cellX, cellY } }, 1
+    while qi <= #queue and qi <= 24 do
+      local c = queue[qi]
+      qi = qi + 1
+      for _, d in ipairs(NEIGHBOUR4) do
+        local nx, ny = c[1] + d[1], c[2] + d[2]
+        local nk = ny * 8192 + nx
+        if map:inBounds(nx, ny) and not seen[nk] then
+          seen[nk] = true
+          local okE, ne = pcall(g3ctx.elevationAt, nx, ny)
+          ne = okE and ne or nil
+          if ne == elev then
+            -- The neighbour is a cell at the walker's OWN level, so it can
+            -- never re-enter this branch (`cellE ~= elev` fails there) and
+            -- the recursion is one deep.  Ask it what it stands on and the
+            -- two sides of the span agree by construction -- rather than
+            -- asking Gen3.groundHeight, which is the elevation grid's answer
+            -- and not always the finished one (a causeway map pins its land
+            -- to the datum on purpose and lets the bridge behaviour carry
+            -- the lift).
+            -- VOLATILE: a deck answers differently for the walker ON it
+            -- than for the one beneath it, so this is never cached
+            -- arity-ok: px/py are optional and only refine a stair's
+            -- sub-cell interpolation, which a deck span has none of
+            return (groundRaw(map, nx, ny, elev) or 0), true
+          end
+          -- keep walking, but only along the span itself
+          if ne == 15 then queue[#queue + 1] = { nx, ny } end
+        end
+      end
+    end
+  end
+
+  -- THE TERRACE IS THE FLOOR, WHATEVER THE CELL'S ART BECAME.  Structures'
+  -- own height passes read the synthesised terrace height FIRST and only then
+  -- look at the cell's shape; this function used to do the opposite, so the
+  -- two disagreed about the same cell and a flat corridor answered three
+  -- different heights along a row you can walk in a straight line.
+  if walkable and S and S.terraceAt then
+    local okT, tz = pcall(S.terraceAt, map, cellX, cellY)
+    if okT and type(tz) == "number" then return tz end
+  end
+
+  -- A CELL WHOSE DRAWING STOOD UP IS GROUND AGAIN: the props -- chimneys,
+  -- lamps, barrels -- whose art was lifted into a hull and whose leftover
+  -- shape still carries the height that art had.
+  if S and S.stampGround then
+    local okP, stamped = pcall(S.stampGround, map, tx, ty)
+    if okP and stamped then return stamped end
+  end
+
+  -- ...and a cell the mesher gave a MEASURED height to answers with that one,
+  -- not with its class default: the river above a waterfall is drawn at the
+  -- fall's crest, and a surfer reading the class height alone swam four cells
+  -- under the sheet he was floating on.
+  if S and S.runHeight then
+    local okR, measured = pcall(S.runHeight, map, tx, ty)
+    if okR and measured and measured > 0 then return measured end
+  end
+
+  -- ...AND THEN ASK THE MESH WHAT IT DREW, before asking the tileset what the
+  -- tile class usually is.
+  --
+  -- THIS IS THE RUNG THE WHOLE LADDER WAS MISSING, and it is why characters
+  -- kept sinking on maps with a raised tier after the datum itself was fixed.
+  --
+  -- ChunkMesher decides a tile's floor in exactly three steps (its own
+  -- `heightAt`): a stamped cell answers `Structures.stampGround`, a cell with
+  -- a run answers `run.h`, and everything else answers `S.shapeAt[k].h` --
+  -- which on Gen 3 is `shapeHeight` verbatim.  The two rungs above are those
+  -- first two steps.  The third was never asked.
+  --
+  -- What stood in its place was the TILESET's shape (`s`, from TileShape.at),
+  -- which is cached per TILESET ID and knows nothing about what this MAP did
+  -- with the tile afterwards -- the elevation pass, the terrace flood, the
+  -- grading, every pass that writes `S.shapeAt`.  On flat ground the two
+  -- agree and nobody notices.  On a tier they differ by the whole lift, the
+  -- class height is 0, the `> 0` test rejects it, and the cell falls through
+  -- to the four-neighbour vote -- which only answers when all four agree, so
+  -- a cell beside a building, a fence, a rock or the map edge gets no answer
+  -- and lands on the datum.  That is the cell-dependent sinking: most of a
+  -- town right, a handful wrong, and no way to tell which from outside.
+  --
+  -- `flatGroundAt` is the reader for it and is already public: it answers
+  -- `S.shapeAt[k].h` for a tile the mesh laid FLAT, and nil for a wall, a
+  -- facade, a prop or a cell the build has not reached -- so a walker never
+  -- takes a facade's height from here, and everything below still runs for a
+  -- cell the mesh has no shape for.  Asked AFTER stamp and run so the three
+  -- are asked in the mesher's own order, and after the terrace and the
+  -- doorway/stair/deck rungs, which exist precisely to DISAGREE with the
+  -- drawing (a walker must not be stood on a roof, or under a bridge).
+  if walkable and S and S.flatGroundAt then
+    local okF, drawn = pcall(S.flatGroundAt, map, tx, ty)
+    if okF and type(drawn) == "number" then return drawn end
+  end
+
+  if s.h and s.h > 0 then return s.h end
+
+  -- THE SEA IS DRAWN BELOW THE DATUM, which the line above throws away.
+  -- Hoenn draws its water recessed into its own cell, so a water tile's
+  -- height is -2 or -4 and never positive; every branch above is silent for
+  -- such a cell and the `> 0` test rejects the one number that IS the answer.
+  if s.h and s.h < 0 then
+    if s.class == "water" and isGen3 then return s.h end
+    return s.h
+  end
+
+  -- ...AND THE DATUM IS NOT THE DEFAULT FLOOR.  A walkable cell with no run
+  -- and no height of its own still sits on whatever floor is around it.  Only
+  -- the four cells TOUCHING this one vote, only walkable floor among them,
+  -- and only when they AGREE: a bush standing in a plaza has terrace on every
+  -- side and takes it; a cell on open ground has neighbours that differ, or
+  -- none, and keeps the datum.  A wider ring was tried and reaches some
+  -- unrelated rise on open routes -- a net loss.
+  if walkable and S then
+    local agreed, seen = nil, false
+    for _, d in ipairs(NEIGHBOUR4) do
+      local nx, ny = cellX + d[1], cellY + d[2]
+      if map:inBounds(nx, ny) then
+        local okN, nw = pcall(map.isWalkableCell, map, nx, ny)
+        if okN and nw then
+          local ns = nil
+          if S.runHeight then
+            local okR, r = pcall(S.runHeight, map, nx * 2, ny * 2 + 1)
+            ns = okR and r or nil
+          end
+          if ns == nil and S.flatGroundAt then
+            local okG, g = pcall(S.flatGroundAt, map, nx * 2, ny * 2 + 1)
+            ns = okG and g or nil
+          end
+          -- a neighbour with neither ABSTAINS rather than vetoing: vetoing
+          -- meant one un-flat neighbour silenced the whole vote
+          if ns ~= nil then
+            if not seen then agreed, seen = ns, true
+            elseif agreed ~= ns then agreed = nil break end
+          end
+        end
+      end
+    end
+    if agreed and agreed > 0 then return agreed end
+  end
+
+  -- THE ELEVATION GRID IS THE LAST WORD, NOT THE DATUM.
+  --
+  -- Everything above has declined: no doorway, no flight, no deck, no terrace,
+  -- no stamp, no measured run, no height of its own, and no agreement among
+  -- the four cells touching it.  Returning 0 there says "this cell is at the
+  -- world floor", and on a map whose ground the mesher RAISED off the
+  -- elevation grid -- `gen3 shapes: took ground height from the elevation
+  -- grid, 3 level(s), 8248 tile(s) set` -- that is a claim the terrain
+  -- contradicts.  The result is a character standing a course or two inside
+  -- the ground, reported from Mauville and from every town with a raised
+  -- plaza.
+  --
+  -- So ask the same grid the terrain was built from.  `ctx.groundHeight` is
+  -- the mod's own reader for it: it resolves the transition cells by ramp and
+  -- the decks by bridge behaviour, and it is what `Structures` consults when
+  -- it lays the ground in the first place.  It is not always the FINISHED
+  -- height -- a causeway map pins its land to the datum on purpose and lets
+  -- the bridge carry the lift -- which is exactly why it is here, after every
+  -- reader that knows better, and not before them.
+  if g3ctx and g3ctx.groundHeight then
+    local okH, h = pcall(g3ctx.groundHeight, cellX, cellY)
+    if okH and type(h) == "number" and h > 0 then return h end
+  end
+
+  return 0
 end
 
 -- Ground under an entity this frame.  Water is the only class whose floor
@@ -258,6 +566,12 @@ end
 -- live surface at its own pixel centre so feet and plane rise together.
 -- Land uses the cell's static height; mid-step hop lift still comes from
 -- pose() as before.
+-- Forward declaration: `entityGround` below calls `groundAt`, and the memo
+-- that defines it sits further down (it needs TileShape's per-map table).
+-- Without this the call resolves to a GLOBAL of that name -- nil -- and takes
+-- the whole render pass down with it.
+local groundAt
+
 local function entityGround(map, e, px, py)
   local wx = (px or 0) + 8
   local wz = (py or 0) + 8
@@ -279,7 +593,13 @@ local function entityGround(map, e, px, py)
       end
     end
   end
-  return groundAt(map, e.cellX, e.cellY)
+  -- ...AND THE WALKER'S OWN ELEVATION AND PIXEL POSITION GO WITH THE
+  -- QUESTION.  Dropping them here is what left every character standing at
+  -- the tileset's class height while the mesher raised the ground under
+  -- them: `elev` is what tells a bridge cell whether this walker is on the
+  -- deck or on the street beneath it, and px/py are what make a flight climb
+  -- continuously instead of popping a course at the top.
+  return groundAt(map, e.cellX, e.cellY, e and e.elevation, px, py)
 end
 
 -- Whether what stands on this cell has a FLAT top at groundAt's height, or a
@@ -326,6 +646,94 @@ local function flatTop(map, cellX, cellY)
   return not ROUND_ART[s.art]
 end
 
+-- ONE LOOKUP PER CELL, NOT ONE PER ENTITY PER FRAME.
+--
+-- Measured, once the world pass could report its own phases:
+--
+--   world pass: voxel                        167.29 ms/frame
+--     voxel: poses (ground lookup per entity) 100.02 ms/frame   <- here
+--
+-- 155 posed entities, each asking what its cell stands on, every frame -- and
+-- the answer for a cell does not change from one frame to the next.  A
+-- character walks one cell every sixteen frames or stands still for minutes,
+-- so almost every one of those lookups is the same question asked again.
+--
+-- Keyed on the MAP, weakly, and witnessed by the shapes table it was filled
+-- from (see groundAt below for why the shapes table alone is not a key).  Each
+-- entry also carries the tick it
+-- was taken on, because Structures can rebuild behind us without TileShape
+-- changing (a seam refresh does exactly that) -- so an entry older than the
+-- TTL is recomputed rather than trusted.  Half a second of staleness at
+-- 60fps, against 155 full lookups a frame.
+--
+-- TWO ANSWERS ARE NEVER CACHED.  A flight interpolates on the walker's pixel
+-- position and a deck answers differently for the walker on it than for the
+-- one beneath it; both are marked volatile by the worker above.  Caching
+-- either is how a character would climb a staircase in sixteen-frame steps,
+-- or stand on a bridge they are walking under.
+local groundMemo = setmetatable({}, { __mode = "k" })
+local groundTick = 0
+local GROUND_TTL = 30
+
+function VoxelScene.groundTick()
+  groundTick = groundTick + 1
+end
+
+function groundAt(map, cellX, cellY, elev, px, py)
+  if not (map and map.inBounds) then return 0 end
+  local shapes = TileShape.forMap(map)
+  if not shapes then return (groundRaw(map, cellX, cellY, elev, px, py)) end
+  -- KEYED ON THE MAP, WITNESSED BY THE SHAPES.
+  --
+  -- The first cut of this keyed the cache on the shapes table alone, which was
+  -- wrong in a way that only shows up in a town: TileShape.forMap caches by
+  -- TILESET id, not by map, so every map drawn with the same tileset shared
+  -- one table -- and cell (10,10) of Mauville answered with cell (10,10) of
+  -- whatever else was loaded beside it.  Reported as "some npcs were appearing
+  -- in the ground in mauville city", which is exactly what borrowing another
+  -- map's terrace heights looks like.
+  --
+  -- So the cache hangs off the MAP (weak, so an evicted map takes its heights
+  -- with it) and remembers which shapes table it was filled from.  A rebuilt
+  -- tileset changes that table, and the map's heights are dropped with it
+  -- rather than quietly surviving the analysis they were read from.
+  -- ...AND ON WHETHER THE MAP HAS BEEN BUILT YET, which is a third thing the
+  -- answers depend on and the first two do not carry.
+  --
+  -- Before Structures has been over a map every reader in the ladder answers
+  -- nil, so a character is placed on the datum.  That is the right thing to
+  -- draw with -- somebody has to stand somewhere while a town meshes, which
+  -- takes seconds -- and the wrong thing to keep.
+  --
+  -- The first cut refused to cache at ALL while a map was unbuilt, which is
+  -- correct and costs the most at exactly the worst moment: every actor on a
+  -- map still being meshed walked the whole ladder every frame, and
+  -- `voxel: poses` went from nine milliseconds to twelve.
+  --
+  -- So cache as usual, and throw the whole map's answers away the first
+  -- frame it reports built.  One boolean compare per lookup, one flush at
+  -- the transition, and nothing carries a pre-build guess past it.
+  local S0 = structures()
+  local isBuilt = (S0 and S0.built and S0.built(map)) or false
+  local entry = groundMemo[map]
+  if not entry or entry.shapes ~= shapes or entry.built ~= isBuilt then
+    entry = { shapes = shapes, cells = {}, built = isBuilt }
+    groundMemo[map] = entry
+  end
+  local memo = entry.cells
+  -- the elevation is part of the question (a deck), and nil is a real value
+  local key = (cellY * 8192 + cellX) * 18 + ((tonumber(elev) or 16) % 18)
+  local hit = memo[key]
+  if hit and (groundTick - hit[2]) < GROUND_TTL then return hit[1] end
+  local h, volatileAnswer = groundRaw(map, cellX, cellY, elev, px, py)
+  if volatileAnswer then
+    memo[key] = nil
+    return h
+  end
+  memo[key] = { h, groundTick }
+  return h
+end
+
 VoxelScene.YAW = YAW
 -- shared with the overworld battle, which stands its mons on map cells and
 -- needs the same answer about what height "the floor" is there
@@ -343,8 +751,28 @@ end
 -- The sheet frame and mirror flag the 2D path would draw for this pose
 -- (same tables as SpriteRenderer). Shared by the billboard pass and the
 -- shadow pass so a walking character's shadow swings its legs too.
+-- resolved ONCE, not per card: `require` is a package.loaded lookup plus a
+-- call, and this runs for every actor in both the eye pass and the sun
+-- pass.  Memoised rather than bound at load because the engine module is
+-- not guaranteed to be there when a mod chunk first runs.
+-- THE THREE QUARTER-TURN FACING MAPS, BUILT ONCE.
+--
+-- These were table literals inside the branch, so a card standing while the
+-- camera happened to sit near a cardinal allocated a fresh four-entry table
+-- -- per actor, per pass.  Harmless while the yaw never arrived; the moment
+-- the slipped argument list was fixed and `yaw` started reaching this
+-- function, the branch went live for every card in the world.
+local YAW_LEFT  = { up = "left",  right = "up",    down = "right", left = "down"  }
+local YAW_RIGHT = { up = "right", right = "down",  down = "left",  left = "up"    }
+local YAW_BACK  = { up = "down",  right = "left",  down = "up",    left = "right" }
+
+local SpriteRenderer = nil
 local function frameFor(def, facing, phase, flip, yaw)
-  local SR = require("src.render.SpriteRenderer")
+  local SR = SpriteRenderer
+  if not SR then
+    SR = require("src.render.SpriteRenderer")
+    SpriteRenderer = SR
+  end
   local frame, mirror = 0, false
 
   -- Adjust facing based on camera yaw (ported from ADVANCED_SHAPE): as the
@@ -358,12 +786,10 @@ local function frameFor(def, facing, phase, flip, yaw)
 
     -- Map camera rotation to facing adjustments with tolerance
     local map = nil
-    if math.abs(yawDeg - (-90)) < 5 then
-      map = { up = "left", right = "up", down = "right", left = "down" }  -- Camera left
-    elseif math.abs(yawDeg - 90) < 5 then
-      map = { up = "right", right = "down", down = "left", left = "up" }  -- Camera right
+    if math.abs(yawDeg - (-90)) < 5 then map = YAW_LEFT
+    elseif math.abs(yawDeg - 90) < 5 then map = YAW_RIGHT
     elseif math.abs(yawDeg - 180) < 5 or math.abs(yawDeg - (-180)) < 5 then
-      map = { up = "down", right = "left", down = "up", left = "right" }  -- Camera back
+      map = YAW_BACK
     end
 
     if map then
@@ -463,7 +889,10 @@ end
 VoxelScene.spriteLean = nil
 
 local function leanAngle()
-  return VoxelScene.spriteLean or V.require("VoxelState").angle
+  -- `Voxel` is this module's own VoxelState, bound at load.  Going back
+  -- through V.require here cost a call per CARD per pass -- a couple of
+  -- hundred a frame in a town -- to reach the table already in scope.
+  return VoxelScene.spriteLean or Voxel.angle
 end
 
 -- Composition order matters here and is easy to get backwards: Mat4.mul(m,
@@ -471,23 +900,52 @@ end
 -- applied to a vertex. Correct billboard behavior is to tip the card back
 -- by pitch in its OWN local frame first, then swing the already-tipped
 -- card around the world +Y axis to face the camera's yaw.
+-- THE CHAIN IS FIXED, SO IT IS WRITTEN OUT.
+--
+-- The composition never varies: translate to the card's centre, turn it about
+-- +Y, tip it back about its own X, mirror it if the sheet wants the flipped
+-- frame, then shift the origin back to the card's left edge.  Built with
+-- Mat4.mul that is up to nine fresh sixteen-slot tables and four full matrix
+-- products -- 256 multiplies -- for a transform with about ten distinct
+-- numbers in it.  Per card.  Per pass.  Twice over, because the sun draws the
+-- cast as well, and a town poses well over a hundred actors.
+--
+-- Multiplied out by hand (T1 * Ry * Rx * S * T2, row-major, translation in
+-- the fourth column, and every factor affine so the bottom row stays
+-- [0,0,0,1]):
+--
+--   Ry*Rx  = { c, s*sp, s*cp ; 0, cp, -sp ; -s, c*sp, c*cp }
+--   *S     scales the FIRST COLUMN by sx (mirror is scale(-1,1,1))
+--   T1     adds the centre to the fourth column
+--   *T2    adds column1 * -halfW to the fourth column
+--
+-- One table, about ten multiplies, and identical to the ninth decimal --
+-- tests/matrix_test.lua builds the old chain with the real Mat4 and compares
+-- all sixteen slots across yaw, mirror, blend and lean.
+local HALF_PI = math.pi / 2
+local cos, sin = math.cos, math.sin
 local function billboardMatrix(px, py, y, mirror, yaw, spriteWidth, spriteHeight)
-  local w = spriteWidth or 16
-  local h = spriteHeight or 16
-  local halfW = w / 2
-  local halfH = h / 2
+  local halfW = (spriteWidth or 16) / 2
+  local cx = px + halfW
+  local cz = py + (spriteHeight or 16) / 2
   local b = FirstPerson.cardBlend()
-  local m = Mat4.translate(px + halfW, y, py + halfH)
-  
-  if b > 0 then
-    m = Mat4.mul(m, Mat4.rotateY(FirstPerson.cardYaw(px + halfW, py + halfH) * b))
-  elseif yaw and yaw ~= 0 then
-    m = Mat4.mul(m, Mat4.rotateY(yaw))
-  end
-  m = Mat4.mul(m, Mat4.rotateX((leanAngle() - math.pi / 2) * (1 - b)))
-  
-  if mirror then m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) end
-  return Mat4.mul(m, Mat4.translate(-halfW, 0, 0))
+
+  local a = 0
+  if b > 0 then a = FirstPerson.cardYaw(cx, cz) * b
+  elseif yaw and yaw ~= 0 then a = yaw end
+
+  local ca, sa = cos(a), sin(a)
+  local pitch = (leanAngle() - HALF_PI) * (1 - b)
+  local cp, sp = cos(pitch), sin(pitch)
+  local sx = mirror and -1 or 1
+  local m1 = ca * sx          -- column 1, which is also what T2 shifts by
+  local m9 = -sa * sx
+  return {
+    m1,  sa * sp,  sa * cp,  cx - m1 * halfW,
+    0,   cp,       -sp,      y,
+    m9,  ca * sp,  ca * cp,  cz - m9 * halfW,
+    0,   0,        0,        1,
+  }
 end
 
 local function billboardPull()
@@ -599,10 +1057,47 @@ VoxelScene.drawEntity = drawEntity
 
 
 
--- debug frame counter for the throttled "StadiumWilds enabled" log below;
--- drawCast is a plain local function (no self), so this lives as a module
--- upvalue instead of the old (broken) self._debugFrameCount
-local debugFrameCount = 0
+
+-- A CARD OUTSIDE THE BOX BEING DRAWN IS NOT IN THE PICTURE -- so it must not
+-- be drawn, and for the sun it must not be in the signature that decides
+-- whether the shadow map has to be redrawn either.
+--
+-- One predicate, two boxes: the sun pass hands it the light box
+-- (VoxelScene.bounds forSun) and the eye pass hands it the view box, which
+-- is the same box the terrain is drawn to.  Declared up HERE rather than
+-- beside the sun pass because drawCast is the first user and a local is not
+-- visible above its own declaration -- left below, it would silently be a
+-- nil global and take the render pass down on its first card.
+--
+-- MOTIVATED BY MAUVILLE, where the sun pass measured 83 ms EVERY FRAME.
+--
+-- Two costs, one cause.  The town is a seam: with DRAW DIST on FAR its four
+-- neighbours are resident, one of them Route 119 at 40x140 cells, and the
+-- posed list comes out around 150 entries -- most of them people wandering
+-- about a route the light box does not reach anywhere near.  Every one of
+-- them was drawn as a caster card (frame pick, quad, dimensions, matrix,
+-- draw), and every one of them put its exact pixel position and animation
+-- phase into `shadowSignature`.  So a stranger taking a step three screens
+-- away made the signature differ, and the whole sun pass -- a route-sized
+-- terrain mesh plus 78 building runs -- was redrawn for a shadow that falls
+-- nowhere near the canvas.  Standing perfectly still in a town could not
+-- reuse the map even once, which is the one case the signature exists for.
+--
+-- The SAME predicate governs both, deliberately: cull the draw without
+-- culling the signature and the map would go stale for a caster that is no
+-- longer in it; cull the signature without culling the draw and a card would
+-- be drawn from a stamp that never recorded it.  They have to be one test.
+--
+-- The pad is a card's own half-width and then some; the box already carries
+-- the sun's shear margin (VoxelScene.bounds forSun) on the side the shadows
+-- actually stretch toward.
+local CAST_PAD = 32
+local function castsInto(box, p)
+  if not box then return true end
+  local x, y = p.px or 0, p.py or 0
+  return x >= box[1] - CAST_PAD and x <= box[3] + CAST_PAD
+     and y >= box[2] - CAST_PAD and y <= box[4] + CAST_PAD
+end
 
 -- ------- the cast
 --
@@ -610,7 +1105,47 @@ local debugFrameCount = 0
 -- tileset draws into its own furniture (they ARE characters as far as the
 -- artwork is concerned, just ones drawn by the tileset instead of by a
 -- sprite sheet, so they get the same lean and the same camera-ward pull).
-local function drawCast(state, posed, atlasFor, yaw)
+-- THE PARAMETER LIST MUST MATCH THE CALL, and this one did not.
+--
+-- Called as `drawCast(state, posed, me, atlasFor, yaw)` -- five arguments into
+-- four parameters -- so everything shifted one place left: `atlasFor` bound
+-- the player's pose, `yaw` bound the atlas function, and the real camera yaw
+-- fell off the end.  Then each `drawEntity` here passed ten arguments plus
+-- that shifted `yaw` into a TWELVE-parameter list whose eleventh is
+-- `isPlayer`, so `isPlayer` took the atlas function (truthy, for everybody)
+-- and `yaw` took nil.
+--
+-- Nothing threw, because Lua pads a short call with nil and drops a long
+-- one's tail: the whole cast simply drew with `yaw = nil` -- no camera-facing
+-- frame chosen, no billboard turned toward the eye -- in a mode whose entire
+-- point is that you walk around things and look at them.  A slipped argument
+-- list is not a crash, it is a wrong picture, which is why it survived.
+-- tests/arity_check.lua reads the source for exactly this shape.
+-- A CARD OUTSIDE THIS FRAME'S CUT IS NOT ON SCREEN.
+--
+-- ViewBox.shows is the frame's own visibility test -- the box ViewBox.frame
+-- fits to the camera footprint, plus ViewBox.PAD, and it answers true when
+-- there is no box, so it is safe to guard every draw with unconditionally.
+-- It is what the terrain and shadow passes already ask about a whole
+-- neighbour map; asked about one card it is the same question at the
+-- resolution that matters here.
+--
+-- Deliberately NOT VoxelScene.bounds: that box is what to BUILD, capped at
+-- five view heights of ground, and in a town it swallows the whole map and a
+-- good part of its neighbours.  It is the right box for the sun, which
+-- reaches that far; it is far too loose to decide what the eye can see.
+--
+-- ViewBox.frame runs earlier in this same frame (it needs the camera
+-- FirstPerson may have moved), so by the time the cast is drawn the cut is
+-- this frame's, not the last one's.
+local CARD_W, CARD_H = 32, 48
+local function cardShows(p)
+  local x, y = p.px or 0, p.py or 0
+  local ok, seen = pcall(ViewBox.shows, x, y, x + CARD_W, y + CARD_H)
+  return (not ok) or seen
+end
+
+local function drawCast(state, posed, me, atlasFor, yaw)
   Voxel3D.glass(false)
   Voxel3D.seams(false)
   
@@ -625,8 +1160,24 @@ local function drawCast(state, posed, atlasFor, yaw)
   -- south. Both run through here, so the water's reflection copy -- drawn
   -- by this same function -- agrees with the frame to the pixel.
   local hideMe = FirstPerson.hidePlayer()
+  -- THE CROWD IS MOSTLY OFF-SCREEN.
+  --
+  -- The pose pass drops a ghost whose whole MAP the window box does not
+  -- reach, but within a map that IS reached every one of its people was
+  -- still built and submitted -- and a town seam keeps four neighbours
+  -- resident, one of them a route forty by a hundred and forty cells.  So a
+  -- hundred-odd cards were drawn every frame for a view that holds a few
+  -- dozen, each one a mesh lookup, a transform and a DRAW CALL.  Draw calls
+  -- are what this pass actually costs; the arithmetic around them is noise
+  -- by comparison.
+  --
+  -- The player is never culled: they are what the box is centred on, so the
+  -- test would pass anyway, and saying so means no camera rig can ever put
+  -- the one card that must be there outside its own box.
+  local shown, culled = 0, 0
   for _, p in ipairs(posed) do
-    if not (p.isPlayer and hideMe) then
+    if not (p.isPlayer and hideMe) and (p.isPlayer or cardShows(p)) then
+      shown = shown + 1
       -- Check if this is the player and a custom model is loaded
       if p.isPlayer and PlayerModel.loaded() then
         -- Draw custom 3D model instead of sprite
@@ -639,7 +1190,11 @@ local function drawCast(state, posed, atlasFor, yaw)
         StadiumFollower.draw(p.px, p.py, viewFacing(p))
       -- Check if this is a wild Pokemon and Stadium wilds is enabled
       elseif StadiumWilds.enabled() and StadiumWilds.isWildPokemon(p) then
-        print("[VoxelScene] Stadium Wilds path taken for entity")
+        -- (a debug print stood here, twice, inside the per-entity draw loop.
+        -- On Windows print() to a console is a SYNCHRONOUS write -- the
+        -- engine's own Logger carries a comment about that exact cost -- so
+        -- every wild Pokemon on screen was buying a console round trip per
+        -- frame, inside the pass measured at 78 ms.)
         -- Try to load the model if not already loaded
         if not StadiumWilds.hasModel(p) then
           StadiumWilds.loadEntityModel(p)
@@ -651,22 +1206,28 @@ local function drawCast(state, posed, atlasFor, yaw)
         else
           -- Fall back to sprite if model not available
           drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                     p.colors, p.lift, p.waterline, yaw)
+                     p.colors, p.lift, p.waterline, p.isPlayer, yaw)
         end
       else
         --.Draw normal sprite entity
         drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                   p.colors, p.lift, p.waterline, yaw)
+                   p.colors, p.lift, p.waterline, p.isPlayer, yaw)
       end
+    elseif not (p.isPlayer and hideMe) then
+      culled = culled + 1
+    end
+  end
+  -- what went in and what did not, in the F11 report's calls column
+  do
+    local P = profile()
+    if P and P.count then
+      P.count("        voxel: cards drawn", shown)
+      P.count("        voxel: cards culled", culled)
     end
   end
   
-  -- Debug: print entity count once per second (60 frames)
-  debugFrameCount = debugFrameCount + 1
-  if debugFrameCount % 60 == 0 then
-    local okCheck, enabledCheck = pcall(function() return StadiumWilds.enabled() end)
-    -- silent debug catch
-  end
+  -- (a frame counter that allocated a closure and pcall'd it every sixtieth
+  -- frame, then discarded both results, used to sit here)
   
   -- back on for everything textured from the atlas again -- figures, grass
   -- and flowers all sample it, where the mask's coordinates are honest
@@ -844,10 +1405,53 @@ end
 -- ghosts standing on a neighbour map are left to honest occlusion, because
 -- it is only your own character you cannot afford to lose behind a roof.
 local function posesOf(state, spriteColors)
+  VoxelScene.groundTick()
+  -- the ground lookups separately from the rest of posing: pose() advances
+  -- every timer and resolves every sprite, and after the memo above it is no
+  -- longer obvious which half of this phase is which
+  local _pg = phase("poses: ground lookups")
   local colors = spriteColors(state.map)
   local posed = {}
   local me = nil
+  -- A GHOST ON A MAP THIS FRAME IS NOT DRAWING CANNOT BE SEEN.
+  --
+  -- `state.ghosts` is one entry per object on every resident neighbour map --
+  -- a hundred of them on a seam, against a couple of dozen real entities --
+  -- and the terrain and shadow passes already decline to draw a neighbour the
+  -- window box does not reach (ViewBox.showsMap, the same test both of them
+  -- ask).  A card standing on ground that is not drawn is not a card anybody
+  -- can see, so building it, looking up what it stands on and handing it to
+  -- the billboard and shadow passes is work with no picture at the end.
+  --
+  -- The box is LAST FRAME'S: ViewBox.frame runs after this, because it needs
+  -- the camera that FirstPerson may have moved, which needs the player's own
+  -- pose from this very loop.  One frame of lag against a box that already
+  -- carries a pad, on a neighbour the size of a map -- a ghost can arrive a
+  -- frame late at the very edge and never a frame early.
+  --
+  -- NOT EVEN POSED, and that is a different call from the one castHides makes.
+  --
+  -- A `castHides` actor is on a map that IS being drawn and is merely behind
+  -- something, so it can be revealed by the camera moving a few pixels within
+  -- the same frame's geometry -- posing it anyway is what keeps it from
+  -- arriving a frame behind.  A ghost on a map outside the window box is not
+  -- hidden, it is ABSENT: its ground is not drawn, its shadow is not cast, and
+  -- the box has to open across a whole map before it can matter again.
+  --
+  -- pose() returns the draw position and advances the hop, surf bob and
+  -- spinner.  It is not what MOVES the actor -- the engine's own cast update
+  -- does that, and keeps doing it -- so what is lost is an animation phase on
+  -- a body nobody can see, recovered on the first frame it can.  Skipping it
+  -- takes the sprite resolve with it, which is the expensive half.
+  local skippedGhosts = 0
   for _, g in ipairs(state.ghosts or {}) do
+    local seen = true
+    if g.nb then
+      local okV, shows = pcall(ViewBox.showsMap, g.nb)
+      seen = (not okV) or shows
+    end
+    if not seen then skippedGhosts = skippedGhosts + 1 end
+    if seen then
     local sprite, vx, vy, facing, phase, flip = g.npc:pose()
     local gpx, gpy = vx + g.ox, g.npc.py + g.oy
     local waterRoamer = g.npc.roamer and g.npc.kind == "water"
@@ -873,6 +1477,7 @@ local function posesOf(state, spriteColors)
       waterline = wl,
       colors = spriteColors(g.map or state.map),
     }
+    end
   end
   for ei, e in ipairs(state.entities or {}) do
     if not (state.flyAnim and e == state.player) then
@@ -923,6 +1528,17 @@ local function posesOf(state, spriteColors)
         me = posed[#posed]
         me.isPlayer = true
       end
+    end
+  end
+  if _pg then _pg() end
+  -- HOW MANY, not just how long: "cast: 114 ms" is a slow pass and "114 ms
+  -- over 40 actors" is a crowd, and they do not have the same fix.  Shows up
+  -- in the report's calls-per-frame column; costs nothing when F11 is off.
+  do
+    local P = profile()
+    if P and P.count then
+      P.count("        voxel: ACTORS posed", #posed)
+      P.count("        voxel: ACTORS ghosts skipped", skippedGhosts)
     end
   end
   return posed, me
@@ -1018,8 +1634,30 @@ local glint = {}
 -- means the shadow map it produced last frame is still exactly right, and
 -- redrawing the whole world from the sun would buy nothing -- which is
 -- most of a dialog, a menu, or any moment standing still.
-local sigBuf = {}
-local function shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh)
+-- COMPARED, NOT CONCATENATED.
+--
+-- This used to build a comma-joined STRING of everything the sun pass
+-- depends on and compare it against last frame's.  With a town's cast that
+-- is well over a thousand fields -- and `tostring(terrain)` and a
+-- `tostring` per neighbour mesh on top, each of which allocates a fresh
+-- "table: 0x..." -- concatenated into a multi-kilobyte string, every frame,
+-- purely to answer a yes/no question.  The string was never read.
+--
+-- So the fields go into a REUSED buffer and are compared element by element
+-- against the last committed one.  Same answer, exactly: no hash, no
+-- collision, nothing to go subtly stale.  A table goes in as ITSELF, because
+-- `==` on tables is identity, which is the question `tostring` was
+-- approximating anyway.  After the first frame it allocates nothing.
+--
+-- The buffers are SWAPPED rather than copied, and only once the pass has
+-- actually finished -- a frame that bails between here and finish (no
+-- canvas, not ready) must leave the previous signature standing so the next
+-- frame still knows it has work to do.
+local sigBuf, sigPrev = {}, {}
+local sigN, sigPrevN = 0, -1
+
+local function shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh, box,
+                               battleToken)
   local n = 0
   local function put(v)
     n = n + 1
@@ -1034,7 +1672,7 @@ local function shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh)
   -- zoom step, a window resize or a rung change invalidates the map even
   -- standing perfectly still
   put(vw); put(vh)
-  put(math.floor((V.require("VoxelState").angle or 0) * 512))
+  put(math.floor((Voxel.angle or 0) * 512))
   -- the sun itself: the cycle swings the shear as the clock runs, and a map
   -- lit from somewhere new must be redrawn from there too. Quantised by the
   -- rig's own step (DayNight.rigTime), so a running cycle redraws the map a
@@ -1050,16 +1688,32 @@ local function shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh)
   -- map back inside the cut, and a sun map recorded without it would leave
   -- that map standing in its own unlit shadow
   put(ViewBox.signature())
-  put(tostring(terrain))
-  for i = 1, #nbMesh do put(tostring(nbMesh[i])) end
+  -- a staged fight's pics move every frame the animation does, and the sun
+  -- has to follow them (VR frames only)
+  put(battleToken or false)
+  put(terrain)
+  for i = 1, #nbMesh do put(nbMesh[i]) end
   for _, p in ipairs(posed) do
-    put(p.sprite.def.image)
-    put(p.px); put(p.py); put(p.gh); put(p.lift or 0)
-    put(p.facing); put(p.phase); put(p.flip and 1 or 0)
-    put(p.waterline or 0)
+    if castsInto(box, p) then
+      put(p.sprite.def.image)
+      put(p.px); put(p.py); put(p.gh); put(p.lift or 0)
+      put(p.facing); put(p.phase); put(p.flip and 1 or 0)
+      put(p.waterline or 0)
+    end
   end
-  for i = n + 1, #sigBuf do sigBuf[i] = nil end
-  return table.concat(sigBuf, ",")
+  sigN = n
+  if n ~= sigPrevN then return true end
+  for i = 1, n do
+    if sigBuf[i] ~= sigPrev[i] then return true end
+  end
+  return false
+end
+
+-- Committed only after the pass has drawn: swap the buffers, so the one just
+-- built becomes the reference and last frame's becomes scratch.
+local function shadowSignatureCommit()
+  sigBuf, sigPrev = sigPrev, sigBuf
+  sigPrevN = sigN
 end
 
 -- The sun pass: render the scene once from the light, so the main pass can
@@ -1076,11 +1730,15 @@ end
 local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
                            atlasFor, battleCards, battleToken, yaw, neighborLimit)
   if not ShadowMap.available() then return end
-  local sig = shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh)
-  -- a staged fight's pics move every frame the animation does, and the sun
-  -- has to follow them (VR frames only; see render)
-  if battleToken then sig = sig .. "|btl" .. tostring(battleToken) end
-  if not ShadowMap.stale(sig) then return end
+  -- computed BEFORE the signature, because the signature is filtered by it
+  -- (see castsInto).  Pure arithmetic -- no geometry is touched here -- so
+  -- hoisting it above the staleness test costs nothing on a reused frame.
+  local box = VoxelScene.bounds(cx, cy, vw, vh, true)
+  local changed = shadowSignature(terrain, nbMesh, posed, cx, cy, vw, vh,
+                                  box, battleToken)
+  -- (the staged fight's token is part of the signature above now, rather
+  -- than glued onto a string afterwards)
+  if not ShadowMap.stale(changed) then return end
   if not ShadowMap.begin(cx, cy, vw, vh) then return end
 
   -- On the LOW rung the neighbours are drawn in the SCENE as usual and
@@ -1091,7 +1749,6 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   -- lost is a strip along the seam where a neighbour's border trees should
   -- be throwing onto this map's edge; what is bought is most of the pass.
   local casters = Quality.neighbourShadows() and (state.neighbors or {}) or {}
-  local box = VoxelScene.bounds(cx, cy, vw, vh, true)
 
   ShadowMap.drawGroup(terrain, atlasFor(state.map), nil, box)
   for i, nb in ipairs(casters) do
@@ -1138,21 +1795,37 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
       end)
     end
   end
+  local sunCards, sunSkipped = 0, 0
   for _, p in ipairs(posed) do
-    local def = p.sprite.def
-    -- viewFacing, exactly as the camera draw picks it (see viewFacing for
-    -- why the two passes must agree): in first person the sun's card
-    -- swaps frame as the eye circles, which costs a redraw the signature
-    -- already charges for (FirstPerson.signature) and keeps a card from
-    -- fringing against a mirror-flipped record of itself
-    local frame, mirror = frameFor(def, viewFacing(p), p.phase, p.flip, yaw)
-    local mesh = SpriteBillboards.shadowQuad(def, frame, p.waterline or 0)
-    if mesh then
-      local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
-      ShadowMap.draw(mesh, p.sprite:resolveImage(),
-                     ShadowMap.snug(
-                       Voxel3D.casterMatrix(p.px, p.py, p.gh + (p.lift or 0),
-                                            mirror, worldWidth, worldHeight)))
+    if castsInto(box, p) then
+      sunCards = sunCards + 1
+      local def = p.sprite.def
+      -- viewFacing, exactly as the camera draw picks it (see viewFacing for
+      -- why the two passes must agree): in first person the sun's card
+      -- swaps frame as the eye circles, which costs a redraw the signature
+      -- already charges for (FirstPerson.signature) and keeps a card from
+      -- fringing against a mirror-flipped record of itself
+      local frame, mirror = frameFor(def, viewFacing(p), p.phase, p.flip, yaw)
+      local mesh = SpriteBillboards.shadowQuad(def, frame, p.waterline or 0)
+      if mesh then
+        local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
+        ShadowMap.draw(mesh, p.sprite:resolveImage(),
+                       ShadowMap.snug(
+                         Voxel3D.casterMatrix(p.px, p.py, p.gh + (p.lift or 0),
+                                              mirror, worldWidth, worldHeight)))
+      end
+    else
+      sunSkipped = sunSkipped + 1
+    end
+  end
+  -- HOW MANY WENT IN AND HOW MANY DID NOT, in the F11 report's calls column:
+  -- "casters in light" against "casters culled" says at a glance whether a
+  -- slow sun pass is a crowded town or a wide draw distance.
+  do
+    local P = profile()
+    if P and P.count then
+      P.count("        voxel: sun casters in light", sunCards)
+      P.count("        voxel: sun casters culled", sunSkipped)
     end
   end
   
@@ -1181,7 +1854,9 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   -- on the wrong block.
   pcall(StreetLamps.castShadows, state.map)
 
-  ShadowMap.finish(sig)
+  ShadowMap.finish()
+  -- ...and only NOW is this frame's signature the one to compare against
+  shadowSignatureCommit()
 end
 
 -- Render the world. Without `eyes`, one frame into one canvas -- the flat
@@ -1195,7 +1870,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- return nil: the engine keeps the 2D path for the frame and
   -- Voxel.ready holds the camera tween at flat, so the switch waits
   -- invisibly instead of freezing or tilting an empty stage.
+  local _p = phase('mesh build / prefetch')
   local terrain, nbMesh = VoxelScene.prefetch(state)
+  if _p then _p() end
   if not terrain then return nil end
 
   local cam = state.camera
@@ -1283,18 +1960,53 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   Voxel3D.cull = dioFrame and Diorama.cull or nil
   Voxel3D.keyColor = dioFrame and Diorama.keyColor() or nil
 
+  -- ONE LOOKUP PER MAP PER FRAME.
+  --
+  -- This is called from fourteen places in a frame -- the terrain submit, each
+  -- neighbour, the flowers, the ceiling, the flora, and every one of those
+  -- again in the sun pass -- and each call rebuilt the palette (`modeColors`)
+  -- and walked TerrainAtlas.forMap to reach a sheet that cannot change within
+  -- a frame.  The memo lives in this call's own scope, so an animated Gen 3
+  -- atlas still advances between frames; it just stops being re-derived
+  -- thirteen extra times inside one.  `false` stands in for a genuine nil so a
+  -- map with no sheet is not retried on every call either.
+  local atlasMemo = {}
   local function atlasFor(map)
-    return TerrainAtlas.forMap(map, modeColors(paletteFor, map))
+    if map == nil then return nil end
+    local hit = atlasMemo[map]
+    if hit ~= nil then return hit or nil end
+    local sheet = TerrainAtlas.forMap(map, modeColors(paletteFor, map))
+    atlasMemo[map] = sheet or false
+    return sheet
   end
 
   -- sprite palettes only exist in the SGB modes; under RED++ the OBP bake
   -- inside sprite:resolveImage() already colors the sheet
-  local function spriteColors(map)
+  -- ONE PALETTE PER MAP PER FRAME, for the same reason the atlas above gets
+  -- one: this is called once for EVERY ghost in the posed list -- a hundred of
+  -- them on a seam -- and it rebuilds the same table each time.  The map a
+  -- ghost stands on cannot change within a frame.
+  --
+  -- The worker is declared FIRST: the memo below closes over it, and a local
+  -- declared after the function that calls it resolves to a global instead --
+  -- nil, and a render pass that dies on its first ghost.
+  local function spriteColorsRaw(map)
     if PaletteFX.usesGbcPack() then return nil end
     return modeColors(paletteFor, map)
   end
+  local spriteColorMemo = {}
+  local function spriteColors(map)
+    local key = map or false
+    local hit = spriteColorMemo[key]
+    if hit ~= nil then return hit or nil end
+    local v = spriteColorsRaw(map)
+    spriteColorMemo[key] = v or false
+    return v
+  end
 
+  local _p = phase('poses (all of it: pose, sprite, ground)')
   local posed, me = posesOf(state, spriteColors)
+  if _p then _p() end
 
   -- The first-person rig, built (or blended) for this frame and handed to
   -- Voxel3D BEFORE either pass runs: the sun's box is fitted around this
@@ -1355,8 +2067,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   end
   local neighborLimit = DrawDistance.neighborLimit()
   
+  local _p = phase('shadow map')
   castShadows(state, terrain, nbMesh, posed, shCx, shCy, vw, vh, atlasFor,
               battleCards, battleToken, yaw, neighborLimit)
+  if _p then _p() end
 
   -- Everything between beginScene and endScene, as one function: the flat
   -- path runs it once, a VR frame runs it once PER EYE -- same posed
@@ -1367,7 +2081,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     -- the painted panorama that reads as ADVANCED_SHAPE's own horizon,
     -- drawn before Skyline's real map-shaped massing so the placed towns and
     -- routes still stand out as actual geometry in front of the painting.
+    local _q = phase('sky: horizon art')
     pcall(HorizonArt.draw, state)
+    if _q then _q() end
 
     -- THE HORIZON FIRST, before anything real. The far silhouettes
     -- (lib/Skyline.lua) are the most distant thing in the frame by an order
@@ -1376,8 +2092,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     -- box and no sort. Ahead of the snow tint on purpose: a silhouette is a
     -- shape, not a surface, and whitening its crowns would put a snowfield
     -- on a hill nobody can reach.
+    local _q = phase('sky: skyline')
     pcall(Skyline.frame)
     pcall(Skyline.draw, state, cx, cy, vh)
+    if _q then _q() end
 
     -- SNOW ON THE WORLD ITSELF, for the length of the terrain pass and no
     -- longer. Every up-facing voxel goes white -- the ground, the top of a
@@ -1392,27 +2110,35 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     -- the sky (lib/SkyLayer.lua) then distant horizon (lib/Backdrop.lua):
     -- before the terrain, depth writes off, so every real surface draws over them
     -- Sky draws first as background, then horizon draws in front of it
+    local _q = phase('sky: layer')
     pcall(SkyLayer.draw, state)
+    if _q then _q() end
     pcall(Backdrop.draw, state)
 
     -- Terrain, chunked and culled: only the cells of this map -- and only
     -- the connected maps -- that the camera can still see ground on. This is
     -- the pass that made a route heavy and a house free, because the cost was
     -- never the camera, it was how much map was being submitted behind it.
+    local _p = phase('terrain (home map)')
     Voxel3D.drawGroup(terrain, atlasFor(state.map), nil, nil, nil, box)
+    if _p then _p() end
     
     -- interiors, then ground detail (lib/Ceiling.lua, lib/Flora.lua)
+    local _p = phase('ceiling + flora')
     pcall(Ceiling.draw, state, atlasFor)
     pcall(Flora.draw, state, atlasFor)
+    if _p then _p() end
     
     -- the window box's coarse cut, exactly as the sun pass took it: the same
     -- test on the same maps, so the light and the eye can never disagree
     -- about which neighbours are in this frame (see ViewBox.showsMap)
+    local _p = phase('terrain (neighbours)')
     for i, nb in ipairs(state.neighbors or {}) do
       if (not neighborLimit or i <= neighborLimit) and ViewBox.showsMap(nb) then
         Voxel3D.drawGroup(nbMesh[i], atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), nil, nil, shifted(box, nb.ox, nb.oy))
       end
     end
+    if _p then _p() end
 
     -- and off again before anything that is not the world is drawn: a
     -- character's card is a sprite facing the camera, and its shade is 1 for
@@ -1432,7 +2158,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     -- terrain and the characters, depth-tested and never depth-writing --
     -- the same footing the flat drop shadows below use, for the same
     -- reasons. See lib/GroundFX.lua.
+    local _p = phase('ground fx')
     GroundFX.draw3D(state)
+    if _p then _p() end
 
     -- Without a shadow map (headless, or a driver that could not make the
     -- canvas) the old flat decals stand in: ground-only, characters only,
@@ -1484,7 +2212,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     -- the opposite call for its own combatants, deliberately: that is a
     -- staged shot rather than the world being walked around in -- see
     -- BattleBillboard.)
+    local _p = phase('cast (billboards)')
     drawCast(state, posed, me, atlasFor, yaw)
+    if _p then _p() end
 
     -- The staged fight's mons, standing on their arena cells in THIS eye's
     -- view (VR frames only; battleTex is nil otherwise). Rebuilt per eye

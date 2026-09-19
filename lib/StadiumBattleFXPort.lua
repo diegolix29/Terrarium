@@ -869,11 +869,83 @@ local function wrapperFor(mon)
   return battlerWrap(mon, false)
 end
 
+-- ONCE PER DRAWN FRAME, NOT ONCE PER LOGIC TICK.
+--
+-- `input.step` is the fixed-step seam: it runs as many times per frame as the
+-- accumulator has ticks to catch up on -- one at 60fps, five or six at ten.
+-- That is right for input, which is what the seam is for, and wrong for a
+-- budgeted background build, which is measured in frames.  Measured under the
+-- engine's frame profiler:
+--
+--   step: mod input.step                                   46.51 ms/frame
+--     hook input.step <- ... StadiumBattleFXPort.lua:1605   46.28 ms/frame
+--
+-- ...and it is self-feeding: more steps per frame lowers the frame rate, which
+-- buys more catch-up ticks, which steps it more.  The caches are the heavy
+-- part (five asset builders, one chunk each); the announcer timers below are
+-- per-tick work and correctly stay per tick.
+--
+-- Frames.n is the engine's rendered-frame counter, bumped after present.  When
+-- it is unavailable -- an older host -- this falls back to stepping every
+-- tick, which is exactly the old behaviour.
+local Frames = nil
+local framesTried = false
+local lastCacheFrame = nil
+
+-- ...AND IT YIELDS TO THE FRAME.
+--
+-- Once per frame was the first half of the fix; the second is that a frame
+-- already over budget should not be asked to carry a build step as well.  One
+-- step is a decompress, a file write or a model upload -- around 4 ms -- which
+-- is nothing on a 16 ms frame in a quiet room and a quarter of a heavy one on
+-- a route.  The player feels it exactly where they can least afford it, and
+-- the build does not care when it runs.
+--
+-- So: step when the last frame came in under budget, and otherwise wait.  With
+-- a floor, because a build that never progresses is worse than a slow one --
+-- a scene that never goes under budget would otherwise stall the caches
+-- forever, and the player would wait for assets that are not being built.
+-- One step every FORCE_EVERY frames guarantees progress at a rate the frame
+-- can absorb.
+local BUDGET = 1 / 30      -- seconds; above this the frame has no room to give
+local FORCE_EVERY = 10     -- ...but never let the build stop entirely
+local skipped = 0
+
+local function cacheStepDue()
+  if not framesTried then
+    framesTried = true
+    local ok, mod = pcall(require, "src.core.Frames")
+    if not (ok and type(mod) == "table") then
+      local req = V and V.engineRequire
+      if type(req) == "function" then ok, mod = pcall(req, "src.core.Frames") end
+    end
+    Frames = (ok and type(mod) == "table" and mod) or false
+  end
+  if not Frames then return true end
+  if lastCacheFrame == Frames.n then return false end
+  lastCacheFrame = Frames.n
+
+  -- the frame that just went out, not a guess at this one
+  local last = nil
+  if love and love.timer and love.timer.getDelta then
+    local ok, d = pcall(love.timer.getDelta)
+    if ok then last = tonumber(d) end
+  end
+  if last and last > BUDGET then
+    skipped = skipped + 1
+    if skipped < FORCE_EVERY then return false end
+  end
+  skipped = 0
+  return true
+end
+
 local function updateAnnouncer(dt, game)
   if Storage and Storage.setGame then pcall(Storage.setGame, game) end
   currentGame = game or currentGame
-  startCaches()
-  stepCaches()
+  if cacheStepDue() then
+    startCaches()
+    stepCaches()
+  end
 
   if Announcer and Announcer.cachePending and Announcer.cachePending() then
     pcall(Announcer.beginCache, false)

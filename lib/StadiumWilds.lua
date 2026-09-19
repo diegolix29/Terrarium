@@ -55,7 +55,12 @@ local slots = setmetatable({}, { __mode = "k" })
 local frameNo = 0
 
 -- Configuration
-local WILDS_SCALE = 0.8  -- Scale for wild Pokemon models
+-- Was 0.8, which shrank wild Pokemon below the size the same species/actor
+-- pipeline renders at in an actual Colosseum battle (Stadium.lua leaves
+-- mon.scale at 1 outside the send-out grow, and the Colosseum actor branch
+-- below acquires with no figureScale override -- i.e. battle's own default
+-- calibration). 1.0 makes wild Pokemon match battle size exactly.
+local WILDS_SCALE = 1.0  -- Scale for wild Pokemon models
 
 -- the key under options.modOptions.DRAMATIC_SHAPE
 StadiumWilds.KEY = "stadiumWilds"

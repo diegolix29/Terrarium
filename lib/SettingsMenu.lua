@@ -109,6 +109,9 @@ SettingsMenu.CATEGORIES = {
     summary = function() return V.require("VR").setting:valueLabel() end,
     help = "PCVR through OpenXR, and the one comfort setting that belongs to "
       .. "the headset alone." },
+  { id = "freefly", label = "FREE FLY..",
+    help = "Party Pokemon that know FLY can carry you freely over overworld terrain. "
+      .. "Configure altitude, speed, encounters, and gate behavior." },
 }
 
 -- ------- help for the rows that are not settings
@@ -219,17 +222,11 @@ function SettingsMenu.rows(catId, game)
   local full = isFull()
   local out = {}
   if catId == SettingsMenu.ROOT then
-    -- Debug: print pipeline rows
-    print("ROOT menu: " .. #pipelineRows .. " pipeline rows available")
-    for _, row in ipairs(pipelineRows) do
-      print("  Available pipeline row: " .. tostring(row.id) .. " (" .. tostring(row.label) .. ")")
-    end
     for _, row in ipairs(pipelineRows) do
       -- FULL owns the blur exactly as it owns the wireframe and the horizon
       -- bend, so T-SHIFT comes off with them
       if not (full and row.id == "pipeline:tiltshift") then
         out[#out + 1] = row
-        print("Added pipeline row to ROOT: " .. tostring(row.id) .. " (" .. tostring(row.label) .. ")")
       end
     end
     -- ------- settings that belong to no category
@@ -333,7 +330,9 @@ function SettingsMenu.rows(catId, game)
   end
   for _, entry in ipairs(settings) do
     if entry.cat == catId and offered(entry, full) then
-      out[#out + 1] = entry[1]:row()
+      if entry[1] and entry[1].row then
+        out[#out + 1] = entry[1]:row()
+      end
     end
   end
   return out

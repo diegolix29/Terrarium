@@ -6679,5 +6679,118 @@ function Gen3.isBuildingCell(map, cx, cy)
   local ok, r = pcall(ctx.isBuildingCell, cx, cy)
   return (ok and r) or false
 end
+--- TRUE on a Gen 3 cell whose behaviour byte is a tall/long/ash grass class.
+function Gen3.isGrassCell(map, cx, cy)
+  local ctx = Gen3.forMap(map)
+  if not (ctx and ctx.metatileAt and ctx.attributes) then return false end
+  local okM, m = pcall(ctx.metatileAt, cx, cy)
+  if not okM or type(m) ~= "number" then return false end
+  local okA, b = pcall(ctx.attributes, m)
+  if not okA or type(b) ~= "number" then return false end
+  local sp = spec()
+  local behaviour = sp and sp.behaviour
+  return (behaviour and behaviour[b] == "grass") or false
+end
+
+-- Monkey-patches `Map:isGrassCell` once, the same way `Water.installWalk`
+-- patches `Map:isWalkableCell`: keep the original for every map it already
+-- got right (Gen 1, Gen 2, Prism), and answer Gen 3 maps with the behaviour
+-- byte instead of the always-empty `grassTiles` table.  Call once at load
+-- time (see main.lua, beside `Water.installWalk`).
+function Gen3.installIsGrassCell()
+  local ok, Map = pcall(require, "src.world.Map")
+  if not ok or not Map or Map._dsGen3Grass then return end
+  local original = Map.isGrassCell
+  function Map:isGrassCell(cx, cy)
+    if Gen3.mapIsGen3(self) then
+      return Gen3.isGrassCell(self, cx, cy)
+    end
+    if type(original) == "function" then
+      return original(self, cx, cy)
+    end
+    return false
+  end
+  Map._dsGen3Grass = true
+end
+
+-- ---------------------------------------------------------------------------
+-- THE OUTDOOR FLAG.
+--
+-- WHAT WAS WRONG.  `Map.isOutdoor(def)` -- a STATIC function, called the same
+-- way everywhere in this mod (`Map.isOutdoor(def)`, never as a method on an
+-- instance) -- reads Gen 1/Gen 2 `def` fields only (see the header on
+-- `Structures.mapMeta` / the "Map.isOutdoor reads three Gen 1/Gen 2 def
+-- fields" comment there).  A Gen 3 `def` carries none of them, so it answers
+-- "indoor" for every single Hoenn map, town, route and all -- and roughly
+-- thirty call sites across this mod gate outdoor-only behaviour on exactly
+-- that call: `AmbientLife.update` (butterflies, FIREFLIES, birds, sparrows,
+-- dragonflies -- gated at the very top, before any of them ever reach a
+-- grass or ground check), `Weather`, `WindFX` leaves, `GroundFX`, `Ecology`,
+-- `AmbientSound`, `CityLife`/`StreetLamps` placement, `DayTint`, `Light`,
+-- `SkyLayer`/`HorizonArt`/`Backdrop`, `Shelter`, `Interiors`, `WorldAtlas`.
+-- Every one of them silently treats Hoenn as one giant interior.  Fireflies
+-- specifically never get past `AmbientLife.update`'s own outdoor gate to
+-- ever ask a single cell about grass, so the earlier `isGrassCell` fix could
+-- never have shown up there -- this is the gate one step before it.
+--
+-- `Structures.lua` already worked around this FOR ITS OWN MESH PASS
+-- (`local outdoor = Map.isOutdoor(def); if gen3 and gen3.outdoor ~= nil then
+-- outdoor = gen3.outdoor end`), reading Emerald's own MAP_TYPE out of
+-- `data/gen3_maps.lua` instead of trusting the Gen 1/2 heuristic. Every
+-- OTHER caller in the mod never got that override, because each one calls
+-- the engine's `Map.isOutdoor` directly rather than going through
+-- `Structures`.
+--
+-- THE FIX.  Patch `Map.isOutdoor` itself, once, so every caller gets
+-- Emerald's own answer for a Gen 3 map without having to know Gen 3 exists
+-- -- exactly the intent of `Structures`' own workaround, just applied at
+-- the one shared choke point instead of copied into thirty files.
+-- ---------------------------------------------------------------------------
+
+--- Emerald's own MAP_TYPE-derived outdoor answer for one map DEF, from
+--- `data/gen3_maps.lua`, or nil when this def is not a Gen 3 map the data
+--- file has an entry for (a modded/fan-hack map, or simply not Gen 3) --
+--- nil means "say nothing", so the caller keeps whatever the un-patched
+--- engine function already answered.
+function Gen3.outdoorForDef(def)
+  if type(def) ~= "table" or def.id == nil then return nil end
+  local okMaps, m = pcall(V.data, "gen3_maps")
+  if not (okMaps and type(m) == "table" and type(m.maps) == "table") then
+    return nil
+  end
+  local entry = m.maps[tostring(def.id)]
+  if not (entry and entry.outdoor ~= nil) then return nil end
+  return entry.outdoor and true or false
+end
+
+-- Monkey-patches the STATIC `Map.isOutdoor(def)` -- not an instance method,
+-- so this reassigns the plain function on the shared, `require`-cached
+-- `Map` table rather than anything reached through `self`/`:`. Every file
+-- in the mod that does `local Map = require("src.world.Map")` gets the SAME
+-- table back (that is what `require` caching means), so one patch here
+-- reaches all thirty-odd call sites without editing any of them. Call once
+-- at load time (see main.lua, beside `installIsGrassCell`).
+function Gen3.installIsOutdoor()
+  local ok, Map = pcall(require, "src.world.Map")
+  if not ok or not Map or Map._dsGen3Outdoor then return end
+  local original = Map.isOutdoor
+  if type(original) ~= "function" then return end
+  local logged = {}
+  function Map.isOutdoor(def)
+    local override = Gen3.outdoorForDef(def)
+    if override ~= nil then
+      local key = def and def.id
+      if key ~= nil and not logged[key] then
+        logged[key] = true
+        print(("[outdoor-debug] def=%s GEN3 override -> %s (engine said %s)")
+              :format(tostring(key), tostring(override),
+                      tostring(original(def))))
+      end
+      return override
+    end
+    return original(def)
+  end
+  Map._dsGen3Outdoor = true
+end
 
 return Gen3

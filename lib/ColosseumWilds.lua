@@ -22,9 +22,6 @@ local slots = setmetatable({}, { __mode = "k" })
 local frameNo = 0
 
 -- Configuration
-local WILDS_SCALE = 0.8
-
--- Configuration
 ColosseumWilds.KEY = "colosseumWilds"
 ColosseumWilds.LABEL = "COLOSSEUM MODELS"
 

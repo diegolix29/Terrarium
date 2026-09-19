@@ -20,8 +20,21 @@ local function cbeOwnsPokemonModels(ctx)
   if not id:find("^COLOSSEUM_BATTLE_ENVIRONMENTS:") then return false end
   local game=(ctx and ctx.game) or (ctx and ctx.battle and ctx.battle.game) or mod.game
   local arenasEnabled=not (ArenaCatalog and ArenaCatalog.enabled) or ArenaCatalog.enabled(game)
-  local modelsEnabled=not (BattleSettings and BattleSettings.pokemonModelsEnabled)
-    or BattleSettings.pokemonModelsEnabled(game)
+  
+  -- First check if Colosseum mode is selected - this overrides the global setting
+  local modelsEnabled=false
+  local OverworldBattle = V.OverworldBattle
+  if OverworldBattle and type(OverworldBattle.colosseum)=="function" then
+    local okColosseum, isColosseum = pcall(OverworldBattle.colosseum)
+    if okColosseum and isColosseum then modelsEnabled = true end
+  end
+  
+  -- Fall back to the global setting if not in colosseum mode
+  if not modelsEnabled then
+    modelsEnabled=not (BattleSettings and BattleSettings.pokemonModelsEnabled)
+      or BattleSettings.pokemonModelsEnabled(game)
+  end
+  
   return arenasEnabled and modelsEnabled
 end
 

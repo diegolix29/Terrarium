@@ -100,11 +100,18 @@ end
 -- the mesh would read as "behind something" and repaint the figure on open
 -- ground whether or not anything hides it; and the sun must see the same
 -- outline the camera does, or a shadow stops matching what casts it.
+--
+-- KEYED BY TABLE THEN FRAME, not by a built string.  `def.image .. "#" ..
+-- frame` allocated a string on EVERY call -- and this is called once per
+-- actor per pass, so a town spent a few hundred short-lived strings a frame
+-- just to look something up it already had.  Two table indexes cost nothing
+-- and allocate nothing on the hit path.
 function SpriteBillboards.mesh(def, frame)
-  local key = def.image .. "#" .. frame
-  if meshes[key] == nil then
+  local byFrame = meshes[def.image]
+  if not byFrame then byFrame = {}; meshes[def.image] = byFrame end
+  if byFrame[frame] == nil then
     local ok, m = pcall(buildCard, def, frame)
-    meshes[key] = (ok and m) or false
+    byFrame[frame] = (ok and m) or false
     
     -- Apply high-quality filtering to the image if mesh was created successfully
     if ok and m then
@@ -116,12 +123,31 @@ function SpriteBillboards.mesh(def, frame)
       end
     end
   end
-  return meshes[key] or nil
+  return byFrame[frame] or nil
 end
 
 -- Get the dimensions of a sprite frame for dynamic sizing
 -- Returns: textureWidth, textureHeight, worldWidth, worldHeight
+--
+-- MEASURED ONCE PER SPRITE, not once per card per pass.
+--
+-- This used to do a pcall into the asset store and a getDimensions() across
+-- the graphics boundary EVERY time it was asked -- for every actor, in the
+-- eye pass and again in the sun pass.  A town poses well over a hundred
+-- actors, so that is several hundred asset lookups and several hundred trips
+-- into LOVE per frame, to recompute four numbers that cannot change while
+-- the image is loaded.
+--
+-- `frame` is not part of the answer and never was: every frame of a sheet is
+-- the same size (the sheet is divided by def.frames), which is why the
+-- parameter is ignored below.  So the cache is keyed on the def table alone.
+--
+-- Weak-keyed, and dropped wholesale by invalidate() when the asset store
+-- reloads -- the same signal that already clears the meshes.
+local dims = setmetatable({}, { __mode = "k" })
 function SpriteBillboards.getSpriteDimensions(def, frame)
+  local hit = dims[def]
+  if hit then return hit[1], hit[2], hit[3], hit[4] end
   local ok, img = pcall(Assets.image, def.image)
   if not (ok and img) then return 16, 16, 16, 16 end
   local iw, ih = img:getDimensions()
@@ -141,6 +167,7 @@ function SpriteBillboards.getSpriteDimensions(def, frame)
   local worldWidth = frameWidth * scale
   local worldHeight = frameHeight * heightScale
   
+  dims[def] = { frameWidth, frameHeight, worldWidth, worldHeight }
   return frameWidth, frameHeight, worldWidth, worldHeight
 end
 
@@ -193,6 +220,8 @@ SpriteBillboards.shadowQuad = SpriteBillboards.mesh
 
 function SpriteBillboards.invalidate()
   meshes = {}
+  -- the measurements go with them: a reloaded image may be a different size
+  dims = setmetatable({}, { __mode = "k" })
 end
 
 Assets.register(SpriteBillboards.invalidate)

@@ -58,6 +58,77 @@ local V = ...
 
 local Voxel3D = V.require("Voxel3D")
 local okTS, TileShape = pcall(V.require, "TileShape")
+
+-- ------- Hoenn
+--
+-- ONE LOCAL, ON PURPOSE.  This chunk sits at 199 of LuaJIT's 200 names per
+-- function, so the Gen 3 module, the sampled-art memo and the helper that
+-- uses them share a single table rather than taking three slots.  Anything
+-- added at file scope here from now on has to go inside it, or something
+-- else has to come out.
+--
+-- Lazily and through pcall, like TileShape above: this module loads on every
+-- generation and Hoenn is the only one that needs any of it.
+local Hoenn = (function()
+  local ok, mod = pcall(V.require, "Gen3")
+  local H = { gen3 = ok and mod or nil,
+              art = setmetatable({}, { __mode = "k" }) }
+
+  -- WHAT GRASS IS DRAWN WITH, when the tileset will not say.
+  --
+  -- THIS IS WHY HOENN HAS NO BLADES.  `tileset.grassTile` is a Gen 1/2
+  -- field: one tile id, the art of tall grass.  A Gen 3 tileset carries
+  -- `grassTiles` instead -- {0x02, 0x03}, MB_TALL_GRASS and MB_LONG_GRASS --
+  -- which are BEHAVIOUR bytes, the cartridge's name for what a metatile IS,
+  -- and not an index into any sheet.  So `grassTile` is nil on every map in
+  -- the region, buildTufts returned "tileset names no grass tile" on its
+  -- first line, and not one blade was ever built in Hoenn.
+  --
+  -- Nothing errored and nothing was logged -- the reason string went to a
+  -- debug status line -- so the only symptom was grass that did not move.
+  -- Meanwhile Map:isGrassCell answers perfectly well on Gen 3, because it
+  -- reads those same behaviour bytes, which is why the wild encounters
+  -- standing in that grass worked the whole time.  Two different questions,
+  -- and only one of them had a Gen 3 answer.
+  --
+  -- Rather than key a table of grass metatiles per Hoenn tileset -- a list
+  -- to get wrong and to maintain -- ask the map what its grass actually
+  -- looks like: find a cell the engine calls grass and read the art off it,
+  -- through the same bottom-left tile of the cell that ChunkMesher and the
+  -- ground ladder both read.  Whatever the region draws grass with, that is
+  -- it, and it stays right if a tileset is ever re-imported.
+  function H.grassArt(map)
+    local hit = H.art[map]
+    if hit ~= nil then return hit or nil end
+    local found = false
+    local wc, hc = map.widthCells or 0, map.heightCells or 0
+    local isG3 = H.gen3 and H.gen3.mapIsGen3 and H.gen3.mapIsGen3(map)
+    for cy = 0, hc - 1 do
+      for cx = 0, wc - 1 do
+        local ok2, g = pcall(map.isGrassCell, map, cx, cy)
+        if ok2 and g then
+          local tx, ty = cx * 2, cy * 2 + 1
+          local t = nil
+          if isG3 then
+            local okT, v = pcall(H.gen3.tileAt, map, tx, ty)
+            t = okT and v or nil
+          end
+          if not t then
+            local okT, v = pcall(map.tileAt, map, tx, ty)
+            t = okT and v or nil
+          end
+          found = t or false
+          break
+        end
+      end
+      if found then break end
+    end
+    H.art[map] = found
+    return found or nil
+  end
+
+  return H
+end)()
 local Mat4 = V.require("Mat4")
 -- The first-person rig, if this build has one.  absol89's battle-art fork
 -- is based on Dramatic Shape 1.3.0, which predates the rig entirely --
@@ -355,6 +426,21 @@ local INSET = 0.5
 -- glitch: the maths, not the geometry.
 local function uvFor(map, tile)
   local ts = map.tileset or {}
+  -- A GEN 3 TILESET DOES NOT CARRY ITS OWN MEASUREMENTS until something asks.
+  --
+  -- Hoenn's art is baked into sheets of its own, and `tilesPerRow`,
+  -- `imageWidth` and `imageHeight` are filled in by Gen3.describe the first
+  -- time anybody calls it -- which ChunkMesher does when it meshes, so in
+  -- practice they are usually there by the time this runs.  Usually is not a
+  -- contract: without them the fallbacks below (16 per row, 48 tall) are a
+  -- Gen 1/2 tileset's shape, and every blade in the region would sample a
+  -- strip of the wrong art.  describe() is idempotent and memoises onto the
+  -- tileset, so asking costs a field read after the first call.
+  local g3 = Hoenn.gen3
+  if g3 and g3.isGen3 and g3.describe and not ts.tilesPerRow
+     and g3.isGen3(ts) then
+    pcall(g3.describe, ts)
+  end
   local perRow = ts.tilesPerRow or 16
   local aw = ts.imageWidth or (perRow * 8)
   local ah = ts.imageHeight or 48
@@ -371,7 +457,11 @@ end
 
 local function buildTufts(map, perCell)
   local grassTile = map.tileset and map.tileset.grassTile
-  if not grassTile then return nil, "tileset names no grass tile" end
+  -- ...and if it names none, take it off the grass itself (Hoenn.grassArt)
+  if not grassTile then grassTile = Hoenn.grassArt(map) end
+  if not grassTile then
+    return nil, "no grass tile, and no grass cell to take one from"
+  end
   local wc, hc = map.widthCells or 0, map.heightCells or 0
   if wc == 0 or hc == 0 then return nil, "map has no cells" end
   local u0, u1, v0, v1 = uvFor(map, grassTile)
@@ -1243,7 +1333,10 @@ local function buildCanopy(map, tex, mode, pcx, pcy)
   -- hang over the void -- invisible behind the old curtain, obvious once
   -- the curtain moved back.
   local ring, ringFloor = 0, 0
-  local groundTile = (map.tileset and map.tileset.grassTile) or leafTile
+  -- the same three-step answer the tufts take: what the tileset names,
+  -- else what the map's own grass is drawn with, else the leaf art
+  local groundTile = (map.tileset and map.tileset.grassTile)
+                     or Hoenn.grassArt(map) or leafTile
 
   local function sourceCell(cx, cy)
     local sx = math.max(0, math.min(wc - 1, cx))

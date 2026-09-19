@@ -45,6 +45,8 @@ local ModSetting = V.require("ModSetting")
 local RoamerArt = V.require("RoamerArt")
 local Roamer = V.require("Roamer")
 local Ecology = V.require("Ecology")
+local Gen3 = V.require("Gen3")
+
 
 local Collision = require("src.world.Collision")
 local FieldDefaults = require("src.world.FieldDefaults")
@@ -173,6 +175,44 @@ end
 -- and the fight only starts when you walk into one (which still needs Surf,
 -- because Collision.canMove refuses water to a walker).  Step off the water
 -- and the grass ones stay; the water ones stay too -- they live there.
+-- DOES THIS MAP HAVE GRASS TO STAND IN?  Asked of the MAP, not of the
+-- tileset.
+--
+-- The gate below used to be `map.tileset.grassTile` -- a Gen 1/2 field
+-- holding the tile id tall grass is DRAWN with.  A Gen 3 tileset does not
+-- have one: Hoenn says "this is tall grass" with a behaviour byte
+-- (MB_TALL_GRASS, MB_LONG_GRASS) on the metatile, and the extractor puts
+-- those in `grassTiles` instead.  So on every map in the region the gate was
+-- nil, no grass roamer was ever placed, and the only ones that existed were
+-- the water kind -- out on the sea, where you can neither walk into one nor
+-- press A at one.  "You cannot trigger a battle with roamers on Gen 3" was
+-- that, exactly: there were none within reach.
+--
+-- The tileset field was only ever a cheap stand-in for the real question,
+-- and the real question is one the engine already answers per cell.  Asking
+-- it directly is right on every generation -- a Gen 1/2 map that names a
+-- grass tile but has no grass cell is also nothing to populate -- and it
+-- cannot go stale when a tileset is re-imported.
+--
+-- Stops at the first hit and is memoised per map; `Grass.cells` walks the
+-- whole grid straight afterwards anyway when the answer is yes.
+local mapGrass = setmetatable({}, { __mode = "k" })
+local function mapHasGrass(map)
+  local hit = mapGrass[map]
+  if hit ~= nil then return hit end
+  local found = false
+  local wc, hc = map.widthCells or 0, map.heightCells or 0
+  for cy = 0, hc - 1 do
+    for cx = 0, wc - 1 do
+      local ok, g = pcall(map.isGrassCell, map, cx, cy)
+      if ok and g then found = true break end
+    end
+    if found then break end
+  end
+  mapGrass[map] = found
+  return found
+end
+
 local function terrainsFor(ow)
   local Game = game()
   local map = ow.map
@@ -209,7 +249,7 @@ local function terrainsFor(ow)
       -- caves, towers, the Mansion, the Power Plant: the whole floor is the
       -- encounter, so the whole floor is where they stand
       out[#out + 1] = { kind = "indoor", table_ = encDef.grass }
-    elseif map.tileset and map.tileset.grassTile then
+    elseif mapHasGrass(map) then
       out[#out + 1] = { kind = "grass", table_ = encDef.grass }
     end
   end
@@ -477,21 +517,93 @@ end
 -- one was placed.
 function WildRoamers.engage(ow, roamer)
   local Game = game()
-  if not (ow and roamer) or roamer.dead then return false end
-  if Game.stack and Game.stack:top() ~= ow then return false end
-  if ow.transitioning or ow.engaging then return false end
-  if ow.runner and ow.runner:isRunning() then return false end
-  -- Safety check: ensure roamer has valid species and level before starting battle
-  if not roamer.species or not roamer.level then return false end
+  if not (ow and roamer) or roamer.dead then 
+    local log = V.mod and V.mod.log
+    if log and log.info then
+      pcall(log.info, log, "WildRoamers.engage: early exit - ow=%s roamer=%s dead=%s",
+            tostring(ow ~= nil), tostring(roamer ~= nil), tostring(roamer and roamer.dead))
+    end
+    return false 
+  end
+  if Game.stack and Game.stack:top() ~= ow then 
+    local log = V.mod and V.mod.log
+    if log and log.info then
+      pcall(log.info, log, "WildRoamers.engage: stack not ow")
+    end
+    return false 
+  end
+  if ow.transitioning or ow.engaging then 
+    local log = V.mod and V.mod.log
+    if log and log.info then
+      pcall(log.info, log, "WildRoamers.engage: transitioning=%s engaging=%s",
+            tostring(ow.transitioning), tostring(ow.engaging))
+    end
+    return false 
+  end
+  if ow.runner and ow.runner.isRunning and ow.runner:isRunning() then 
+    local log = V.mod and V.mod.log
+    if log and log.info then
+      pcall(log.info, log, "WildRoamers.engage: runner running")
+    end
+    return false 
+  end
+  
+  -- Handle Gen 3 species names and level resolution
+  local species = roamer.species
+  local level = roamer.level
+  
+  -- Only handle level fallback - don't modify species for any generation
+  -- Gen 1 and Gen 2 already use numeric dex numbers correctly
+  -- Gen 3 string species names should be handled by the engine/battle system
+  
+  -- Handle missing level (Gen 3 sometimes doesn't set it)
+  if not level or level == 0 then
+    -- Default to player's lead level for wild encounters
+    local lead = Game.save.party[1]
+    if lead then
+      level = lead.level
+      local log = V.mod and V.mod.log
+      if log and log.info then
+        pcall(log.info, log, "WildRoamers.engage: using lead level=%s for missing level", 
+              tostring(level))
+      end
+    else
+      level = 5 -- Fallback minimum level
+      local log = V.mod and V.mod.log
+      if log and log.info then
+        pcall(log.info, log, "WildRoamers.engage: using fallback level=%s", tostring(level))
+      end
+    end
+  end
+  
+  -- Safety check: ensure roamer has valid species and level after resolution
+  if not species or not level then 
+    local log = V.mod and V.mod.log
+    if log and log.info then
+      pcall(log.info, log, "WildRoamers.engage: invalid species=%s level=%s after resolution",
+            tostring(species), tostring(level))
+    end
+    return false 
+  end
 
   local BattleState = require("src.battle.BattleState")
-  local battle = BattleState.newWild(Game, roamer.species, roamer.level)
+  local battle = BattleState.newWild(Game, species, level)
   -- a battle with nobody able to fight it is not one this may start: the
   -- constructor marks it dead, and pushing it would wipe to an empty screen
-  if battle.dead then return false end
+  if battle.dead then 
+    local log = V.mod and V.mod.log
+    if log and log.info then
+      pcall(log.info, log, "WildRoamers.engage: battle dead for species=%s level=%s",
+            tostring(species), tostring(level))
+    end
+    return false 
+  end
 
   roamer.dead = true
   roamer:facePlayer(ow.player)
+    -- Update roamer with resolved values for consistency
+  roamer.species = species
+  roamer.level = level
   -- taken out of the world BEFORE the push, not after it.  The push culls
   -- the map's cast into a snapshot for the length of the fight, and a
   -- roamer still in the list at that moment is a roamer the restore puts
@@ -570,6 +682,53 @@ function WildRoamers.install()
       return inner(self, npc)
     end
     OverworldState.dramaticShapeRoamHook = true
+  end
+
+  -- Also hook into interact() for Gen 3 compatibility
+  -- Some engine versions might use interact() instead of talkTo for entity detection
+  if not OverworldState.dramaticShapeRoamInteractHook then
+    local innerInteract = OverworldState.interact
+    WildRoamers._originalInteract = innerInteract
+    function OverworldState:interact()
+      -- Check if there's a roamer at the facing cell
+      local p = self.player
+      if p and type(p.facingCell) == "function" then
+        local fx, fy = p:facingCell()
+        if type(self.npcAtCell) == "function" then
+          local npc = self:npcAtCell(fx, fy)
+          if npc and npc.roamer then
+            -- Debug logging for Gen 3 interaction issues
+            local log = V.mod and V.mod.log
+            if log and log.info then
+              pcall(log.info, log, "WildRoamers: interact() found roamer species=%s at %d,%d",
+                    tostring(npc.species), npc.cellX or 0, npc.cellY or 0)
+            end
+            WildRoamers.engage(self, npc)
+            return
+          end
+        end
+        -- Also check entities list as fallback
+        if self.entities then
+          for _, e in ipairs(self.entities) do
+            if e and e.roamer and e.cellX == fx and e.cellY == fy then
+              local log = V.mod and V.mod.log
+              if log and log.info then
+                pcall(log.info, log, "WildRoamers: interact() found roamer in entities species=%s at %d,%d",
+                      tostring(e.species), e.cellX or 0, e.cellY or 0)
+              end
+              WildRoamers.engage(self, e)
+              return
+            end
+          end
+        end
+      end
+      -- Call original interact if no roamer found
+      local origInteract = WildRoamers._originalInteract
+      if type(origInteract) == "function" then
+        return origInteract(self)
+      end
+    end
+    OverworldState.dramaticShapeRoamInteractHook = true
   end
 end
 

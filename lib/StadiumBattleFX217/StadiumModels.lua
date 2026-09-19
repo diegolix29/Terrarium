@@ -89,6 +89,8 @@ Stadium._shinyVariant = shinyVariant
 -- StadiumStage's.
 Stadium.VALUE = "stadium"
 Stadium.VALUE_B = "stadiumB"
+Stadium.VALUE_COLOSSEUM_A = "colosseumA"
+Stadium.VALUE_COLOSSEUM_B = "colosseumB"
 
 -- ------- the live pair
 
@@ -101,8 +103,16 @@ local session = nil     -- nil when no staged fight is running
 -- refuses to move.
 function Stadium.selected() return true end
 
--- "A", "B", or nil when the row is on neither stadium rung.
-function Stadium.mode() return "A" end
+-- "A", "B", "COLOSSEUM_A", "COLOSSEUM_B", or nil when the row is on neither stadium/colosseum rung.
+function Stadium.mode()
+  local OverworldBattle = V.require("OverworldBattle")
+  local value = OverworldBattle.setting:get()
+  if value == Stadium.VALUE then return "A" end
+  if value == Stadium.VALUE_B then return "B" end
+  if value == Stadium.VALUE_COLOSSEUM_A then return "COLOSSEUM_A" end
+  if value == Stadium.VALUE_COLOSSEUM_B then return "COLOSSEUM_B" end
+  return nil
+end
 
 -- Whether the fight is staged on the DISCS rather than on the map.
 --
@@ -114,6 +124,13 @@ function Stadium.mode() return "A" end
 function Stadium.discs() return false end
 
 function Stadium.enabled()
+  if not Stadium.selected() then return false end
+  local mode = Stadium.mode()
+  -- Colosseum modes don't require Stadium ROM, only CBE availability
+  if mode == "COLOSSEUM_A" or mode == "COLOSSEUM_B" then
+    return Voxel3D.available()
+  end
+  -- Stadium modes still require Voxel3D availability
   return Voxel3D.available()
 end
 

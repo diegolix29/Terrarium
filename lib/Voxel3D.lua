@@ -850,6 +850,23 @@ local SHADER = [[
   uniform highp vec4 lamp5;
   uniform highp vec4 lamp6;
   uniform highp vec4 lamp7;
+  // THE FLOOR EACH POST STANDS ON, in world y.
+  //
+  // `lampHeight` below is the flame's height above its own post and is one
+  // number for every lamp, which was right while every post stood at the
+  // datum.  Once the terrain carries terraces a lamp on a raised street is
+  // drawn at the street's height and its POOL was still being computed at
+  // y = lampHeight -- so the post rose and the light it casts stayed on the
+  // floor below it.  Reported exactly that way: "the lamps are raised but
+  // their lights they emit arent".
+  uniform highp float lampY0;
+  uniform highp float lampY1;
+  uniform highp float lampY2;
+  uniform highp float lampY3;
+  uniform highp float lampY4;
+  uniform highp float lampY5;
+  uniform highp float lampY6;
+  uniform highp float lampY7;
   uniform highp float lampGlow;
 
 #ifdef ANIME_CEL
@@ -880,7 +897,7 @@ local SHADER = [[
   // flame this fragment is in .y, which the caller uses to run the pool from
   // amber at the rim to near-white at the core -- a real flame is not one
   // colour, and a pool that IS one colour reads as a painted circle.
-  vec2 localLamp(vec4 lamp) {
+  vec2 localLamp(vec4 lamp, highp float base) {
     if (lamp.w <= 0.0 || lamp.z <= 0.0) return vec2(0.0);
     // How far the pool REACHES is a ground measurement, and how bright it is
     // at a point is a 3D one. Keeping them apart matters: run the cutoff off
@@ -895,7 +912,7 @@ local SHADER = [[
     float r2 = lamp.z * lamp.z;
     if (rad2 >= r2) return vec2(0.0);         // early out: most fragments
 
-    vec3 d = vec3(lamp.x, lampHeight, lamp.y) - vWorld;
+    vec3 d = vec3(lamp.x, base + lampHeight, lamp.y) - vWorld;
     float dist2 = dot(d, d);
 
     // The window falls to zero WITH a zero derivative at the rim. An
@@ -960,10 +977,10 @@ local SHADER = [[
     // second, softer shadow layered under the sharp one the map draws.
     float lit = sunlight(vSun) * cloudShadowLit(vWorld.xz);
     vec3 light = skyTint + sunTint * lit;
-    vec2 lamps = localLamp(lamp0) + localLamp(lamp1)
-               + localLamp(lamp2) + localLamp(lamp3)
-               + localLamp(lamp4) + localLamp(lamp5)
-               + localLamp(lamp6) + localLamp(lamp7);
+    vec2 lamps = localLamp(lamp0, lampY0) + localLamp(lamp1, lampY1)
+               + localLamp(lamp2, lampY2) + localLamp(lamp3, lampY3)
+               + localLamp(lamp4, lampY4) + localLamp(lamp5, lampY5)
+               + localLamp(lamp6, lampY6) + localLamp(lamp7, lampY7);
     // The lamp adds light BEFORE the material is shaded, so paving, walls and
     // foliage keep their own colour under the warm spill instead of becoming
     // a flat yellow overlay.
@@ -1573,6 +1590,74 @@ Voxel3D.CRUSH_SLOTS = 8
 local crushScratch = {}
 for i = 1, 8 do crushScratch[i] = { 0, 0, 0, 0 } end
 
+-- ---- REDUNDANT UNIFORM SENDS ARE WHAT THIS PASS ACTUALLY COSTS ----------
+--
+-- Voxel3D.draw uploaded TWELVE uniforms for every card: model, sunModel,
+-- pull, sway, waterBody, grassH, grassLoad, crushN, the eight-vec4 crush
+-- array, snowTop, snowColor and snowSide.  Only the two matrices differ
+-- between one card and the next.  The other ten are frame constants, and in
+-- a town the cast is a few hundred cards across the eye pass and the sun
+-- pass -- several thousand protected calls over the graphics boundary per
+-- frame, resending values the shader already holds.
+--
+-- A shader keeps a uniform until something changes it, so the fix is to
+-- remember what was last sent and skip the send when it has not moved.
+--
+-- Keyed on the SHADER OBJECT: a different variant is a different set of
+-- uniforms, and rebinding an old one does not disturb what it held, so
+-- comparing identity is exactly the right invalidation.  Nothing outside
+-- this file can reach `activeShader`, so this cache cannot be bypassed --
+-- which is why the frame reset in beginScene goes through it too rather
+-- than writing behind its back.
+-- reused rather than rebuilt per draw: the old code allocated a fresh
+-- { 0, 0, 0 } for every card that was not grass, which was every card
+local ZERO3 = { 0, 0, 0 }
+local GRASS_LOAD = { 0, 0, 0 }
+local sentShader, sent = nil, {}
+local lastCrush, lastCrushN = false, 0
+
+local function forShader(sh)
+  if sh ~= sentShader then
+    sentShader, sent = sh, {}
+    lastCrush, lastCrushN = false, 0
+  end
+end
+
+local function sendNum(sh, name, v)
+  if sent[name] == v then return end
+  sent[name] = v
+  pcall(sh.send, sh, name, v)
+end
+
+-- A SHORT ARRAY OF NUMBERS (grassLoad, snowColor).  The previous value is
+-- COPIED rather than referenced: these come from module fields a caller may
+-- well mutate in place, and holding the same table would compare it against
+-- itself and never send again.
+--
+-- HANDED A SCALAR, IT DEFERS RATHER THAN THROWING.  It was handed one --
+-- SNOW_SIDE is 0.34, and the comment that used to stand here listed it as a
+-- vector because the name looked like snowColor's.  `#v` on a number is an
+-- error, this runs inside the render pipeline, and the pipeline catches and
+-- drops the whole voxel pass: the world fell back to 2D on every frame.  A
+-- uniform sent by the wrong helper should be a uniform sent correctly, not a
+-- renderer that stops.
+local function sendVec(sh, name, v)
+  if type(v) ~= "table" then return sendNum(sh, name, v) end
+  local prev = sent[name]
+  local n = #v
+  if prev and prev.n == n then
+    local same = true
+    for i = 1, n do
+      if prev[i] ~= v[i] then same = false break end
+    end
+    if same then return end
+  end
+  if not prev then prev = {}; sent[name] = prev end
+  for i = 1, n do prev[i] = v[i] end
+  prev.n = n
+  pcall(sh.send, sh, name, v)
+end
+
 local function sendCrush(sh, c)
   local n = 0
   if c and c.n then
@@ -1612,6 +1697,21 @@ local function sendCrush(sh, c)
                    crushScratch[7], crushScratch[8])
   Voxel3D.crushSendOk = ok
   return n
+end
+
+-- EIGHT VEC4s PER CARD, AND FOR THE CAST THEY ARE ALL ZERO.
+--
+-- sendCrush uploads the whole array whatever it is handed, so a nil `live`
+-- still cost a full send -- once per card, every card, because only the
+-- grass pass ever fills Voxel3D.crush.  Two nils in a row are the same
+-- payload by construction, which is the only case skipped here; anything
+-- else goes through as before rather than trying to compare the contents of
+-- a table the grass pass rewrites in place.
+local function crushSend(sh, live)
+  if live == nil and lastCrush == nil then return lastCrushN end
+  lastCrush = live
+  lastCrushN = sendCrush(sh, live)
+  return lastCrushN
 end
 
 local function newDepth(w, h)
@@ -2262,6 +2362,9 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, yaw)
       lamp and lamp.radius or 0,
       lamp and lamp.power or 0,
     })
+    -- the post's own floor (StreetLamps.lights), so the pool sits under the
+    -- lantern rather than under the world datum
+    pcall(sh.send, sh, "lampY" .. (i - 1), lamp and lamp.y or 0)
   end
   pcall(sh.send, sh, "lampGlow", #lamps > 0 and Voxel3D.LAMP_GLOW or 0)
   pcall(sh.send, sh, "lampHeight", Voxel3D.lampHeight or Voxel3D.LAMP_HEIGHT)
@@ -2358,14 +2461,18 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, yaw)
   pcall(sh.send, sh, "windDir", Wind.DIR)
   pcall(sh.send, sh, "windFreq", Wind.FREQ)
   pcall(sh.send, sh, "windPhase", Wind.phase())
-  pcall(sh.send, sh, "sway", 0)
+  -- THROUGH THE CACHE, not around it: these are the same uniforms
+  -- Voxel3D.draw now skips when they have not moved, so writing them
+  -- behind its back would leave it believing a stale value is live.
+  forShader(sh)
+  sendNum(sh, "sway", 0)
   -- the grass load and the tuft height, reset per frame like `sway` is and
   -- for the same reason: the grass pass fills them and nothing else may
   -- inherit them (see Voxel3D.draw)
   Voxel3D.grassH = nil
   Voxel3D.grassLoad = nil
-  pcall(sh.send, sh, "grassH", Voxel3D.GRASS_H)
-  pcall(sh.send, sh, "grassLoad", { 0, 0, 0 })
+  sendNum(sh, "grassH", Voxel3D.GRASS_H)
+  sendVec(sh, "grassLoad", ZERO3)
   -- Sent once per frame rather than per draw: it is a device capability,
   -- not a property of the mesh in front of the shader.
   do
@@ -2376,8 +2483,8 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, yaw)
   end
   -- crush off until the grass pass fills Voxel3D.crush
   Voxel3D.crush = nil
-  pcall(sh.send, sh, "crushN", 0)
-  sendCrush(sh, nil)
+  sendNum(sh, "crushN", 0)
+  crushSend(sh, nil)
   -- the curved world bends about the camera's focus, so the horizon keeps
   -- a fixed distance ahead of the player rather than sitting on the map.
   -- A placed camera may decline it outright (Voxel3D.camera.curve = 0).
@@ -2726,11 +2833,31 @@ end
 -- every vertex asks about the exact surface the sun recorded rather than
 -- one a few pixels behind it, and a figure cannot fringe itself. On the
 -- caster itself it is a no-op -- that quad is already flat.
+-- WRITTEN OUT, because this runs once per actor in the eye pass and again
+-- once per actor in the sun pass.
+--
+-- The chain never varies: translate to the card's centre, mirror it if the
+-- sheet wants the flipped frame, shift the origin back to its left edge, then
+-- flatten Z (scale(1,1,0)) so the caster is the card's silhouette rather than
+-- a slab.  Through Mat4.mul that is seven fresh sixteen-slot tables and three
+-- full matrix products for a transform with four distinct numbers in it.
+--
+-- Multiplied out (row-major, translation in the fourth column):
+--
+--   T1*S1  scales column 1 by sx and carries the centre in column 4
+--   *T2    adds column1 * -8 to column 4
+--   *S2    zeroes column 3
+--
+-- tests/matrix_test.lua builds the old chain with the real Mat4 and compares
+-- all sixteen slots.
 function Voxel3D.casterMatrix(px, py, y, mirror)
-  local m = Mat4.translate(px + 8, y, py + 8)
-  if mirror then m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) end
-  return Mat4.mul(Mat4.mul(m, Mat4.translate(-8, 0, 0)),
-                  Mat4.scale(1, 1, 0))
+  local sx = mirror and -1 or 1
+  return {
+    sx, 0, 0, px + 8 - 8 * sx,
+    0,  1, 0, y,
+    0,  0, 0, py + 8,
+    0,  0, 0, 1,
+  }
 end
 
 -- FALLBACK ONLY (no shadow map: headless, or a driver that cannot make the
@@ -2924,16 +3051,19 @@ function Voxel3D.draw(mesh, texture, model, pull, sunModel, sway, waterBody)
   local sh = activeShader
   if not sh then return end
   if texture then pcall(mesh.setTexture, mesh, texture) end
-  -- LOVE defaults matrix uniforms to column-major; Mat4 is row-major
+  forShader(sh)
+  -- LOVE defaults matrix uniforms to column-major; Mat4 is row-major.
+  -- These two are the only uniforms here that genuinely differ from one
+  -- card to the next, so they alone are sent unconditionally.
   pcall(sh.send, sh, "model", "row", model or IDENTITY)
   pcall(sh.send, sh, "sunModel", "row", sunModel or model or IDENTITY)
-  pcall(sh.send, sh, "pull", pull or 0)
-    pcall(sh.send, sh, "sway", sway or 0)
+  sendNum(sh, "pull", pull or 0)
+  sendNum(sh, "sway", sway or 0)
   -- Sent unconditionally, like `sway` just above -- a draw that leaves it
   -- out must NOT inherit whichever value a water-type stadium rig set on
   -- the previous one, or the next land creature drawn gets water-tinted
   -- for a vertex that only ever meant "my foot is mid-stride".
-  pcall(sh.send, sh, "waterBody", waterBody and 1 or 0)
+  sendNum(sh, "waterBody", waterBody and 1 or 0)
 
   -- How tall the thing that is about to lean stands, and what is lying on
   -- it. Both ride the same field-set-by-the-caller contract `snowTop` and
@@ -2943,13 +3073,15 @@ function Voxel3D.draw(mesh, texture, model, pull, sunModel, sway, waterBody)
   do
     local sw = sway or 0
     if sw > 0 then
-      pcall(sh.send, sh, "grassH", Voxel3D.grassH or Voxel3D.GRASS_H)
+      sendNum(sh, "grassH", Voxel3D.grassH or Voxel3D.GRASS_H)
       local l = Voxel3D.grassLoad
-      pcall(sh.send, sh, "grassLoad",
-            l and { l[1] or 0, l[2] or 0, l[3] or 0 } or { 0, 0, 0 })
+      GRASS_LOAD[1] = l and (l[1] or 0) or 0
+      GRASS_LOAD[2] = l and (l[2] or 0) or 0
+      GRASS_LOAD[3] = l and (l[3] or 0) or 0
+      sendVec(sh, "grassLoad", GRASS_LOAD)
     else
-      pcall(sh.send, sh, "grassH", Voxel3D.GRASS_H)
-      pcall(sh.send, sh, "grassLoad", { 0, 0, 0 })
+      sendNum(sh, "grassH", Voxel3D.GRASS_H)
+      sendVec(sh, "grassLoad", ZERO3)
     end
   end
   -- Foot-crush only on the grass (and flower) pass: the caller fills
@@ -2958,16 +3090,21 @@ function Voxel3D.draw(mesh, texture, model, pull, sunModel, sway, waterBody)
   do
     local c = Voxel3D.crush
     local live = (sway and sway > 0 and c and c.n and c.n > 0) and c or nil
-    pcall(sh.send, sh, "crushN", sendCrush(sh, live))
+    sendNum(sh, "crushN", crushSend(sh, live))
   end
   -- the snow lying on this mesh's up-faces, read from the field the caller
   -- set rather than passed as an argument: every existing call site would
   -- have needed a new parameter for a value that is the same for a whole
   -- pass, and `sway` is the cautionary tale for what happens when one of
   -- them forgets (it is sent on every draw for exactly that reason)
-  pcall(sh.send, sh, "snowTop", Voxel3D.snowTop or 0)
-  pcall(sh.send, sh, "snowColor", Voxel3D.SNOW_COLOR)
-  pcall(sh.send, sh, "snowSide", Voxel3D.SNOW_SIDE)
+  sendNum(sh, "snowTop", Voxel3D.snowTop or 0)
+  sendVec(sh, "snowColor", Voxel3D.SNOW_COLOR)
+  -- A SCALAR, not a vector: SNOW_SIDE is 0.34, how much the side faces
+  -- take.  Sent through sendVec it took `#v` of a number, which threw --
+  -- and because this is inside the render pipeline, the whole voxel pass
+  -- was caught and dropped to the 2D fallback EVERY FRAME.  "The voxels
+  -- are not loading at all, and it is extremely laggy" was this one line.
+  sendNum(sh, "snowSide", Voxel3D.SNOW_SIDE)
   -- Skip if mesh is a table (not a drawable) - can happen in battle contexts
   if type(mesh) ~= "table" then
     pcall(love.graphics.draw, mesh)
@@ -2990,13 +3127,14 @@ function Voxel3D.drawGroup(group, texture, model, pull, sunModel, b)
   if not sh then return end
   pcall(sh.send, sh, "model", "row", model or IDENTITY)
   pcall(sh.send, sh, "sunModel", "row", sunModel or model or IDENTITY)
-  pcall(sh.send, sh, "pull", pull or 0)
+  forShader(sh)
+  sendNum(sh, "pull", pull or 0)
   -- terrain is planted by definition: buildings do not lean
-  pcall(sh.send, sh, "sway", 0)
+  sendNum(sh, "sway", 0)
   -- terrain's own water tiles are found by the narrow waterLevel band
   -- (see the shader), not this escape hatch -- a stairwell shares this
   -- exact draw call and must not light up too.
-  pcall(sh.send, sh, "waterBody", 0)
+  sendNum(sh, "waterBody", 0)
   local chunks = group.chunks
   for i = 1, #chunks do
     local ch = chunks[i]

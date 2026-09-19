@@ -15,6 +15,7 @@ local StadiumPack = V.require("StadiumPack")
 local Stadium2Pack = V.require("Stadium2Pack")
 local StadiumRig = V.require("StadiumRig")
 local StadiumMon = V.require("StadiumMon")
+local ColosseumMon = V.require("ColosseumMon")
 
 local PlayerModel = {}
 
@@ -31,6 +32,14 @@ local currentFilename = nil
 local currentRig = nil
 local currentStadiumModel = nil
 local isStadiumModel = false
+
+-- The Colosseum (GC6E01) actor path, used whenever no Stadium/Stadium2 model
+-- covers this dex (every Gen III species, and any dex at all when only a
+-- Colosseum disc -- no Stadium ROM -- has been imported). Mirrors
+-- StadiumFollower's usingColosseum/colosseumVariant pair.
+local usingColosseum = false
+local colosseumVariant = "normal"
+local currentColosseumDex = nil
 
 -- Animation state
 local animTime = 0
@@ -294,30 +303,63 @@ function PlayerModel.load(filename)
   return true
 end
 
--- Load a Stadium model by dex number (e.g., 150 for Mewtwo)
+-- Load a 3D model by dex number (e.g., 150 for Mewtwo), preferring a
+-- Colosseum-sourced model (see ColosseumMon) when the player has that disc
+-- imported, since it alone covers the complete 386-species Gen I-III
+-- roster and keeps every species drawn in the same art style. Falls back to
+-- Stadium2Pack (1-251) or StadiumPack (1-151) for whichever of those two the
+-- player happens to have imported instead, so a player with only one source
+-- installed is capped at that source's own roster rather than failing outright.
 function PlayerModel.loadStadium(dex)
   if not dex then return false, "no dex number" end
   
   print("PlayerModel.loadStadium: Attempting to load dex", dex)
   
-  -- Check cache first
+  -- Check cache first (Stadium/Stadium2 rigs only -- a Colosseum actor is
+  -- ColosseumMon's own shared cache, checked via .available()/.matrix() below
+  -- instead of here)
   local cacheKey = "stadium_" .. dex
+  if usingColosseum and currentColosseumDex == dex then
+    currentFilename = "colosseum_" .. dex
+    print("PlayerModel.loadStadium: Colosseum model already current")
+    return true
+  end
   if modelCache[cacheKey] then
     currentModel = modelCache[cacheKey]
     currentRig = textureCache[cacheKey]  -- Reuse textureCache for rig cache
     currentStadiumModel = currentRig and currentRig.model
     currentFilename = "stadium_" .. dex
     isStadiumModel = true
+    usingColosseum = false
     print("PlayerModel.loadStadium: Loaded from cache")
     return true
   end
-  
-  -- Load the Stadium model - prioritize Stadium2Pack if available (contains all 251 Pokemon)
-  -- Add fallback: if primary pack fails, try the other pack
+
+  -- Colosseum first: covers the whole 386-species roster on its own, so
+  -- prefer it whenever the player has that disc imported instead of mixing
+  -- art styles species-by-species with whichever Stadium pack is present.
+  if ColosseumMon.available(dex, colosseumVariant) then
+    currentRig = nil
+    currentStadiumModel = nil
+    currentModel = nil
+    currentTexture = nil
+    currentFilename = "colosseum_" .. dex
+    isStadiumModel = false
+    usingColosseum = true
+    currentColosseumDex = dex
+    print("PlayerModel.loadStadium: Loaded Colosseum model for dex", dex)
+    return true
+  end
+
+  -- No Colosseum disc imported (or this dex isn't in ColosseumDex, which
+  -- shouldn't happen for 1-386) -- fall back to whichever Stadium pack the
+  -- player has. Stadium2Pack covers 1-251; StadiumPack covers 1-151. Try
+  -- whichever is the better fit for this dex first, then the other, so a
+  -- player with only one imported isn't capped below what that one pack
+  -- alone provides.
   local model
-  print("[PlayerModel] Determining pack loader for dex:", dex, "(Gen 1: 1-151, Gen 2: 152-251)")
+  print("[PlayerModel] No Colosseum model, falling back to Stadium/Stadium2 for dex:", dex)
   
-  -- Check if Stadium2Pack is available (contains all 251 Pokemon including Gen 1)
   local stadium2Available = Stadium2Pack.available()
   
   if stadium2Available then
@@ -330,14 +372,9 @@ function PlayerModel.loadStadium(dex)
       print("[PlayerModel] StadiumPack.load returned:", model ~= nil, "for dex:", dex)
     end
   elseif dex > 151 then
-    print("[PlayerModel] Gen 2 Pokemon detected, using Stadium2Pack")
-    model = Stadium2Pack.load(dex, false)
-    print("[PlayerModel] Stadium2Pack.load returned:", model ~= nil, "for dex:", dex)
-    if not model then
-      print("[PlayerModel] Stadium2Pack failed, trying StadiumPack as fallback")
-      model = StadiumPack.load(dex, false)
-      print("[PlayerModel] StadiumPack.load returned:", model ~= nil, "for dex:", dex)
-    end
+    print("[PlayerModel] Gen 2/3 dex with no Stadium2Pack, trying StadiumPack anyway")
+    model = StadiumPack.load(dex, false)
+    print("[PlayerModel] StadiumPack.load returned:", model ~= nil, "for dex:", dex)
   else
     print("[PlayerModel] Gen 1 Pokemon detected, using StadiumPack")
     model = StadiumPack.load(dex, false)
@@ -349,46 +386,53 @@ function PlayerModel.loadStadium(dex)
     end
   end
   
-  if not model then
-    print("[PlayerModel] Failed to load Stadium model for dex", dex)
-    return false, "could not load stadium model"
-  end
-  
-  if model.staticPose then
-    print("PlayerModel.loadStadium: Model has static pose, declining")
-    return false, "model has static pose"
-  end
-  
-  -- Create the rig
-  local rig = StadiumRig.new(model)
-  if not rig then
+  if model and not model.staticPose then
+    -- Create the rig
+    local rig = StadiumRig.new(model)
+    if rig then
+      -- Cache the rig and model
+      modelCache[cacheKey] = rig  -- Store rig in modelCache
+      textureCache[cacheKey] = rig  -- Store rig in textureCache for consistency
+      currentRig = rig
+      currentStadiumModel = model
+      currentModel = nil  -- No static mesh for Stadium models
+      currentTexture = nil
+      currentFilename = "stadium_" .. dex
+      isStadiumModel = true
+      usingColosseum = false
+
+      -- Start idle animation
+      rig:pose(1, 0, true)  -- Animation 1 is idle, time 0, loop true
+      rig:skin(0)  -- No rotation initially
+
+      print("PlayerModel.loadStadium: Successfully loaded Stadium model")
+      return true
+    end
     print("PlayerModel.loadStadium: Failed to create rig")
-    return false, "could not create rig"
+  elseif model and model.staticPose then
+    print("PlayerModel.loadStadium: Model has static pose, declining")
+  else
+    print("[PlayerModel] No Stadium/Stadium2 model for dex", dex)
   end
-  
-  -- Cache the rig and model
-  modelCache[cacheKey] = rig  -- Store rig in modelCache
-  textureCache[cacheKey] = rig  -- Store rig in textureCache for consistency
-  currentRig = rig
-  currentStadiumModel = model
-  currentModel = nil  -- No static mesh for Stadium models
-  currentTexture = nil
-  currentFilename = "stadium_" .. dex
-  isStadiumModel = true
-  
-  -- Start idle animation
-  rig:pose(1, 0, true)  -- Animation 1 is idle, time 0, loop true
-  rig:skin(0)  -- No rotation initially
-  
-  print("PlayerModel.loadStadium: Successfully loaded Stadium model")
-  return true
+
+  print("[PlayerModel] Failed to load Colosseum or Stadium model for dex", dex)
+  return false, "could not load colosseum or stadium model"
 end
 
--- Get the current Stadium dex number loaded
+-- Get the current dex number loaded, whether the source is a Stadium/
+-- Stadium2 rig or a Colosseum actor -- callers (PlayerModelPick's cycler)
+-- don't need to know which backend answered.
 function PlayerModel.getStadiumDex()
-  if not isStadiumModel or not currentFilename then return nil end
-  local dexStr = currentFilename:match("stadium_(%d+)")
-  return dexStr and tonumber(dexStr) or nil
+  if not currentFilename then return nil end
+  if isStadiumModel then
+    local dexStr = currentFilename:match("^stadium_(%d+)$")
+    return dexStr and tonumber(dexStr) or nil
+  end
+  if usingColosseum then
+    local dexStr = currentFilename:match("^colosseum_(%d+)$")
+    return dexStr and tonumber(dexStr) or nil
+  end
+  return nil
 end
 
 -- Load the currently installed model (if any).
@@ -396,11 +440,15 @@ function PlayerModel.loadInstalled()
   local filename = PlayerModelInstall.modelFilename()
   if not filename then return false end
   
-  -- Check if this is a Stadium model marker (format: stadium_player_X)
+  -- Check if this is a Stadium/Colosseum model marker (format:
+  -- stadium_player_X). loadStadium(dex) tries Stadium/Stadium2 first and
+  -- falls back to Colosseum, so the marker format didn't need to change --
+  -- only the accepted range, now the full 386-species Gen I-III roster
+  -- Colosseum covers rather than just Stadium's 151.
   local dexStr = filename:match("stadium_player_(%d+)")
   if dexStr then
     local dex = tonumber(dexStr)
-    if dex and dex >= 1 and dex <= 151 then
+    if dex and dex >= 1 and dex <= 386 then
       return PlayerModel.loadStadium(dex)
     end
   end
@@ -420,11 +468,13 @@ function PlayerModel.clear()
   currentFilename = nil
   currentStadiumModel = nil
   isStadiumModel = false
+  usingColosseum = false
+  currentColosseumDex = nil
 end
 
 -- Check if a model is currently loaded.
 function PlayerModel.loaded()
-  return currentModel ~= nil or (currentRig ~= nil and currentStadiumModel ~= nil)
+  return currentModel ~= nil or (currentRig ~= nil and currentStadiumModel ~= nil) or usingColosseum
 end
 
 -- Get the filename of the currently loaded model.
@@ -437,6 +487,128 @@ end
 -- Draw the player model at the given position with the given transform.
 -- This integrates with the existing Voxel3D pipeline.
 function PlayerModel.draw(px, py, y, facing, mirror)
+  -- In free-roam mode with FreeMove, use the actual body facing direction
+  local FirstPerson = V.require("FirstPerson")
+  local b = FirstPerson.cardBlend()
+  if b > 0 then
+    -- Use the continuous body facing from FirstPerson instead of grid facing
+    facing = FirstPerson.pointBody(0, 0)
+  end
+  
+  -- Handle a Colosseum-sourced model (Gen III dex, or any dex with no
+  -- Stadium ROM imported). Mirrors StadiumFollower's Colosseum branch:
+  -- camera-relative free-roam rotation isn't wired through ColosseumMon's
+  -- simpler toward-vector API yet, so this draws facing the raw movement
+  -- direction in that mode too, same known gap as the follower.
+  if usingColosseum and currentColosseumDex then
+    local dt = 1 / 60  -- Assume 60 FPS, same assumption the Stadium branch makes
+    ColosseumMon.update(currentColosseumDex, colosseumVariant, dt)
+
+    -- Check if we're in free-roam mode (1st or 3rd person)
+    local FirstPerson = V.require("FirstPerson")
+    local b = FirstPerson.cardBlend()
+    
+    -- Detect if player is moving by checking actual input
+    local Game = require("src.core.Game")
+    local isMoving = Game.input:isDown("up") or Game.input:isDown("down") 
+                    or Game.input:isDown("left") or Game.input:isDown("right")
+    
+    local fx, fz
+    local m
+    
+    if isMoving and b > 0 then
+      -- When moving in free-roam mode, detect which key is pressed and use that direction
+      local moveDirection = facing
+      if Game.input:isDown("up") then
+        moveDirection = "up"
+      elseif Game.input:isDown("down") then
+        moveDirection = "down"
+      elseif Game.input:isDown("left") then
+        moveDirection = "left"
+      elseif Game.input:isDown("right") then
+        moveDirection = "right"
+      end
+      
+      -- Calculate rotation based on camera yaw and movement direction
+      local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
+      local yaw = 0
+      
+      if moveDirection == "down" then
+        yaw = (cameraYaw + math.pi) * b
+      elseif moveDirection == "up" then
+        yaw = cameraYaw * b
+      elseif moveDirection == "right" then
+        yaw = (cameraYaw - math.pi / 2) * b
+      elseif moveDirection == "left" then
+        yaw = (cameraYaw + math.pi / 2) * b
+      end
+      
+      -- Create base matrix with position
+      m = Mat4.translate(px + 8, y, py + 8)
+      
+      -- Apply the calculated rotation
+      if yaw ~= 0 then
+        m = Mat4.mul(m, Mat4.rotateY(yaw))
+      end
+      
+      -- Use forward direction for towardFor (the rotation handles the actual direction)
+      fx, fz = ColosseumMon.towardFor("up")
+      local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
+      if tempM then
+        -- Extract just the scale/transform parts from the Colosseum matrix
+        -- and apply them to our positioned+rotated matrix
+        m = Mat4.mul(m, tempM)
+      end
+    elseif b > 0 then
+      -- When idle in free-roam mode, follow camera yaw
+      local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
+      
+      -- Create base matrix with position
+      m = Mat4.translate(px + 8, y, py + 8)
+      
+      -- Apply camera yaw rotation
+      m = Mat4.mul(m, Mat4.rotateY(cameraYaw))
+      
+      -- Use forward direction for towardFor
+      fx, fz = ColosseumMon.towardFor("up")
+      local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
+      if tempM then
+        m = Mat4.mul(m, tempM)
+      end
+    else
+      -- In other modes, use simple movement direction
+      -- Create base matrix with position
+      m = Mat4.translate(px + 8, y, py + 8)
+      
+      -- Apply simple rotation based on facing
+      local yaw = 0
+      if facing == "right" then
+        yaw = math.pi / 2
+      elseif facing == "up" then
+        yaw = math.pi
+      elseif facing == "left" then
+        yaw = -math.pi / 2
+      end
+      
+      if yaw ~= 0 then
+        m = Mat4.mul(m, Mat4.rotateY(yaw))
+      end
+      
+      -- Use facing direction for towardFor
+      fx, fz = ColosseumMon.towardFor(facing)
+      local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
+      if tempM then
+        m = Mat4.mul(m, tempM)
+      end
+    end
+
+    if mirror then
+      m = Mat4.mul(m, Mat4.scale(-1, 1, 1))
+    end
+
+    return ColosseumMon.draw(currentColosseumDex, colosseumVariant, m)
+  end
+
   -- Handle Stadium models (animated skeletal models)
   if isStadiumModel and currentRig and currentStadiumModel then
     -- Update animation time
@@ -458,13 +630,21 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- Apply rotation based on facing direction
     local yaw = 0
     if b > 0 then
-      -- In free-roam mode
+      -- In free-roam mode, use camera-relative rotation like StadiumFollower
+      local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
+      
       if facing == "down" then
-        -- When moving backwards, face the camera
-        yaw = FirstPerson.cardYaw(px + 8, py + 8) * b
-      else
-        -- When moving in other directions, face forward (away from camera)
-        yaw = (FirstPerson.cardYaw(px + 8, py + 8) + math.pi) * b
+        -- Moving backwards: face the camera
+        yaw = cameraYaw * b
+      elseif facing == "up" then
+        -- Moving forward: face away from the camera
+        yaw = (cameraYaw + math.pi) * b
+      elseif facing == "left" then
+        -- Moving left: turn 90 degrees left
+        yaw = (cameraYaw + math.pi / 2) * b
+      elseif facing == "right" then
+        -- Moving right: turn 90 degrees right
+        yaw = (cameraYaw - math.pi / 2) * b
       end
     else
       -- In other modes, rotate based on movement direction
@@ -574,6 +754,12 @@ function PlayerModel.clearCache()
   currentRig = nil
   currentStadiumModel = nil
   isStadiumModel = false
+  usingColosseum = false
+  currentColosseumDex = nil
+  -- ColosseumMon's actor cache is shared with StadiumFollower/StadiumWilds/
+  -- RoamerStadium3D, so this is a full teardown (ROM change, mod unload),
+  -- same as StadiumFollower.clearCache -- not something to call per-swap.
+  pcall(ColosseumMon.clearCache)
 end
 
 return PlayerModel
