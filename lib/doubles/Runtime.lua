@@ -9,7 +9,6 @@ local function clone(t,seen)
   local n={};seen[t]=n;for k,v in pairs(t) do n[k]=clone(v,seen) end;return n
 end
 local function live(m) return V.DoublesCore.healthy(m) end
-local function now() return love and love.timer and love.timer.getTime and love.timer.getTime() end
 local function log(s)
   if V.mod.log then V.mod.log:info('Colosseum doubles: '..tostring(s)) end
 end
@@ -59,26 +58,52 @@ local function eligible(screen,generation)
   local api,why=consumer(game);if not api then return false,why end
   return true,api
 end
-function D.tryBegin(screen,generation)
-  if screen.__cbeDoublesDecision~=nil then return nil end
+local function openingBoundary(screen,generation)
+  if type(screen)~='table' then return false end
   local arena=V.StandaloneHost and V.StandaloneHost.session
-  local opening=arena and arena.started and (arena.battle==screen
+  return arena and arena.started and (arena.battle==screen
     or (V.GenerationCompat and V.GenerationCompat.matches and V.GenerationCompat.matches(arena.battle,screen)))
     and ((generation==1 and screen.phase=='messages' and screen.showPlayerBack==true and screen.showEnemyTrainer==true)
-      or (generation==2 and screen.phase=='intro' and screen.showPlayerTrainer==true))
+      or (generation==2 and screen.phase=='intro' and screen.showPlayerTrainer==true)) or false
+end
+-- Draw can occur once after the native battle screen enters its opening state
+-- but before the next BattleState:update call gives doubles ownership to
+-- tryBegin(). During that gap Gen II in particular may already have an enemy
+-- singles actor resident while only the player trainer flag is still visible.
+-- Expose a read-only predicate so CurrentSpriteModels can cover BOTH native
+-- picture slots while drawing neither actor. This does not advance the battle,
+-- acquire resources, or commit a doubles decision.
+function D.openingPending(value,generation)
+  local screen=value
+  if V.GenerationCompat and V.GenerationCompat.view then
+    local view=V.GenerationCompat.view(value)
+    if view then screen=view end
+  end
+  if type(screen)~='table' or screen.__cbeDoublesActive then return false end
+  generation=generation or ((type(value)=='table' and value.__cbeGeneration==2) and 2)
+    or ((screen.battle and screen.battle~=screen) and 2) or 1
+  if not openingBoundary(screen,generation) then return false end
+  local ok=eligible(screen,generation)
+  return ok==true
+end
+function D.tryBegin(screen,generation)
+  if screen.__cbeDoublesDecision~=nil then return nil end
+  local opening=openingBoundary(screen,generation)
   if screen.phase~='menu' and not opening then return nil end
   local ok,api=eligible(screen,generation)
   screen.__cbeDoublesDecision=ok==true
   if not ok then if type(api)=='string' then D.lastSkip=api;log(api) end;return nil end
   local host=generation==2 and screen.battle or screen
-  local party=generation==2 and host.party or host:playerPartyView()
+  local party=generation==2 and host.party or (host.game and host.game.save and host.game.save.party)
   local ready=false;for _,m in ipairs(party) do if live(m) then ready=true end end
   if not ready then return nil end
   D.serial=D.serial+1
   local backup={player={},enemy={}}
   for i,m in ipairs(party) do backup.player[i]=clone(m) end
   for i,m in ipairs(host.enemyParty) do backup.enemy[i]=clone(m) end
-  backup.inventory=clone(screen.game.save.inventory);backup.bagOrder=clone(screen.game.save.bagOrder)
+  local itemSave=host.__cbeMtBattleItemSave or screen.game.save
+  backup.itemSave=itemSave
+  backup.inventory=clone(itemSave and itemSave.inventory);backup.bagOrder=clone(itemSave and itemSave.bagOrder)
   backup.itemSaveFields={}
   for _,key in ipairs({'pikachuHappiness','pikachuMood','pikachuEmotionModifier'})do
     backup.itemSaveFields[key]={value=screen.game.save[key]}
@@ -94,7 +119,8 @@ function D.tryBegin(screen,generation)
     rng=host.rng or math.random}
   local s={screen=screen,host=host,generation=generation,core=core,adapter=adapter,consumer=api,
     backup=backup,oldPlayer=host.player,oldEnemy=host.enemy,oldPlayerIndex=host.playerIndex,
-    oldEnemyIndex=host.enemyIndex,oldAmuletCoin=oldAmuletCoin,lastTime=now(),inputHeld={},awardIndex=1,groupedOpening=opening==true}
+    oldEnemyIndex=host.enemyIndex,oldAmuletCoin=oldAmuletCoin,inputHeld={},awardIndex=1,groupedOpening=opening==true,
+    actorPreflight=true,actorPreflightAge=0}
   core.sourceMoveFX=V.DoublesMovePresentation~=nil
   if opening then
     -- Take over before either native singles sendout. Retain the opening queue
@@ -122,6 +148,9 @@ end
 function D.close(s)
   if not s or s.closed then return end
   s.closed=true
+  if s.core and type(s.core.targetDiagnostics)=='function' then
+    D.lastTargetDiagnostics={battleId=s.core.id,rows=s.core:targetDiagnostics()}
+  end
   if s.progressGuards then
     s.screen.advanceQueue=s.progressGuards.advanceQueue
     s.screen.submit=s.progressGuards.submit
@@ -142,8 +171,9 @@ function D.abort(s)
   for i,m in ipairs(s.core.playerParty) do restoreRecord(m,s.backup.player[i]) end
   for i,m in ipairs(s.core.enemyParty) do restoreRecord(m,s.backup.enemy[i]) end
   local host=s.host
-  if s.backup.inventory then s.screen.game.save.inventory=clone(s.backup.inventory) end
-  s.screen.game.save.bagOrder=clone(s.backup.bagOrder)
+  local itemSave=s.backup.itemSave or s.screen.game.save
+  if s.backup.inventory then itemSave.inventory=clone(s.backup.inventory) end
+  itemSave.bagOrder=clone(s.backup.bagOrder)
   for key,row in pairs(s.backup.itemSaveFields or {})do s.screen.game.save[key]=row.value end
   host.amuletCoin=s.oldAmuletCoin
   host.player=s.oldPlayer;host.enemy=s.oldEnemy;host.playerIndex=s.oldPlayerIndex;host.enemyIndex=s.oldEnemyIndex
@@ -219,7 +249,7 @@ local function restoreProgressView(s)
   end
   s.progressSaved=nil;s.progressing=nil
   s.screen.__cbeDoublesProgressing=nil;s.host.__cbeDoublesProgressing=nil
-  s.screen.phase='cbe_doubles';s.lastTime=now()
+  s.screen.phase='cbe_doubles'
   -- Do not replay the A/B edge which dismissed the final native dialog as a
   -- doubles command. The normal edge detector rearms after the button lifts.
   local input=s.screen.game.input
@@ -356,8 +386,11 @@ function D.fail(s,err)
 end
 function D.update(s,dt)
   if s.handoff or s.progressing then return D.rewardStep(s) end
-  local t=now()
-  if t then dt=math.max(0,math.min(.1,t-(s.lastTime or t)));s.lastTime=t end
+  -- This wrapper is called from the engine fixed step. Never replace that dt with
+  -- wall time: at 4X/10X several logic ticks occur before one render, and a wall
+  -- clock made all but the first tick effectively zero, stalling doubles queues,
+  -- sendouts and animations while native battle logic raced ahead.
+  dt=math.max(0,math.min(.1,tonumber(dt) or 0))
   local input=s.screen.game.input;local pressed={}
   for _,key in ipairs({'up','down','left','right','a','b','start','select'}) do
     local down=input and type(input.isDown)=='function' and input:isDown(key) or false
@@ -367,6 +400,39 @@ function D.update(s,dt)
   end
   if s.core.phase=='fault' then
     if pressed.b then D.abort(s) end
+    return true
+  end
+
+  -- Prepare all active 3D bodies BEFORE Core starts the opening send queue.
+  -- The previous 4/4 invariant was enforced inside each send event, which could
+  -- deadlock on the opening text when the missing model depended on the external
+  -- cooperative worker. Pump that worker here, inside the same update owner that
+  -- is waiting for readiness, so Gen I and Gen II cannot starve themselves.
+  if s.actorPreflight and V.DoublesPresenter and type(V.DoublesPresenter.prepareActive)=='function' then
+    local cert=V.DoublesPresenter.prepareActive(s,1)
+    if not cert.ready and V.PokemonActors and type(V.PokemonActors.pumpBattlePrewarm)=='function' then
+      local game=s.screen and s.screen.game
+      local frameOwns=V.FrameWork and type(V.FrameWork.active)=='function' and V.FrameWork.active(game)
+      -- The normal Game.update wrapper drains ONE slice after all speed-scaled
+      -- logic ticks. Pumping 6ms on each preflight tick multiplied buffering at
+      -- high battle speeds. Stripped/legacy hosts still own a local progress path.
+      if not frameOwns then
+        pcall(V.PokemonActors.pumpBattlePrewarm,3)
+        cert=V.DoublesPresenter.prepareActive(s,1)
+      end
+    end
+    s.modelReadiness=cert;s.actorPreflightAge=(tonumber(s.actorPreflightAge) or 0)+dt
+    if not cert.ready then return true end
+    s.actorPreflight=nil;s.actorPreflightAge=nil
+  end
+  -- Belt-and-suspenders guard around the per-send presentationPending contract.
+  -- A future queue/order regression must still never make the command phase
+  -- interactive with only three of four required actors.  This applies to both
+  -- Gen I and Gen II because the doubles Core slot contract is generation-neutral.
+  if s.core.phase=='command' and V.DoublesPresenter and type(V.DoublesPresenter.activeReady)=='function'
+      and not V.DoublesPresenter.activeReady(s) then
+    if type(V.DoublesPresenter.update)=='function' then V.DoublesPresenter.update(s,dt) end
+    s.modelReadiness=V.DoublesPresenter.readiness and V.DoublesPresenter.readiness(s) or {ready=false}
     return true
   end
   local success,err=pcall(function()
@@ -392,14 +458,34 @@ D.service={version=1,format='double',experimental=false,snapshotOptionsVersion=1
   snapshot=function(value,options)
     local s=D.combat(value);if not s then return nil end
     D.snapshotRequests=(D.snapshotRequests or 0)+1
-    return s.core:snapshot(options)
+    local snap=s.core:snapshot(options)
+    if V.DoublesPresenter and type(V.DoublesPresenter.readiness)=='function' then
+      local readiness=V.DoublesPresenter.readiness(s);s.modelReadiness=readiness;snap.modelReadiness=readiness
+      -- Snapshot-only phase masking keeps the command panel off screen if an
+      -- unexpected queue transition reaches command before the actor certificate.
+      -- Core itself is left untouched and Runtime above continues retrying actors.
+      if (s.actorPreflight or snap.phase=='command') and not readiness.ready then
+        snap.phase='present';snap.commandSlot=nil
+        local miss=readiness.missing and readiness.missing[1]
+        snap.message='Preparing battle models'..(miss and (' / '..tostring(miss.slot)) or '')..'...'
+      end
+    end
+    return snap
   end,
   submit=function(request)
     local s=D.combat();if not s then return false,'No active doubles encounter' end
+    if s.core.phase=='command' and V.DoublesPresenter and type(V.DoublesPresenter.activeReady)=='function'
+        and not V.DoublesPresenter.activeReady(s) then
+      return false,'Battle models are still preparing'
+    end
     return s.core:submit(request)
   end,
-  status=function() local s=D.session();local fx=V.DoublesMovePresentation;return {active=s~=nil,battleId=s and s.core.id,phase=s and s.core.phase,lastSkip=D.lastSkip,
+  status=function() local s=D.session();local fx=V.DoublesMovePresentation;local readiness=s and V.DoublesPresenter and V.DoublesPresenter.readiness and V.DoublesPresenter.readiness(s);return {active=s~=nil,battleId=s and s.core.id,phase=s and s.core.phase,lastSkip=D.lastSkip,
     inputSnapshots=D.inputSnapshots or 0,snapshotRequests=D.snapshotRequests or 0,
+    modelReadiness=readiness,
+    targetDiagnostics=s and s.core and type(s.core.targetDiagnostics)=='function' and s.core:targetDiagnostics() or nil,
+    lastTargetDiagnostics=not s and D.lastTargetDiagnostics and clone(D.lastTargetDiagnostics) or nil,
+    presentationError=s and s.presentationError,presentationWarning=s and s.presentationWarning,
     moveFX=fx and {starts=fx.starts,sourceStarts=fx.sourceStarts,nativeAudioFallbacks=fx.nativeAudioFallbacks,lastError=fx.lastError}} end,
   abort=function(request)
     local s=D.combat();if not s then return false,'No doubles battle' end
@@ -420,7 +506,7 @@ function D.install()
     Runtime.__cbeDoublesEmitGuard=true
   end
   local generation=V.GenerationCompat.current()
-  local class=req(generation==2 and 'src.ui.gen2.BattleState' or 'src.battle.BattleState')
+  local class=req(generation==2 and 'src.ui.battle.BattleState' or 'src.battle.BattleState')
   local old=assert(class.update,'Native battle update is unavailable')
   class.update=function(screen,dt,...)
     local s=D.byState[screen] or D.tryBegin(screen,generation)
@@ -429,7 +515,6 @@ function D.install()
         -- Native dialogs/stat boxes/learning run, but native combat submission
         -- cannot. The arena presenter keeps its four independent actor handles.
         if s.progressing and V.DoublesPresenter then V.DoublesPresenter.update(s,dt) end
-        s.lastTime=now()
         local ok,handled=pcall(D.rewardStep,s)
         if not ok then D.fail(s,handled);return end
         if handled then return end

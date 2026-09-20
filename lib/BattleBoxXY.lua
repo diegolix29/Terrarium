@@ -107,7 +107,9 @@ BattleBoxXY.MENU_FRAC = 0.42     -- how much of the box's width the buttons take
 local BattleHudXY = V.require("BattleHudXY")
 
 function BattleBoxXY.available()
-  return BattleBoxXY.ENABLED and BattleHudXY.available()
+  -- BattleBoxXY should work independently of BattleHudXY art assets
+  -- It can hide the native UI even if custom replacement UI isn't available
+  return BattleBoxXY.ENABLED
 end
 
 -- Which phases this file actually DRAWS.
@@ -133,6 +135,8 @@ function BattleBoxXY.covers(battle)
   if battle and battle.stadiumTrainerPortraitToken then
     return false -- Let external mod handle the UI
   end
+  -- Always cover the battle UI for supported phases
+  -- This ensures the native fight box is hidden even if custom UI isn't drawn
   return BattleBoxXY.PHASES[battle.phase] and true or false
 end
 
@@ -259,6 +263,11 @@ function BattleBoxXY.draw(battle, rect)
   if not (rect and BattleBoxXY.covers(battle)) then return false end
   local x, y, w, h = rect[1], rect[2], rect[3], rect[4]
   if not (w and h) or w < 8 or h < 8 then return false end
+
+  -- If BattleHudXY art isn't available, just hide the native UI without drawing replacement
+  if not BattleHudXY.available() then
+    return true -- Still return true to indicate we've handled the suppression
+  end
 
   local menuUp = (battle.phase == "menu")
   local pad = h * BattleBoxXY.PAD

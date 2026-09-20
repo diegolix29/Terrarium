@@ -20,6 +20,7 @@ local function prefs(game)
       doubleBattlesEnabled=true,abilitiesEnabled=true,freeLookEnabled=true,
       autoProgressEnabled=true,bossIntroEnabled=false,battleSoundsEnabled=true,
       wildSpawnMode="mixed",
+      wildEncountersEnabled=true,trainerEncountersEnabled=true,gymEncountersEnabled=true,eliteFourEncountersEnabled=true,
     }
   end
   local p=game.save.colosseumBattle
@@ -46,6 +47,15 @@ local function prefs(game)
   if p.freeLookEnabled==nil then p.freeLookEnabled=true end
   if p.autoProgressEnabled==nil then p.autoProgressEnabled=true end
   if p.wildSpawnMode~="mixed" and p.wildSpawnMode~="new_only" then p.wildSpawnMode="mixed" end
+  -- Encounter type toggles for colosseum arenas
+  if p.wildEncountersEnabled==nil then p.wildEncountersEnabled=true end
+  p.wildEncountersEnabled=p.wildEncountersEnabled and true or false
+  if p.trainerEncountersEnabled==nil then p.trainerEncountersEnabled=true end
+  p.trainerEncountersEnabled=p.trainerEncountersEnabled and true or false
+  if p.gymEncountersEnabled==nil then p.gymEncountersEnabled=true end
+  p.gymEncountersEnabled=p.gymEncountersEnabled and true or false
+  if p.eliteFourEncountersEnabled==nil then p.eliteFourEncountersEnabled=true end
+  p.eliteFourEncountersEnabled=p.eliteFourEncountersEnabled and true or false
   local legacy=p.sprites
   if p.playerModel==nil then
     p.playerModel=(p.playerTrainerModel==false or legacy=="off") and "off" or "red"
@@ -124,6 +134,10 @@ local function openBattleMenu(game,returnId,returnParent)
   local freeLookToggle={keepOpen=true}
   local soundsToggle={keepOpen=true}
   local wildSpawnRow={keepOpen=true}
+  local wildEncountersToggle={keepOpen=true}
+  local trainerEncountersToggle={keepOpen=true}
+  local gymEncountersToggle={keepOpen=true}
+  local eliteFourEncountersToggle={keepOpen=true}
   local wildSpawnStatusRow={keepOpen=true}
   local audioQualityRow={keepOpen=true}
   local musicRow={keepOpen=true}
@@ -146,6 +160,10 @@ local function openBattleMenu(game,returnId,returnParent)
     doublesToggle.label="DOUBLE BATTLES  "..(p.doubleBattlesEnabled and "ON" or "OFF")
     abilitiesToggle.label="ABILITIES  "..(p.abilitiesEnabled and "ON" or "OFF")
     wildSpawnRow.label="WILD SPAWNS  "..(p.wildSpawnMode=="new_only" and "COLOSSEUMDEX ONLY" or "50/50 MIXED")
+    wildEncountersToggle.label="WILD BATTLES  "..(p.wildEncountersEnabled and "ON" or "OFF")
+    trainerEncountersToggle.label="TRAINER BATTLES  "..(p.trainerEncountersEnabled and "ON" or "OFF")
+    gymEncountersToggle.label="GYM BATTLES  "..(p.gymEncountersEnabled and "ON" or "OFF")
+    eliteFourEncountersToggle.label="ELITE FOUR  "..(p.eliteFourEncountersEnabled and "ON" or "OFF")
     local ws=S.wildSpawnStatus()
     wildSpawnStatusRow.label="SPAWN STATUS  "..(ws.active and "ACTIVE" or "UNAVAILABLE")
     local musicLabel=(Music and Music.themeLabel and Music.themeLabel(game,p.music)) or tostring(p.music):upper()
@@ -240,6 +258,22 @@ local function openBattleMenu(game,returnId,returnParent)
   end
   wildSpawnRow.onSelect=function()
     p.wildSpawnMode=(p.wildSpawnMode=="new_only") and "mixed" or "new_only"
+    refresh()
+  end
+  wildEncountersToggle.onSelect=function()
+    p.wildEncountersEnabled=not p.wildEncountersEnabled
+    refresh()
+  end
+  trainerEncountersToggle.onSelect=function()
+    p.trainerEncountersEnabled=not p.trainerEncountersEnabled
+    refresh()
+  end
+  gymEncountersToggle.onSelect=function()
+    p.gymEncountersEnabled=not p.gymEncountersEnabled
+    refresh()
+  end
+  eliteFourEncountersToggle.onSelect=function()
+    p.eliteFourEncountersEnabled=not p.eliteFourEncountersEnabled
     refresh()
   end
   musicRow.onSelect=function()
@@ -458,11 +492,11 @@ local function openBattleMenu(game,returnId,returnParent)
   refresh()
   -- Trainer presentation is intentionally three independent ownership rows:
   -- player Red, ordinary/special enemy trainers, and the Kanto rival substitute.
-  local mainRows={environmentToggle,cameraToggle,pokemonModelsToggle,doublesToggle,abilitiesToggle,wildSpawnRow,wildSpawnStatusRow,autoProgressToggle,freeLookToggle,bossIntroToggle,musicRow,soundsToggle,audioQualityRow,arenaRow,playerTrainerRow,enemyTrainerRow,rivalRow,hardCacheRow,cacheRow,back}
-  menu=Menu.new(game,mainRows,{tx=1,ty=2,tw=24,maxVisible=10,onCancel=function() reopen(game,returnId,returnParent) end})
+  local mainRows={environmentToggle,cameraToggle,pokemonModelsToggle,doublesToggle,abilitiesToggle,wildSpawnRow,wildSpawnStatusRow,wildEncountersToggle,trainerEncountersToggle,gymEncountersToggle,eliteFourEncountersToggle,autoProgressToggle,freeLookToggle,bossIntroToggle,musicRow,soundsToggle,audioQualityRow,arenaRow,playerTrainerRow,enemyTrainerRow,rivalRow,hardCacheRow,cacheRow,back}
+  menu=Menu.new(game,mainRows,{tx=1,ty=2,tw=24,maxVisible=12,onCancel=function() reopen(game,returnId,returnParent) end})
   menu.screenId="CbeBattleSettings"
   if BattleMenuUI and BattleMenuUI.mark then
-    BattleMenuUI.mark(menu,"COLOSSEUM BATTLE",mainRows,10,"ENVIRONMENT / CAMERA / POKEMON / AUDIO / TRAINERS / ROM SOURCE")
+    BattleMenuUI.mark(menu,"COLOSSEUM BATTLE",mainRows,12,"ENVIRONMENT / CAMERA / POKEMON / AUDIO / TRAINERS / ROM SOURCE")
   end
   game.stack:push(menu)
 end
@@ -505,12 +539,17 @@ function S.wildSpawnMode(game) return prefs(game or (modRef and modRef.game)).wi
 function S.setCameraEnabled(game,value)
   local p=prefs(game or (modRef and modRef.game)); p.cameraEnabled=value~=false; return p.cameraEnabled
 end
+function S.wildEncountersEnabled(game) return prefs(game or (modRef and modRef.game)).wildEncountersEnabled~=false end
+function S.trainerEncountersEnabled(game) return prefs(game or (modRef and modRef.game)).trainerEncountersEnabled~=false end
+function S.gymEncountersEnabled(game) return prefs(game or (modRef and modRef.game)).gymEncountersEnabled~=false end
+function S.eliteFourEncountersEnabled(game) return prefs(game or (modRef and modRef.game)).eliteFourEncountersEnabled~=false end
 function S.status(game)
   local p=prefs(game or (modRef and modRef.game))
   return {
     installed=installed,arenasEnabled=p.arenasEnabled,cameraEnabled=p.cameraEnabled,pokemonModelsEnabled=p.pokemonModelsEnabled,
     battleSoundsEnabled=p.battleSoundsEnabled,freeLookEnabled=p.freeLookEnabled,autoProgressEnabled=p.autoProgressEnabled,bossIntroEnabled=p.bossIntroEnabled,doubleBattlesEnabled=p.doubleBattlesEnabled,
     abilitiesEnabled=p.abilitiesEnabled,wildSpawnMode=p.wildSpawnMode,wildSpawnRuntime=S.wildSpawnStatus(),
+    wildEncountersEnabled=p.wildEncountersEnabled,trainerEncountersEnabled=p.trainerEncountersEnabled,gymEncountersEnabled=p.gymEncountersEnabled,eliteFourEncountersEnabled=p.eliteFourEncountersEnabled,
     music=p.music,musicLabel=Music and Music.themeLabel and Music.themeLabel(game,p.music),
     arena=p.arena,playerModel=p.playerModel,enemyTrainerModel=p.enemyTrainerModel,rivalModel=p.rivalModel,
     playerTrainerModel=p.playerTrainerModel,enemyTrainerModels=p.enemyTrainerModels,

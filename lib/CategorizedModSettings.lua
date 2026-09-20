@@ -50,11 +50,9 @@ local CATEGORIES = {
   },
   {
     id = "performance", label = "PERFORMANCE / GRAPHICS",
-    description = "PC-style preset plus resolution, shadows, reflections, draw distance and streaming budgets.",
+    description = "Resolution, shadows, draw distance and streaming budgets.",
     keys = {
-      performancePreset=true, frameRateLimit=true, graphicsResolution=true, graphicsShadows=true,
-      graphicsReflections=true, graphicsDrawDistance=true,
-      graphicsKantoRadius=true, graphicsBuildRate=true,
+      renderScale=true, shadowQuality=true, drawDistance=true,
     },
   },
   {

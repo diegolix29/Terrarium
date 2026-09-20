@@ -277,6 +277,13 @@ function A.idle(id,age,kind,actionAge,strength,side)
   local idleArm=(math.sin(age*.54+.8+phase)*.010+breath*.018)*live*idle
   local perf=A.motion(id,kind,actionAge,strength,side)
   local damp=kind and .18 or 1.0
+
+  -- Debug: log idle animation parameters (throttled to once per second)
+  if math.floor(age) > (A._lastIdleLogAge or -999) then
+    A._lastIdleLogAge = math.floor(age)
+    print("[TrainerPerformance.idle] id:", id, "age:", age, "kind:", kind, "breath:", breath, "look:", look, "bob:", bob, "sway:", sway, "lean:", lean)
+  end
+
   local out={breath=breath,look=look*damp+(perf.look or 0),arm=perf.arm or 0,shift=perf.shift or 0,settle=settle*damp+(perf.settle or 0),
     lean=lean*damp+(perf.lean or 0),turn=turn*damp+(perf.turn or 0),bob=bob*damp+(perf.bob or 0),sway=sway*damp+(perf.sway or 0),
     command=perf.command or 0,brace=perf.brace or 0,forward=windForward*damp+(perf.forward or 0),idleArm=idleArm*damp,

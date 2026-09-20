@@ -16,7 +16,7 @@ local gen1Rules={WEATHER_TURNS=5,
 }
 local function weatherRules(generation)
   if generation==1 then return gen1Rules end
-  return V.Gen2Effects or req('src.battle.gen2.Effects')
+  return V.Gen2Effects or req('src.battle.MoveEffects')
 end
 
 local function stateFor(battle, generation)

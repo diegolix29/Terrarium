@@ -115,7 +115,7 @@ function L.install(mod,generation)
     installed[1]=true
   end
   if generation~=1 and not installed[2] then
-    local B2=req('src.battle.gen2.Battle')
+    local B2=req('src.battle.BattleState')
     local take=B2.takeTurn
     B2.takeTurn=function(self,...)
       if valid(self) then L.ensure(self,2,true) end

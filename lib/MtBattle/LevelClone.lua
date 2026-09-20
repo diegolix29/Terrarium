@@ -200,7 +200,7 @@ function LC.playerParty(game,generation,level,data,rosterSource,rosterSnapshot)
       end
       local dvs=copyDVs(locked.dvs) or rentalDVs(locked.species,entry.index or i)
       if generation==2 then
-        local Mon=req("src.battle.gen2.Mon")
+        local Mon=req("src.pokemon.Pokemon")
         clone=Mon.new(challengeData,locked.species,level,{dvs=dvs,moves=lockedMoveRows(locked)})
       elseif BattleData and type(BattleData.newGen1Mon)=="function" then
         clone=BattleData.newGen1Mon(challengeData,locked.species,level,dvs,lockedMoveRows(locked))

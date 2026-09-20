@@ -13,7 +13,7 @@ local Abilities=V.Abilities or error("AbilityEffectsGen2 requires Abilities to l
 local Weather=V.AbilityWeather or error("AbilityEffectsGen2 requires AbilityWeather to load first")
 local M={}
 local installed=false
-local Effects -- cached at install time: src.battle.gen2.Effects
+local Effects -- cached at install time: src.battle.MoveEffects
 
 
 local function enabled(battle)
@@ -546,9 +546,9 @@ end
 function M.installGlobal(ctx)
   if installed then return true end
   local req2=(ctx and ctx.engineRequire) or req
-  local Battle=(ctx and ctx.Battle) or req2('src.battle.gen2.Battle')
-  local Damage=(ctx and ctx.Damage) or req2('src.battle.gen2.Damage')
-  Effects=(ctx and ctx.Effects) or req2('src.battle.gen2.Effects')
+  local Battle=(ctx and ctx.Battle) or req2('src.battle.BattleState')
+  local Damage=(ctx and ctx.Damage) or req2('src.battle.Damage')
+  Effects=(ctx and ctx.Effects) or req2('src.battle.MoveEffects')
   installDealDamage(Battle)
   installAccuracy(Battle,Damage)
   installStatus(Battle)

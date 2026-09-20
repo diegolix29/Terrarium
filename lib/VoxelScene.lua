@@ -925,27 +925,30 @@ end
 local HALF_PI = math.pi / 2
 local cos, sin = math.cos, math.sin
 local function billboardMatrix(px, py, y, mirror, yaw, spriteWidth, spriteHeight)
-  local halfW = (spriteWidth or 16) / 2
-  local cx = px + halfW
-  local cz = py + (spriteHeight or 16) / 2
+  local half = (spriteWidth or 16) / 2
+  local anchor = half -- Use center of sprite as rotation anchor
   local b = FirstPerson.cardBlend()
-
-  local a = 0
-  if b > 0 then a = FirstPerson.cardYaw(cx, cz) * b
-  elseif yaw and yaw ~= 0 then a = yaw end
-
-  local ca, sa = cos(a), sin(a)
-  local pitch = (leanAngle() - HALF_PI) * (1 - b)
-  local cp, sp = cos(pitch), sin(pitch)
-  local sx = mirror and -1 or 1
-  local m1 = ca * sx          -- column 1, which is also what T2 shifts by
-  local m9 = -sa * sx
-  return {
-    m1,  sa * sp,  sa * cp,  cx - m1 * halfW,
-    0,   cp,       -sp,      y,
-    m9,  ca * sp,  ca * cp,  cz - m9 * halfW,
-    0,   0,        0,        1,
-  }
+  
+  -- Translate to anchor point (center of sprite)
+  local m = Mat4.translate(px + anchor, y, py + anchor)
+  
+  -- Rotate around anchor point for proper centering during yaw
+  if b > 0 then
+    m = Mat4.mul(m, Mat4.rotateY(FirstPerson.cardYaw(px + anchor, py + anchor) * b))
+  elseif yaw and yaw ~= 0 then
+    m = Mat4.mul(m, Mat4.rotateY(yaw))
+  end
+  
+  -- Apply lean pitch
+  m = Mat4.mul(m, Mat4.rotateX((leanAngle() - HALF_PI) * (1 - b)))
+  
+  -- Apply mirror if needed
+  if mirror then 
+    m = Mat4.mul(m, Mat4.scale(-1, 1, 1)) 
+  end
+  
+  -- Translate back to local space
+  return Mat4.mul(m, Mat4.translate(-half, 0, 0))
 end
 
 local function billboardPull()
@@ -1283,6 +1286,14 @@ local lastLiveKey = nil
 function VoxelScene.prefetch(state)
   local Voxel = V.require("VoxelState")
 
+  -- Apply draw distance filtering to state neighbors
+  state = DrawDistance.apply(state)
+
+  -- Ensure neighbors is always a table
+  if not state.neighbors then
+    state.neighbors = {}
+  end
+
   -- The live set is the current map plus its rendered neighbours. When
   -- it changes, everything outside it (and the previous set, which
   -- ChunkMesher retains so stepping into a house keeps the town warm)
@@ -1291,24 +1302,8 @@ function VoxelScene.prefetch(state)
   -- ever visited.
   local liveKey = state.map.id
   local live = { [state.map.id] = true }
-  
-  -- Limit neighbors based on DrawDistance setting for performance
-  local neighborLimit = DrawDistance.neighborLimit()
-  local limitedNeighbors = {}
-  
-  -- If neighborLimit is nil (OFF setting), use all neighbors (original behavior)
-  if neighborLimit == nil then
-    limitedNeighbors = state.neighbors or {}
-  else
-    -- Apply neighbor limiting
-    for i, nb in ipairs(state.neighbors or {}) do
-      if i <= neighborLimit then
-        limitedNeighbors[#limitedNeighbors + 1] = nb
-      end
-    end
-  end
-  
-  for _, nb in ipairs(limitedNeighbors) do
+
+  for _, nb in ipairs(state.neighbors or {}) do
     live[nb.map.id] = true
     liveKey = liveKey .. "|" .. nb.map.id
   end
@@ -1324,7 +1319,7 @@ function VoxelScene.prefetch(state)
   -- masks: where connected neighbour BODIES sit, so the border ring is
   -- suppressed under them (see runGeometry)
   local masks = {}
-  for _, nb in ipairs(limitedNeighbors) do
+  for _, nb in ipairs(state.neighbors or {}) do
     masks[#masks + 1] = { nb.ox, nb.oy,
                           nb.ox + nb.map.def.width * 32,
                           nb.oy + nb.map.def.height * 32 }
@@ -1370,21 +1365,19 @@ function VoxelScene.prefetch(state)
   
   local nbMesh = {}
   for i, nb in ipairs(state.neighbors or {}) do
-    if neighborLimit == nil or i <= neighborLimit then
-      -- A neighbour holding NEITHER variant is a gap in the world: nothing
-      -- is drawn at its offset and the sky clear behind the scene shows
-      -- through it. One holding the other variant is only waiting on an
-      -- upgrade -- its ground is covered either way -- so it stays idle and
-      -- does not compete with a map that is showing sky. The difference is
-      -- exactly the one the priority tier exists for, and it is answered
-      -- here rather than in ChunkMesher because this is the loop that knows
-      -- what is about to be drawn.
+    -- A neighbour holding NEITHER variant is a gap in the world: nothing
+    -- is drawn at its offset and the sky clear behind the scene shows
+    -- through it. One holding the other variant is only waiting on an
+    -- upgrade -- its ground is covered either way -- so it stays idle and
+    -- does not compete with a map that is showing sky. The difference is
+    -- exactly the one the priority tier exists for, and it is answered
+    -- here rather than in ChunkMesher because this is the loop that knows
+    -- what is about to be drawn.
     local held = ChunkMesher.peek(nb.map, true)
                  or ChunkMesher.peek(nb.map, false)
     nbMesh[i] = ChunkMesher.request(nb.map, true, nil,
                                     (not held) and ChunkMesher.HOLE or nil)
                 or ChunkMesher.peek(nb.map, false)
-  end
   end
   
   Voxel.ready = terrain ~= nil
@@ -1728,7 +1721,7 @@ end
 -- left out on purpose: thousands of tufts would cast a speckle no bigger
 -- than the pixels it lands on, at the cost of the mesh being drawn twice.
 local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
-                           atlasFor, battleCards, battleToken, yaw, neighborLimit)
+                           atlasFor, battleCards, battleToken, yaw)
   if not ShadowMap.available() then return end
   -- computed BEFORE the signature, because the signature is filtered by it
   -- (see castsInto).  Pure arithmetic -- no geometry is touched here -- so
@@ -1752,12 +1745,10 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
 
   ShadowMap.drawGroup(terrain, atlasFor(state.map), nil, box)
   for i, nb in ipairs(casters) do
-    if neighborLimit == nil or i <= neighborLimit then
-      if nbMesh[i] then
-        ShadowMap.drawGroup(nbMesh[i], atlasFor(nb.map),
-                            Mat4.translate(nb.ox, 0, nb.oy),
-                            shifted(box, nb.ox, nb.oy))
-      end
+    if nbMesh[i] then
+      ShadowMap.drawGroup(nbMesh[i], atlasFor(nb.map),
+                          Mat4.translate(nb.ox, 0, nb.oy),
+                          shifted(box, nb.ox, nb.oy))
     end
   end
 
@@ -1771,10 +1762,8 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
     ShadowMap.draw(ChunkMesher.flowers(state.map), atlasFor(state.map),
                    ShadowMap.snug(nil))
     for i, nb in ipairs(casters) do
-      if neighborLimit == nil or i <= neighborLimit then
-        ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
-                       ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
-      end
+      ShadowMap.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map),
+                     ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)))
     end
   end
 
@@ -2065,11 +2054,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   if FirstPerson.shadowCenter then
      shCx, shCy = FirstPerson.shadowCenter(cx, cy, vh)
   end
-  local neighborLimit = DrawDistance.neighborLimit()
-  
+
   local _p = phase('shadow map')
   castShadows(state, terrain, nbMesh, posed, shCx, shCy, vw, vh, atlasFor,
-              battleCards, battleToken, yaw, neighborLimit)
+              battleCards, battleToken, yaw)
   if _p then _p() end
 
   -- Everything between beginScene and endScene, as one function: the flat
@@ -2134,7 +2122,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     -- about which neighbours are in this frame (see ViewBox.showsMap)
     local _p = phase('terrain (neighbours)')
     for i, nb in ipairs(state.neighbors or {}) do
-      if (not neighborLimit or i <= neighborLimit) and ViewBox.showsMap(nb) then
+      if ViewBox.showsMap(nb) then
         Voxel3D.drawGroup(nbMesh[i], atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), nil, nil, shifted(box, nb.ox, nb.oy))
       end
     end
@@ -2281,7 +2269,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       Voxel3D.draw(mesh, atlasFor(state.map), model, figPull, ShadowMap.snug(caster))
     end)
     for i, nb in ipairs(state.neighbors or {}) do
-      if (not neighborLimit or i <= neighborLimit) and ViewBox.showsMap(nb) then
+      if ViewBox.showsMap(nb) then
         eachFigure(nb.map, nb.ox, nb.oy, function(mesh, model, caster)
           Voxel3D.draw(mesh, atlasFor(nb.map), model, figPull, ShadowMap.snug(caster))
         end)
@@ -2405,11 +2393,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     if ChunkMesher.grass then
       Voxel3D.draw(ChunkMesher.grass(state.map), grassTex, nil, pull, nil, sway)
       for i, nb in ipairs(state.neighbors or {}) do
-        if neighborLimit == nil or i <= neighborLimit then
-          local ntex = grassTex
-          if not Grass3D then ntex = atlasFor(nb.map) end
-          Voxel3D.draw(ChunkMesher.grass(nb.map), ntex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, sway)
-        end
+        local ntex = grassTex
+        if not Grass3D then ntex = atlasFor(nb.map) end
+        Voxel3D.draw(ChunkMesher.grass(nb.map), ntex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, sway)
       end
     end
 
@@ -2419,11 +2405,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       Voxel3D.draw(decorMesh, grassTex, nil, pull, nil, 0)  -- No sway for decorative grass
     end
     for i, nb in ipairs(state.neighbors or {}) do
-      if neighborLimit == nil or i <= neighborLimit then
-        local nbDecor = ChunkMesher.decor and ChunkMesher.decor(nb.map)
-        if nbDecor then
-          Voxel3D.draw(nbDecor, grassTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
-        end
+      local nbDecor = ChunkMesher.decor and ChunkMesher.decor(nb.map)
+      if nbDecor then
+        Voxel3D.draw(nbDecor, grassTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
       end
     end
 
@@ -2434,12 +2418,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       Voxel3D.draw(roadMesh, roadTex, nil, pull, nil, 0)  -- No sway for road
     end
     for i, nb in ipairs(state.neighbors or {}) do
-      if neighborLimit == nil or i <= neighborLimit then
-        local nbRoad = ChunkMesher.road and ChunkMesher.road(nb.map)
-        if nbRoad then
-          local roadTex = Grass3D and Grass3D.roadTexture() or nil
-          Voxel3D.draw(nbRoad, roadTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
-        end
+      local nbRoad = ChunkMesher.road and ChunkMesher.road(nb.map)
+      if nbRoad then
+        local roadTex = Grass3D and Grass3D.roadTexture() or nil
+        Voxel3D.draw(nbRoad, roadTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
       end
     end
 
@@ -2450,12 +2432,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
       Voxel3D.draw(groundMesh, groundTex, nil, pull, nil, 0)  -- No sway for ground
     end
     for i, nb in ipairs(state.neighbors or {}) do
-      if neighborLimit == nil or i <= neighborLimit then
-        local nbGround = ChunkMesher.ground and ChunkMesher.ground(nb.map)
-        if nbGround then
-          local groundTex = Grass3D and Grass3D.groundTexture() or nil
-          Voxel3D.draw(nbGround, groundTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
-        end
+      local nbGround = ChunkMesher.ground and ChunkMesher.ground(nb.map)
+      if nbGround then
+        local groundTex = Grass3D and Grass3D.groundTexture() or nil
+        Voxel3D.draw(nbGround, groundTex, Mat4.translate(nb.ox, 0, nb.oy), pull, nil, 0)
       end
     end
 
@@ -2490,10 +2470,8 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     if ChunkMesher and ChunkMesher.flowers then
       Voxel3D.draw(ChunkMesher.flowers(state.map), atlasFor(state.map), nil, fpull, ShadowMap.snug(nil), fsway)
       for i, nb in ipairs(state.neighbors or {}) do
-        if neighborLimit == nil or i <= neighborLimit then
-          if ViewBox.showsMap(nb) then
-            Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), fpull, ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)), fsway)
-          end
+        if ViewBox.showsMap(nb) then
+          Voxel3D.draw(ChunkMesher.flowers(nb.map), atlasFor(nb.map), Mat4.translate(nb.ox, 0, nb.oy), fpull, ShadowMap.snug(Mat4.translate(nb.ox, 0, nb.oy)), fsway)
         end
       end
     end

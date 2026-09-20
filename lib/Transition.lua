@@ -344,7 +344,7 @@ end
 
 local function patchGen2(mod)
   local req=(V and V.engineRequire) or require
-  local ok,BattleTransition=pcall(req,"src.ui.gen2.BattleTransition")
+  local ok,BattleTransition=pcall(req,"src.ui.battle.BattleTransition")
   if not ok or type(BattleTransition)~="table" or type(BattleTransition.new)~="function" then
     log(mod,"warn","Gen 2 Colosseum battle transition class unavailable; screen.pushed bridge remains active")
     return false

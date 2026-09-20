@@ -390,7 +390,7 @@ end
 
 function M.install()
   if state.installed then return true end
-  local ok, BattleState = pcall(require, "src.ui.gen2.BattleState")
+  local ok, BattleState = pcall(require, "src.ui.battle.BattleState")
   if not (ok and type(BattleState) == "table" and type(BattleState.animForMove) == "function") then
     return false, "Gold BattleState.animForMove unavailable"
   end

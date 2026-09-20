@@ -3050,7 +3050,8 @@ function A:available(ctx)
   local battle=ctx and ctx.battle
   local game=(ctx and ctx.game) or (battle and battle.game)
   if ArenaCatalog and ArenaCatalog.enabled and not ArenaCatalog.enabled(game) then return false end
-  local def=ArenaCatalog and ArenaCatalog.resolve and select(1,ArenaCatalog.resolve(game,battle)) or nil
+  local def,selected=ArenaCatalog and ArenaCatalog.resolve and ArenaCatalog.resolve(game,battle) or nil,nil
+  if selected=="encounter_disabled" then return false end
   if def and not cacheAvailable(def) then return false end
   return love and love.graphics and love.graphics.newCanvas and true or false
 end
@@ -3125,6 +3126,7 @@ function A:arena(ctx)
   local game=(ctx and ctx.game) or (battle and battle.game)
   local def,selected
   if ArenaCatalog and ArenaCatalog.resolve then def,selected=ArenaCatalog.resolve(game,battle) end
+  if selected=="encounter_disabled" then return nil end
   def=def or (ArenaCatalog and ArenaCatalog.definition and ArenaCatalog.definition("water")) or {id="water",cache="cache/M1_water_cache.lua",stageScale=0.25,stageYaw=0,sceneRadiusRaw=430,maxGroupSpanRaw=920,vertexRadiusRaw=415,camera={side=58,back=14,height=24,lookX=0,lookY=6,frameH=50},pokemon={player={0,14.5},enemy={0,-14.5}},figureScale=0.38}
   local arena=activateDefinition(ctx,def,selected)
   if arena then log(ctx,"info","arena acquire selected=%s resolved=%s cache=%s",tostring(selected),tostring(activeArenaId),tostring(def.cache)) end

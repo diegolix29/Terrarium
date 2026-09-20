@@ -54,13 +54,13 @@ local V = { mod = mod, path = mod.path }
 
 -- Compatibility shims for STADIUM2_IMPORTER dependencies
 -- Register these before other mods load so STADIUM2_IMPORTER can find them
-package.preload["src.core.gen2.Unown"] = function()
+package.preload["src.core.battle.Unown"] = function()
   local chunk, err = load(mod:read("lib/compat/gen2_unown.lua"), "@" .. mod.path .. "/lib/compat/gen2_unown.lua")
   if not chunk then error(("Failed to load Unown compat shim: %s"):format(tostring(err)), 0) end
   return chunk()
 end
 
-package.preload["src.ui.gen2.BattleAnimView"] = function()
+package.preload["src.ui.battle.BattleAnimView"] = function()
   local chunk, err = load(mod:read("lib/compat/gen2_battle_anim_view.lua"), "@" .. mod.path .. "/lib/compat/gen2_battle_anim_view.lua")
   if not chunk then error(("Failed to load BattleAnimView compat shim: %s"):format(tostring(err)), 0) end
   return chunk()
@@ -156,6 +156,11 @@ local DrawDistance = V.require("DrawDistance")
 local OverworldBattle = V.require("OverworldBattle")
 local WildRoamers = V.require("WildRoamers")
 local BattleExit = V.require("BattleExit")
+-- Battle UI hiding system for all generations
+local BattleBoxXY = V.require("BattleBoxXY")
+
+-- Make BattleBoxXY globally accessible for UIMain.lua
+_G.TerrariumBattleBoxXY = BattleBoxXY
 -- Stadium 2 support (Gen 2 Pokemon models)
 local okS2, Stadium2Setting = pcall(V.require, "Stadium2Setting")
 -- restored: shiny Pokemon (the "RBY virtual shiny" indicator), on always,
@@ -2454,18 +2459,16 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
     table.insert(out, mewtwoRow) 
   end
 
-  local okFollower, followerRow = pcall(function()
-    local StadiumInstall = V.require("StadiumInstall")
-    local Stadium2Install = V.require("Stadium2Install")
-    local ColosseumMon = V.require("ColosseumMon")
-    if StadiumInstall.available() or Stadium2Install.available()
-       or ColosseumMon.available(1, "normal") then
-      return V.require("PlayerModelPick").followerRow()
+  -- Character model row (for Colosseum trainer characters)
+  local okCharacter, characterRow = pcall(function()
+    local ColosseumTrainer = V.require("ColosseumTrainer")
+    if ColosseumTrainer.available("red") then
+      return V.require("CharacterModelPick").row()
     end
     return nil
   end)
-  if okFollower and followerRow and not rowExists(followerRow.id) then 
-    table.insert(out, followerRow) 
+  if okCharacter and characterRow and not rowExists(characterRow.id) then 
+    table.insert(out, characterRow) 
   end
 
   local okWilds, wildsRow = pcall(function()
@@ -2780,6 +2783,14 @@ QoL.install()
 Carry.install()
 -- Walk-on-ice when frozen, gated on Surf (Soul Badge + party knows SURF).
 if Water.installWalk then pcall(Water.installWalk) end
+
+-- ------- Battle UI hiding system
+--
+-- Install the BattleBoxXY system to hide original battle UI across all generations
+-- This wraps BattleState.drawTextArea to suppress the native fight box when appropriate
+if BattleBoxXY and BattleBoxXY.install then
+  pcall(function() BattleBoxXY.install() end)
+end
 
 -- ------- three more mercies on the same row
 --
@@ -3989,6 +4000,15 @@ local function initializeColosseumIntegration()
     if PokemonActors and PokemonActors.service then
       mod.exports.pokemonActorsOverworld = PokemonActors.service
       V.PokemonActors = PokemonActors
+    end
+
+    -- Publish the TrainerRoster catalog for OVERWORLD consumers (see
+    -- lib/ColosseumTrainer.lua, the same kind of thin bridge ColosseumMon
+    -- above is for PokemonActors). TrainerRoster.modelById is stateless
+    -- catalog lookup with no per-frame lifecycle, so the module itself can
+    -- be published directly rather than through a .service indirection.
+    if TrainerRoster then
+      mod.exports.trainerRosterOverworld = TrainerRoster
     end
 
     if CurrentSpriteModels and PokemonActors and not CurrentSpriteModels.__cbePokemonDebugWrapped then

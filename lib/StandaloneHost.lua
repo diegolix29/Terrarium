@@ -590,7 +590,7 @@ local function withoutGen2Field(view,battle,fn,fieldW,fieldH)
   fieldH=tonumber(fieldH) or 144
 
   local req=V.engineRequire or require
-  local okChrome,Chrome=pcall(req,"src.ui.gen2.Chrome")
+  local okChrome,Chrome=pcall(req,"src.ui.battle.Chrome")
   local chromeClear=okChrome and type(Chrome)=="table" and Chrome.clear or nil
   if type(chromeClear)=="function" then
     Chrome.clear=function()
@@ -598,7 +598,7 @@ local function withoutGen2Field(view,battle,fn,fieldW,fieldH)
       g.setColor(0,0,0,1)
     end
   end
-  local okAnim,AnimView=pcall(req,"src.ui.gen2.BattleAnimView")
+  local okAnim,AnimView=pcall(req,"src.ui.battle.BattleAnimView")
   local animFill=okAnim and type(AnimView)=="table" and AnimView.fillBackground or nil
   if type(animFill)=="function" then AnimView.fillBackground=function() end end
 

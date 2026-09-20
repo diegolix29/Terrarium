@@ -10,7 +10,14 @@ local battleItems={X_ATTACK=true,X_DEFEND=true,X_DEFENSE=true,X_SPEED=true,X_SPE
 local ppItems={ETHER=true,MAX_ETHER=true,ELIXER=true,MAX_ELIXER=true,MYSTERYBERRY=true}
 local fullMask={FULL_HEAL=true,FULL_RESTORE=true,HEAL_POWDER=true,MIRACLEBERRY=true}
 local function effects(a)return req(a.generation==2 and 'src.core.gen2.ItemEffects' or 'src.inventory.ItemEffects')end
-function I.save(a)return a.host.save or (a.host.game and a.host.game.save)end
+function I.save(a)
+ local host=a and a.host
+ -- Mt. Battle supplies a save-shaped proxy whose inventory is the temporary
+ -- Challenge Bag and whose party is the Level-50 clone roster. Prefer it over
+ -- the real save so battle items cannot consume the player's permanent bag.
+ if host and host.__cbeMtBattleItemSave then return host.__cbeMtBattleItemSave end
+ return host and (host.save or (host.game and host.game.save)) or nil
+end
 function I.classify(a,id)
  if type(id)~='string' or not (a.data.items and a.data.items[id]) then return nil end
  local E=effects(a)

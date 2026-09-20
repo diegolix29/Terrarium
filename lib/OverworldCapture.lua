@@ -298,7 +298,7 @@ local function addCaught(session, mon)
   local game, save = session.game, session.game and session.game.save
   if not (game and save and mon) then return false, "save unavailable" end
   local okBoxes, Boxes = pcall(require, "src.core.gen2.Boxes")
-  local okMon, Mon = pcall(require, "src.battle.gen2.Mon")
+  local okMon, Mon = pcall(require, "src.pokemon.Pokemon")
   if not (okBoxes and Boxes and okMon and Mon) then return false, "Gold storage unavailable" end
 
   Mon.stampOT(save, mon)
@@ -403,8 +403,8 @@ local function attemptCatch(session)
   local species = record and record.species
   local level = tonumber(record and record.level) or 5
   local def = data and data.pokemon and data.pokemon[species]
-  local okMon, Mon = pcall(require, "src.battle.gen2.Mon")
-  local okCatch, Catching = pcall(require, "src.battle.gen2.Catching")
+  local okMon, Mon = pcall(require, "src.pokemon.Pokemon")
+  local okCatch, Catching = pcall(require, "src.battle.Catching")
   if not (def and okMon and Mon and okCatch and Catching) then
     return false, 0, nil, "Gold catch data unavailable"
   end

@@ -62,7 +62,7 @@ local function behaviorCtx()
 end
 
 local Mon
-local function mon() Mon=Mon or (V.engineRequire or require)("src.battle.gen2.Mon");return Mon end
+local function mon() Mon=Mon or (V.engineRequire or require)("src.pokemon.Pokemon");return Mon end
 
 function G2.movePool(data,speciesDef,adapter)
   local seen,out={},{}

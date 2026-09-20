@@ -489,7 +489,7 @@ local function buildTransparentHudImage(path, original)
 end
 
 local function installTransparentHudTiles()
-  local okHud, BattleHud = pcall(require, "src.ui.gen2.BattleHud")
+  local okHud, BattleHud = pcall(require, "src.ui.battle.BattleHud")
   if not (okHud and type(BattleHud) == "table"
       and type(BattleHud.image) == "function") then
     return false
@@ -546,7 +546,7 @@ function M.install()
   -- applies to live-world battles and to classic battles using a picked image.
   -- Install this first so the engine HUD tiles are keyed before drawPanel.
   installTransparentHudTiles()
-  local okState, BattleState = pcall(require, "src.ui.gen2.BattleState")
+  local okState, BattleState = pcall(require, "src.ui.battle.BattleState")
   local okChrome, Chrome = pcall(require, "src.ui.gen2.Chrome")
   if not (okState and type(BattleState) == "table"
       and type(BattleState.drawPanel) == "function") then

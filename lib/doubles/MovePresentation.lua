@@ -32,6 +32,21 @@ local function scope(s,m,fn)
   if a and a.matrix then a:matrix(x,ctx.groundY or 0,z,dx,dz) end
  end
  local C,W,H=V.CurrentSpriteModels,V.WazaSequenceRuntime,V.WazaHandlers
+ -- Retail battleGridGetNormalisedScale scans every active Pokemon, not only the
+ -- attacker/target pair temporarily installed below.  Snapshot the four-slot
+ -- source selectors before withDoublesPair narrows CurrentSpriteModels.
+ ctx.cbeRetailScaleSelectors={};ctx.cbeRetailScaleSelectorsComplete=true
+ if C and type(C.retailScaleSelector)=="function" then
+  for _,id in ipairs({'player-left','player-right','enemy-left','enemy-right'})do
+   local slot=s.core.slots and s.core.slots[id]
+   if slot and slot.mon then
+    local rec=s.actors and s.actors[slot.battlerId]
+    local selector=rec and rec.actor and C:retailScaleSelector(rec.actor) or nil
+    if selector==nil then ctx.cbeRetailScaleSelectorsComplete=false
+    else ctx.cbeRetailScaleSelectors[#ctx.cbeRetailScaleSelectors+1]=selector end
+   end
+  end
+ else ctx.cbeRetailScaleSelectorsComplete=false end
  local world=m.world
  if not world then
   world={active={},particles={},models={},effects={},controllers={player={},enemy={}}};m.world=world
@@ -79,6 +94,19 @@ local function channel(e)
   sourceBattlerId=e.kind=='move' and e.battlerId or e.sourceBattlerId or e.battlerId,
   targetBattlerId=e.kind=='move' and (e.targetBattlers or {})[target] or e.battlerId,
   age=0,role=(e.kind=='damage' or e.kind=='reaction') and 'damage' or 'attack'}
+end
+local function hasSourceTransit(spec,moveId)
+ local C=V.CurrentSpriteModels
+ if not (type(spec)=='table' and C and C.particleTransitSpan) then return false end
+ for _,phase in ipairs(spec.wazaPhases or {})do
+  local name=tostring(phase.name or ''):lower()
+  if not name:match('^damage') and name~='status' then
+   for _,entry in ipairs(phase.entries or {})do
+    if entry.kind=='particle' and C:particleTransitSpan(moveId,'attack',entry)~=100 then return true end
+   end
+  end
+ end
+ return false
 end
 function M.begin(s,e)
  -- The queued bookkeeping record remains in order, but its body/FX/HP cue
@@ -138,7 +166,10 @@ local function start(s,m,a)
   if not timing or timing<=0 or timing/60>m.bodyDuration then timing=m.bodyDuration*60*.58;m.impactTimingFallback=true end
   m.impactTime=math.max(.08,timing/60)
   local id=tonumber(m.spec and m.spec.moveId)
-  m.awaitTransit=({[53]=true,[55]=true,[59]=true,[61]=true,[85]=true,[190]=true})[id] or false
+  -- Do not maintain a second move-id list in doubles. The source particle-entry
+  -- resolver already identifies the measured traveling core used by singles;
+  -- doubles waits for arrival iff the selected Waza bank actually contains one.
+  m.awaitTransit=hasSourceTransit(m.spec,id)
  end
 end
 local function updateChannel(s,m,dt)
@@ -161,7 +192,10 @@ local function updateChannel(s,m,dt)
      local data=s.screen and s.screen.game and s.screen.game.data
      local def=data and data.pokemon and data.pokemon[source.mon.species];dex=def and (def.dex or def.index or def.number)
     end
-    spec=V.WazaPhasePolicy.select(spec,{dex=dex,stage=m.event.stage or 'attack'})
+    local selectionMoveId=tonumber(m.event.move)
+      or (type(m.event.moveDef)=='table' and (tonumber(m.event.moveDef.index) or tonumber(m.event.moveDef.colosseumMoveId)))
+      or tonumber(spec.moveId)
+    spec=V.WazaPhasePolicy.select(spec,{moveId=selectionMoveId,dex=dex,stage=m.event.stage or 'attack'})
     m.spec=spec
    end
    local nativeSlot,sequenceKind
@@ -202,7 +236,12 @@ local function updateChannel(s,m,dt)
  end
 end
 local function readyForImpact(m)
- if not m.awaitTransit then return (m.chapterAge or 0)>=(m.impactTime or .5) end
+ local timingReady=(m.chapterAge or 0)>=(m.impactTime or .5)
+ if not m.awaitTransit then return timingReady end
+ -- Traveling effects must satisfy both pieces of source evidence: the Waza/PKX
+ -- authored impact boundary and visual arrival of the identified traveling core.
+ -- A fast particle must never pull damage/reaction ahead of its source chapter.
+ if not timingReady then return false end
  -- The known traveling cores report actual source-space particle positions.
  -- Join the receiver when the leading edge reaches its destination, rather
  -- than guessing that the end of the user's whole body clip is the hit time.
@@ -212,8 +251,10 @@ local function readyForImpact(m)
    local span=C:particleTransitSpan(m.spec and m.spec.moveId,'attack',fx.wazaEntry)
    if span~=100 and not fx.modelLinked then
     for _,p in ipairs(fx.vm and fx.vm.particles or {})do
-     if p.alive~=false and p.position and (tonumber(p.position[3]) or 0)>=span*.90 then
-      m.impactTimingSource='source-particle-arrival';return true
+     local progress=C.particleTransitProgress and C:particleTransitProgress(fx,p)
+     local arrived=(progress~=nil and progress>=.90) or (progress==nil and p.position and (tonumber(p.position[3]) or 0)>=span*.90)
+     if p.alive~=false and arrived then
+      m.impactTimingSource='source-waza+particle-arrival';return true
      end
     end
    end
@@ -249,6 +290,33 @@ function M.update(s,dt)
  end
  if m.impactStarted then m.impactAge=(m.impactAge or 0)+dt end
  if allDone and (m.impactsQueued or #(m.event.impacts or {})==0) then M.finish(s,true) end
+end
+-- Retail battleCameraStartWaza lets a Waza-owned camera replace the battle
+-- director while that source chapter is active. Doubles keeps each Waza chapter
+-- in an isolated playback world, so expose the newest active chapter's camera
+-- through the same scope. Source-driven procedural cameras use the guarded
+-- director path; only proven embedded frames bypass its safety/velocity limits.
+-- Keep provenance attached rather than discarding valid non-embedded cameras.
+function M.sourceCameraPose(s)
+ local m=s and s.movePresentation;local H=V.WazaHandlers
+ if not (m and s.context and H and type(H.cameraPose)=='function' and V.CurrentSpriteModels) then return nil end
+ local channels=m.channels or {m}
+ for i=#channels,1,-1 do
+  local track=channels[i]
+  if track and track.started and not track.done and track.world then
+   local ok,pose=pcall(scope,s,track,function(ctx)return H.cameraPose(ctx)end)
+   if ok and type(pose)=='table' and pose.eye and pose.focus and pose.fov then
+    if pose.sourceCameraEmbeddedDecoded==true and pose.sourceCameraRetailFrameExact==true
+        and pose.sourceCameraEmbeddedTransformUnsupported==nil then return pose end
+    if pose.sourceCameraEmbedded~=true and pose.sourceCameraEmbeddedTransformUnsupported==nil
+        and pose.sourceCameraMotionScalarExact==true
+        and pose.sourceCameraTargetResolved==true then return pose end
+    -- Never reach behind an unsupported newer owner to an older exact chapter.
+    return nil
+   end
+  end
+ end
+ return nil
 end
 function M.draw(s,context)
  local m=s.movePresentation;if not m then return end
@@ -310,5 +378,5 @@ function M.status(s)
  end
  return {version=M.version,channels=channels,joinedImpacts=M.joinedImpacts,timeouts=M.timeouts or 0,lastError=M.lastError}
 end
-M._test={scope=scope,channel=channel,readyForImpact=readyForImpact}
+M._test={scope=scope,channel=channel,readyForImpact=readyForImpact,hasSourceTransit=hasSourceTransit}
 return M

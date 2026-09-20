@@ -1,4 +1,5 @@
 local C={}
+local BattleSettings=nil
 
 -- Arena selection stays centralized in this module. The
 -- StadiumBattleFX provider is acquired once per battle; the selected id is
@@ -293,7 +294,57 @@ local function mtBattleOwned(value)
     and (nested.__mtbHub==true or nested.cbeMtBattleChallenge==true) or false
 end
 
+local function isArenaEnabledForEncounter(game,battle)
+  if not battle then return true end
+  -- Try to get BattleSettings from the V table
+  if not BattleSettings then
+    local V=rawget(_G,"V") or {}
+    BattleSettings=V.BattleSettings
+  end
+  if not BattleSettings then return true end
+
+  local isWild=(battle.kind=="wild") or battle.wild==true
+  local isTrainer=not isWild and (battle.kind=="trainer" or battle.trainer~=nil)
+  
+  -- Try to detect gym leader and elite four using StadiumBattleFXPort's venue detection
+  local isGym=false
+  local isEliteFour=false
+  if isTrainer then
+    local V=rawget(_G,"V") or {}
+    local StadiumBattleFXPort=V.StadiumBattleFXPort
+    if StadiumBattleFXPort and type(StadiumBattleFXPort.bossVenue)=="function" then
+      local ok,venue=pcall(StadiumBattleFXPort.bossVenue,battle)
+      if ok and venue then
+        isEliteFour=(venue=="elite4" or venue=="champion")
+        isGym=not isEliteFour and venue~=nil
+      end
+    end
+  end
+
+  if isWild and type(BattleSettings.wildEncountersEnabled)=="function" then
+    local ok,enabled=pcall(BattleSettings.wildEncountersEnabled,game)
+    if ok and enabled==false then return false end
+  end
+  if isTrainer and not isGym and not isEliteFour and type(BattleSettings.trainerEncountersEnabled)=="function" then
+    local ok,enabled=pcall(BattleSettings.trainerEncountersEnabled,game)
+    if ok and enabled==false then return false end
+  end
+  if isGym and type(BattleSettings.gymEncountersEnabled)=="function" then
+    local ok,enabled=pcall(BattleSettings.gymEncountersEnabled,game)
+    if ok and enabled==false then return false end
+  end
+  if isEliteFour and type(BattleSettings.eliteFourEncountersEnabled)=="function" then
+    local ok,enabled=pcall(BattleSettings.eliteFourEncountersEnabled,game)
+    if ok and enabled==false then return false end
+  end
+  return true
+end
+
 function C.resolve(game,battle)
+  -- Check if arenas are enabled for this specific encounter type
+  if not isArenaEnabledForEncounter(game,battle) then
+    return nil,"encounter_disabled"
+  end
   -- Mt. Battle 100 owns its venue independently of the player's ordinary CBE
   -- arena preference. Gen II may surface its Battle model, BattleState view, or
   -- CBE facade at arena acquisition; all three must retain Summit ownership.
@@ -361,6 +412,9 @@ end
 
 function C.status(game,battle)
   local def,selected=C.resolve(game,battle)
+  if not def then
+    return {enabled=C.enabled(game),selected=selected,resolved=nil,cache=nil,runtimeSelected=runtimeSelected,pendingSelected=pendingSelected,boundSelected=boundSelected,boundResolved=boundResolved and boundResolved.id or nil,lastRandomResolved=lastRandomResolved,primedRandom=primedRandom and primedRandom.id or nil,boundBattle=boundBattle~=nil,definitions=DEFINITIONS}
+  end
   return {enabled=C.enabled(game),selected=selected,resolved=def.id,cache=def.cache,runtimeSelected=runtimeSelected,pendingSelected=pendingSelected,boundSelected=boundSelected,boundResolved=boundResolved and boundResolved.id or nil,lastRandomResolved=lastRandomResolved,primedRandom=primedRandom and primedRandom.id or nil,boundBattle=boundBattle~=nil,definitions=DEFINITIONS}
 end
 

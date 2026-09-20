@@ -374,7 +374,7 @@ end
 
 local function installGen2Runtime()
   local req=V.engineRequire or require
-  local ok,Battle=pcall(req,"src.battle.gen2.Battle")
+  local ok,Battle=pcall(req,"src.battle.BattleState")
   if not ok or type(Battle)~="table" then return nil,"Gen-II Battle unavailable" end
   local needsUse=not Battle.__cbeColosseumVerifiedMovesV2
   local needsBreak=not Battle.__cbeColosseumBrickBreakScreens

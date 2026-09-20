@@ -205,7 +205,7 @@ local function installQueueHooks()
    end
   end
  end)
- hookClass("src.ui.gen2.BattleState",function(C)
+ hookClass("src.ui.battle.BattleState",function(C)
   if type(C.advanceQueue)~="function"then return end
   local original=C.advanceQueue
   C.advanceQueue=function(self,...)

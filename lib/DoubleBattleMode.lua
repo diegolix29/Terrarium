@@ -79,7 +79,7 @@ local function usableMoveId(battle, mon, preferredId)
       if not disabled then return move.id end
     end
   end
-  local Battle = require("src.battle.gen2.Battle")
+  local Battle = require("src.battle.BattleState")
   return Battle and Battle.STRUGGLE or "STRUGGLE"
 end
 
@@ -105,7 +105,7 @@ local function partnerAttack(battle, partnerIndex, moveId)
   battle._stadiumDuoStages = battle._stadiumDuoStages or {}
   local partnerStages = battle._stadiumDuoStages[partnerIndex]
   if not partnerStages then
-    local Battle = require("src.battle.gen2.Battle")
+    local Battle = require("src.battle.BattleState")
     partnerStages = (Battle and Battle.newStages and Battle.newStages()) or {}
     battle._stadiumDuoStages[partnerIndex] = partnerStages
   end
@@ -189,7 +189,7 @@ local function beginPartnerSelection(screen, battle, primary, primaryMoveIndex)
   -- rule is STRUGGLE.  Every ordinary partner with at least one legal move
   -- stays on this move screen until the player confirms it explicitly.
   if type(battle.hasUsableMoves) == "function" and not battle:hasUsableMoves(partner) then
-    local BattleCore = require("src.battle.gen2.Battle")
+    local BattleCore = require("src.battle.BattleState")
     local struggle = BattleCore and BattleCore.STRUGGLE or "STRUGGLE"
     screen:submit({ kind = "duo", primary = primary,
       partnerIndex = partnerIndex, partnerMove = struggle })
@@ -200,13 +200,13 @@ end
 
 function M.install()
   if M.installed then return true end
-  local okBattle, Battle = pcall(require, "src.battle.gen2.Battle")
-  local okState, BattleState = pcall(require, "src.ui.gen2.BattleState")
+  local okBattle, Battle = pcall(require, "src.battle.BattleState")
+  local okState, BattleState = pcall(require, "src.ui.battle.BattleState")
   if not (okBattle and type(Battle) == "table") then
-    return false, "src.battle.gen2.Battle unavailable"
+    return false, "src.battle.BattleState unavailable"
   end
   if not (okState and type(BattleState) == "table") then
-    return false, "src.ui.gen2.BattleState unavailable"
+    return false, "src.ui.battle.BattleState unavailable"
   end
   if BattleState._stadiumDoubleBattleMode then
     M.installed = true

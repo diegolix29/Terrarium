@@ -20,9 +20,9 @@ PlayerModelPick.ID = "DRAMATIC_SHAPE:playerModel"
 PlayerModelPick.MEWTWO_LABEL = "POKEMON PLAYER"
 PlayerModelPick.MEWTWO_ID = "DRAMATIC_SHAPE:pokemonPlayer"
 
--- Stadium follower option
-PlayerModelPick.FOLLOWER_LABEL = "POKEMON FOLLOWER"
-PlayerModelPick.FOLLOWER_ID = "DRAMATIC_SHAPE:pokemonFollower"
+-- Character model option (changed from Pokemon follower)
+PlayerModelPick.FOLLOWER_LABEL = "CHARACTER MODEL"
+PlayerModelPick.FOLLOWER_ID = "DRAMATIC_SHAPE:characterModel"
 
 -- Stadium wilds option
 PlayerModelPick.WILDS_LABEL = "STADIUM WILDS"
@@ -580,86 +580,53 @@ function PlayerModelPick.mewtwoRow()
   }
 end
 
--- ------- Stadium follower selection
+-- ------- Character model selection
 --
--- Cycle through popular species for the follower
--- dir: 1 for forward (right arrow), -1 for backward (left arrow)
-function PlayerModelPick.cycleFollower(dir)
-  dir = dir or 1  -- Default to forward if no direction specified
-  local StadiumFollower = V.require("StadiumFollower")
-  local current = StadiumFollower.getSpecies()
-  
-  -- Find current index in popular list
-  local currentIndex = 0
-  for i, species in ipairs(PlayerModelPick.POPULAR_SPECIES) do
-    if species.dex == current then
-      currentIndex = i
-      break
-    end
-  end
-  
-  -- Move to next/previous species based on direction
-  local nextIndex
-  if dir > 0 then
-    -- Forward (right arrow): count up
-    nextIndex = currentIndex + 1
-    if nextIndex > #PlayerModelPick.POPULAR_SPECIES then
-      nextIndex = 0  -- Disable
-    end
-  else
-    -- Backward (left arrow): count down
-    if currentIndex == 0 then
-      -- If currently disabled, go to the last species (151)
-      nextIndex = #PlayerModelPick.POPULAR_SPECIES
-    else
-      nextIndex = currentIndex - 1
-      if nextIndex < 0 then
-        nextIndex = 0  -- Disable
-      end
-    end
-  end
-  
-  if nextIndex == 0 then
-    StadiumFollower.setSpecies(nil)
-    print("PlayerModelPick.cycleFollower: Follower disabled")
-  else
-    local species = PlayerModelPick.POPULAR_SPECIES[nextIndex]
-    local ok = StadiumFollower.setSpecies(species.dex)
-    if ok then
-      print("PlayerModelPick.cycleFollower: Follower set to", species.name)
-    else
-      print("PlayerModelPick.cycleFollower: Failed to load", species.name)
-    end
-  end
+-- Now handled by CharacterModelPick module
+function PlayerModelPick.cycleCharacterModel(dir)
+  local CharacterModelPick = V.require("CharacterModelPick")
+  return CharacterModelPick.cycleCharacterModel(dir)
 end
 
--- ------- the follower row
+-- Add character list to PlayerModelPick
+PlayerModelPick.CHARACTERS = {
+  { id = "red", label = "RED" },
+  { id = "leaf", label = "GREEN / LEAF" },
+  { id = "wes", label = "WES / SETH" },
+  { id = "brendan", label = "BRENDAN" },
+  { id = "may", label = "MAY" },
+  { id = "dakim", label = "DAKIM" },
+  { id = "nascour", label = "NASCOUR" },
+  { id = "miror_b", label = "MIROR B." },
+}
+
+-- ------- the follower row (now character models)
 --
--- A simple button to cycle through popular follower species
+-- Changed to cycle through Colosseum character models for player sprite
+-- instead of Pokemon follower species
 function PlayerModelPick.followerRow()
+  local CharacterModelPick = V.require("CharacterModelPick")
+  
   return {
     id = PlayerModelPick.FOLLOWER_ID,
-    label = PlayerModelPick.FOLLOWER_LABEL,
+    label = "CHARACTER MODEL",  -- Changed from POKEMON FOLLOWER
     value = function()
-      local StadiumFollower = V.require("StadiumFollower")
-      local current = StadiumFollower.getSpecies()
-      -- If not loaded, try to read from marker file for display purposes
-      if not current then
-        current = StadiumFollower.readSaved()
-      end
-      if not current then
+      local currentId = CharacterModelPick.getCurrentCharacterId()
+      if not currentId or currentId == "off" then
         return "OFF"
       end
-      -- Find the name
-      for _, species in ipairs(PlayerModelPick.POPULAR_SPECIES) do
-        if species.dex == current then
-          return species.name
+      
+      -- Find the character label
+      for _, char in ipairs(CharacterModelPick.CHARACTERS) do
+        if char.id == currentId then
+          return char.label
         end
       end
-      return "DEX " .. current
+      
+      return currentId:upper()
     end,
     step = function(game, dir)
-      pcall(PlayerModelPick.cycleFollower, dir)
+      pcall(CharacterModelPick.cycleCharacterModel, dir)
       return true
     end,
   }

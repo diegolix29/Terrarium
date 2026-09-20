@@ -149,7 +149,7 @@ function GoldCompat.experienceRatio(data,mon,generation,growthHint)
   if generation=="gen2" or mon.experience~=nil then
     local Mon=GoldCompat.__gen2MonModule
     if Mon==nil then
-      local okMon,value=pcall(require,"src.battle.gen2.Mon")
+      local okMon,value=pcall(require,"src.pokemon.Pokemon")
       Mon=(okMon and value) or false
       GoldCompat.__gen2MonModule=Mon
     end
@@ -2283,7 +2283,7 @@ function GoldCompat.presentBattleState(state)
       local def=source and source.species and data.pokemon
         and data.pokemon[source.species]
       if def and source and source.dvs then
-        local okMon,Mon=pcall(require,"src.battle.gen2.Mon")
+        local okMon,Mon=pcall(require,"src.pokemon.Pokemon")
         if okMon and Mon and type(Mon.gender)=="function" then
           local ok,value=pcall(Mon.gender,def,source.dvs,{
             species=source.species, level=source.level,
@@ -3543,7 +3543,7 @@ function GoldCompat.installBattleUiFirewall()
     GoldCompat.patchShapeHudCompat(
       "DRAMATIC_SHAPE","dramatic","Dramatic Shape 1.8")
   else
-    local okGold,GoldBattleState=pcall(require,"src.ui.gen2.BattleState")
+    local okGold,GoldBattleState=pcall(require,"src.ui.battle.BattleState")
     if okGold and type(GoldBattleState)=="table" then
       GoldCompat.installBattlePredicateGuard(GoldBattleState,"bottomUIVisible",
         "__colosseumGen2BottomPredicate")
@@ -5270,7 +5270,7 @@ local function directBattleGender(battle,sideName,side)
   local src=GoldCompat.sourceBattleState(battle)
   if src and src.game and src.game.data then data=src.game.data end
 
-  local okMon,Mon=pcall(require,"src.battle.gen2.Mon")
+  local okMon,Mon=pcall(require,"src.pokemon.Pokemon")
 
   local function resolve(mon)
     if type(mon)~="table" then return nil end
@@ -16624,7 +16624,7 @@ function GoldCompat.summaryExpRatio(summary)
   if not (mon and def and mon.level and mon.experience) then return 0 end
   if mon.level>=100 then return 1 end
 
-  local ok,Mon=pcall(require,"src.battle.gen2.Mon")
+  local ok,Mon=pcall(require,"src.pokemon.Pokemon")
   if not ok or not Mon then return 0 end
   local growth=summary.growth and summary:growth()
   if not growth then return 0 end
@@ -23798,7 +23798,7 @@ function GoldCompat.buildLevelUpPopup(state,event)
       and battle.party[event.index]
   if not mon then return nil end
 
-  local okMon,Mon=pcall(require,"src.battle.gen2.Mon")
+  local okMon,Mon=pcall(require,"src.pokemon.Pokemon")
   local def=state.pokemon and mon.species and state.pokemon[mon.species]
   local newStats=mon.stats or {}
   local oldStats={}
@@ -24114,7 +24114,7 @@ function GoldCompat.installGoldBattlePresentation()
   if GoldCompat.generation~="gen2" or goldBattleScrubInstalled then return end
   goldBattleScrubInstalled=true
 
-  local ok,GoldBattleState=pcall(require,"src.ui.gen2.BattleState")
+  local ok,GoldBattleState=pcall(require,"src.ui.battle.BattleState")
   if not (ok and GoldBattleState and type(GoldBattleState.drawPanel)=="function")
       then return end
   if GoldBattleState.__gen3uiPanelScrubbed then return end
@@ -26025,6 +26025,12 @@ function GoldCompat.renderHudBattleLayer(mod,game)
   -- the tiny predicate/HUD guards here is effectively free when nothing moved
   -- and guarantees our UI remains the final presentation layer.
   if battleStateInStack(game) then GoldCompat.installBattleUiFirewall() end
+  
+  -- Activate BattleBoxXY for battle UI hiding across all generations
+  local battle=battleStateInStack(game)
+  if battle and _G.TerrariumBattleBoxXY and _G.TerrariumBattleBoxXY.claim then
+    pcall(function() _G.TerrariumBattleBoxXY.claim(battle) end)
+  end
 
   -- Battle-only pushed UI states own the foreground, but should still feel
   -- like part of the current battle rather than dropping back to classic boxes.
@@ -26941,6 +26947,12 @@ return function(mod)
       local battle=payload and (payload.battle or payload.state)
       if battle then State.activeBattle=battle end
       GoldCompat.installBattleUiFirewall()
+      
+      -- Activate BattleBoxXY for battle UI hiding across all generations
+      if battle and _G.TerrariumBattleBoxXY and _G.TerrariumBattleBoxXY.claim then
+        pcall(function() _G.TerrariumBattleBoxXY.claim(battle) end)
+      end
+      
       local states=mod.game and mod.game.stack and mod.game.stack.states or {}
       for _,state in ipairs(states) do
         if state~=battle then GoldCompat.installBattleSurfaceProxy(state) end

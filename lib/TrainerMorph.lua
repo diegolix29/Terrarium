@@ -357,6 +357,13 @@ function M.trackSample(track,kind,age,actionAge,duration)
   end
   local a=math.min(math.floor(frame),clip.count-2)
   local b=a+1;local span=math.min(b,clip.endFrame)-a
+
+  -- Debug: log track sampling for idle (throttled)
+  if not kind and math.floor(age) > (M._lastTrackSampleLogAge or -999) then
+    M._lastTrackSampleLogAge = math.floor(age)
+    print("[TrainerMorph.trackSample] kind:", kind, "role:", role, "age:", age, "fps:", fps, "frame:", frame, "clip:", a+1, b+1, "span:", span, "endFrame:", clip.endFrame)
+  end
+
   return clip,a+1,b+1,span>0 and (frame-a)/span or 0,role
 end
 -- Material/"texAnim" playback shares the exact native clip/frame clock in

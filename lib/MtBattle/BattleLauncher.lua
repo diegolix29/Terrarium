@@ -317,7 +317,7 @@ end
 -- builds the Battle.new-shaped object; wiring it onto the world's own
 -- screen stack is HubStage.lua's job (Phase 4).
 function BL.launchGen2(game,rosterSource,opponentMons,trainerMeta,encounter)
-  local Battle=req("src.battle.gen2.Battle")
+  local Battle=req("src.battle.BattleState")
   local challengeData=(BattleData and BattleData.data and BattleData.data(game)) or game.data
   local locked=SaveState and SaveState.state(game).rosterSnapshot or nil
   local clones,err=LevelClone.playerParty(game,2,LEVEL_LOCK,challengeData,rosterSource,locked)
@@ -348,7 +348,7 @@ function BL.launchGen2(game,rosterSource,opponentMons,trainerMeta,encounter)
     local tier=nil
     for _,t in ipairs(Difficulty.TIERS) do if t.id==encounter.tierId then tier=t end end
     if personality and tier then
-      local Ai=req("src.battle.gen2.Ai")
+      local Ai=req("src.battle.TrainerAI")
       local mergedFlagNames=Difficulty.combinedGen2Flags(tier,personality)
       local mergedTier={gen2Flags=mergedFlagNames,gen2SwitchLo=tier.gen2SwitchLo,gen2SwitchHi=tier.gen2SwitchHi}
       -- baseMoney (prize payout) has no designed value yet -- 0 is a

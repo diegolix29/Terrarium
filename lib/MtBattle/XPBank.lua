@@ -20,7 +20,7 @@ local req=V.engineRequire or require
 local XP={}
 
 local function experience() return req("src.battle.Experience") end
-local function gen2Mon() return req("src.battle.gen2.Mon") end
+local function gen2Mon() return req("src.pokemon.Pokemon") end
 local function runtime() return req("src.mods.Runtime") end
 
 local ZERO_STATS_G1={hp=0,attack=0,defense=0,speed=0,special=0}

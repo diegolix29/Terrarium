@@ -190,7 +190,7 @@ function B.install()
     status=function()local s=B.current;return {active=s~=nil,category=s and s.category,elapsed=s and s.elapsed,
       duration=s and s.duration,starts=B.starts,lastSkip=B.lastSkip,cue=CUE} end}
   local generation=V.GenerationCompat.current()
-  local class=req(generation==2 and 'src.ui.gen2.BattleState' or 'src.battle.BattleState')
+  local class=req(generation==2 and 'src.ui.battle.BattleState' or 'src.battle.BattleState')
   local old=assert(class.update)
   class.update=function(screen,dt,...)
     if screen.__cbeBossIntroRelease then

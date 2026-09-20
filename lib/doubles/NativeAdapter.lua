@@ -1,4 +1,4 @@
--- Native Gen I/II effect kernels for the experimental four-position scheduler.
+-- Native Gen I/II effect kernels for the production four-position scheduler.
 -- Native *individual moves* are reused. Neither native takeTurn/resolveTurn nor
 -- its two-battler faint/replacement pipeline is called during doubles.
 local V=... or {}
@@ -11,19 +11,23 @@ local function set(words) local o={} for w in words:gmatch('%S+') do o[w]=true e
 local selfMoves=set([[SWORDS_DANCE GROWTH MEDITATE AGILITY DOUBLE_TEAM HARDEN MINIMIZE WITHDRAW DEFENSE_CURL BARRIER AMNESIA FOCUS_ENERGY RECOVER SOFTBOILED REST SUBSTITUTE SPLASH SHARPEN ACID_ARMOR CONVERSION CONVERSION2 BELLY_DRUM MILK_DRINK SYNTHESIS MOONLIGHT MORNING_SUN PROTECT DETECT ENDURE]])
 local sideMoves=set([[REFLECT LIGHT_SCREEN MIST SAFEGUARD HEAL_BELL]])
 local fieldMoves=set([[HAZE PERISH_SONG RAIN_DANCE SUNNY_DAY SANDSTORM]])
-local foesMoves=set([[SURF SWIFT RAZOR_LEAF BLIZZARD POWDER_SNOW ICY_WIND ROCK_SLIDE ACID TWISTER GROWL LEER TAIL_WHIP STRING_SHOT SWEET_SCENT]])
-local allMoves=set([[EARTHQUAKE MAGNITUDE SELFDESTRUCT SELF_DESTRUCT EXPLOSION]])
--- Explicitly unavailable in this test, not silently converted into ordinary hits.
--- These require cross-action identities or native UI/party mutation which the
--- singles effect implementation cannot safely express through a target pair.
-local unsupported=set([[BIDE COUNTER MIRROR_COAT MIRROR_MOVE METRONOME MIMIC SLEEP_TALK FUTURE_SIGHT BATON_PASS ROAR WHIRLWIND TELEPORT TRANSFORM ATTRACT PURSUIT BEAT_UP DESTINY_BOND NIGHTMARE SKETCH]])
-local gen1Unsupported=set([[BIND WRAP FIRE_SPIN CLAMP]])
-local unsafeEffects=set([[EFFECT_BIDE EFFECT_COUNTER EFFECT_MIRROR_COAT EFFECT_MIRROR_MOVE EFFECT_METRONOME EFFECT_MIMIC EFFECT_SLEEP_TALK EFFECT_FUTURE_SIGHT EFFECT_BATON_PASS EFFECT_FORCE_SWITCH EFFECT_TELEPORT EFFECT_TRANSFORM EFFECT_ATTRACT EFFECT_PURSUIT EFFECT_BEAT_UP EFFECT_DESTINY_BOND EFFECT_NIGHTMARE EFFECT_SKETCH]])
+local foesMoves=set([[SWIFT RAZOR_LEAF BLIZZARD POWDER_SNOW ICY_WIND ROCK_SLIDE ACID TWISTER GROWL LEER TAIL_WHIP STRING_SHOT SWEET_SCENT]])
+-- GC6E01 / Gen III doubles "all other battlers" attacks include the user's
+-- partner as well as both opposing positions. Surf belongs in this class just
+-- like Earthquake/Magnitude and the explosion moves; treating Surf as foes-only
+-- incorrectly granted the partner immunity in CBE doubles.
+local allMoves=set([[SURF EARTHQUAKE MAGNITUDE SELFDESTRUCT SELF_DESTRUCT EXPLOSION]])
+-- Cross-action adapters for these Gen I/II effects are now routed through the
+-- native doubles kernels. Keep this list empty unless a move needs explicit
+-- exclusion from native handling.
+local unsupported=set([[]])
+local gen1Unsupported=set([[]])
+local unsafeEffects=set([[EFFECT_FORCE_SWITCH]])
 A.UNSUPPORTED=unsupported
 function A.new(host,generation)
   local self=setmetatable({host=host,generation=generation,data=assert(host.data),
     messages={},screens={player={},enemy={}},spikes={player=false,enemy=false}},A)
-  self.native=generation==2 and req('src.battle.gen2.Battle') or req('src.battle.BattleState')
+  self.native=generation==2 and req('src.battle.BattleState') or req('src.battle.BattleState')
   self.k=setmetatable(copy(host),{__index=self.native})
   local k=self.k
   k.__cbeAbilityActives=function()
@@ -60,6 +64,13 @@ function A.new(host,generation)
         self:message(self:name(user)..' copied '..self:name(target).."'s stat changes!")
       end}
     end
+    -- Real Gen II Psych Up has no CheckHit command at all. The current host
+    -- Battle.lua performs its common Protect/vanished gates before dispatching
+    -- move-effect records and no longer exposes the old Effects.NO_CHECKHIT
+    -- compatibility table. Keep the correction local to this doubles kernel:
+    -- perform() temporarily suppresses only those target-side CheckHit flags
+    -- while invoking Psych Up, then restores them byte/logically unchanged.
+    -- Lock-On is separately left untouched by consumeLockOn() below.
     -- Stage tables are battler-specific; screens/hazards are side-specific.
     k.sideOf=function(_,mon) local s=self.core and self.core:slotFor(mon);return s and s.id or 'enemy' end
     k.sideRecord=function(_,mon)
@@ -207,6 +218,12 @@ function A:supports(def)
   return true
 end
 function A:targetMode(def)
+  if def and (def.colosseumTarget=='self' or def.colosseumTarget=='side'
+      or def.colosseumTarget=='field' or def.colosseumTarget=='foes'
+      or def.colosseumTarget=='all-other' or def.colosseumTarget=='random'
+      or def.colosseumTarget=='ally' or def.colosseumTarget=='selected') then
+    return def.colosseumTarget
+  end
   local id=def and def.id
   if selfMoves[id] then return 'self' end
   if sideMoves[id] then return 'side' end
@@ -483,7 +500,39 @@ function A:perform(s,targets,action)
       local wasWrapped=nativeTarget.mon.volatile and nativeTarget.mon.volatile.wrapCount
       local wasTrapping=(s.mon.volatile or {}).trapsTarget
       k.moveEvent=nil
-      k:useMove(s.mon,nativeTarget.mon,action.moveId)
+      -- One doubles action spends the selected move's base PP exactly once.
+      -- The current Gen2 host no longer interprets copyDepth as a PP-free
+      -- continuation, so repeated target dispatches would otherwise debit once
+      -- per foe (and a 1-PP spread move would fail to reach target two). Give a
+      -- repeated native dispatch enough temporary PP to execute, then restore
+      -- the post-first-target value. Pressure is applied once per holder below.
+      local repeatPP=index>1 and move and move.pp or nil
+      if repeatPP~=nil and repeatPP<=0 then move.pp=1 end
+      local function useNativeTarget()
+      if action.moveId=='PSYCH_UP' then
+        -- Psych Up's source effect list has no CheckHit command. Current host
+        -- Gen2 Battle.lua applies Protect/vanished in its shared pre-dispatch
+        -- path, so hide only those two CheckHit-owned flags for this call and
+        -- restore the exact target state afterwards. Substitute is deliberately
+        -- left alone: the local Psych Up effect copies stages without touching
+        -- it, matching the cartridge command list.
+        local volatile=nativeTarget.mon.volatile or k:volatile(nativeTarget.mon)
+        local protect,vanished=volatile.protect,volatile.vanished
+        volatile.protect=nil;volatile.vanished=nil
+        local ok,err=pcall(k.useMove,k,s.mon,nativeTarget.mon,action.moveId)
+        volatile.protect=protect;volatile.vanished=vanished
+        if not ok then error(err,0) end
+      else
+        k:useMove(s.mon,nativeTarget.mon,action.moveId)
+      end
+      end
+      if repeatPP~=nil then
+        local ok,err=pcall(useNativeTarget)
+        move.pp=repeatPP
+        if not ok then error(err,0) end
+      else
+        useNativeTarget()
+      end
       local row=k.moveEvent
       if self.presentationEvent and row then
         self.presentationEvent.targetResults[t.id]={battlerId=t.battlerId,missed=row.missed==true,
@@ -634,7 +683,7 @@ function A:onReveal(s)
   local save=self.host.save or (self.host.game and self.host.game.save)
   if not save then return end
   if self.generation==2 then
-    local screen=req('src.ui.gen2.BattleState')
+    local screen=req('src.ui.battle.BattleState')
     local view=self.screen or {save=save}
     screen.markSeen(view,s.mon);screen.noteFirstUnown(view,s.mon)
   else

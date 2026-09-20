@@ -1,4 +1,4 @@
--- CBE experimental doubles controller. No renderer, global RNG or native turn loop.
+-- CBE production doubles controller. No renderer, global RNG or native turn loop.
 -- One encounter, four positions, one ordered action queue; the adapter executes
 -- individual move effects, never a second singles battle.
 local Core={VERSION=1}; Core.__index=Core
@@ -316,16 +316,49 @@ end
 function Core:resolvedTargets(s,a,def)
   local choices,mode=self:targets(s,def)
   if mode=="foes" or mode=="all-other" then
-    local t={} for _,id in ipairs(choices) do t[#t+1]=self.slots[id] end return t
+    local t={} for _,id in ipairs(choices) do t[#t+1]=self.slots[id] end return t,mode
   end
-  if mode=="self" or mode=="field" or mode=="side" then return {s} end
+  if mode=="self" or mode=="field" or mode=="side" then return {s},mode end
   local selected=self.slots[a.target]
-  if selected and healthy(selected.mon) and selected~=s then return {selected} end
+  if selected and healthy(selected.mon) and selected~=s then return {selected},mode end
   -- A disappeared opposing position retargets a remaining foe. An ally target
   -- never silently turns into an attack on an enemy (or on the user).
-  if selected and selected.side==s.side then return {} end
-  local foes=self:aliveSlots(other(s.side));return foes[1] and {foes[1]} or {}
+  if selected and selected.side==s.side then return {},mode end
+  local foes=self:aliveSlots(other(s.side));return foes[1] and {foes[1]} or {},mode
 end
+-- Bounded, detached evidence for an execution-time target report. This does
+-- not choose targets, consume RNG, retry misses, mutate commands or write saves.
+function Core:targetDiagnostics()
+  local out={};for i,row in ipairs(self.targetTrace or {}) do
+    local value=copy(row);value.resolved={}
+    for j,target in ipairs(row.resolved or {}) do value.resolved[j]=copy(target) end
+    out[i]=value
+  end
+  return out
+end
+function Core:recordTargetResolution(s,a,mode,targets,source,before)
+  local selected=self.slots[a.target]
+  local row={turn=self.turn,generation=self.generation,move=a.moveId,
+    sourceSlot=s.id,sourceBattlerId=s.battlerId,selectedSlot=a.target,
+    selectedBattlerId=selected and selected.battlerId,
+    selectedHPBefore=before[a.target] and before[a.target].hp,
+    mode=mode,noTarget=#targets==0,
+    retargeted=#targets==1 and a.target~=nil and targets[1].id~=a.target,
+    presentationEventId=source and source.eventId,resolved={}}
+  for _,t in ipairs(targets) do
+    local result=source and source.targetResults and source.targetResults[t.id]
+    local old=before[t.id]
+    row.resolved[#row.resolved+1]={slot=t.id,battlerId=t.battlerId,
+      hpBefore=old and old.hp,hpAfter=t.mon and t.mon.hp,
+      nativeMissed=result and result.missed==true or false,
+      nativeCancelled=result and result.cancelled==true or false,
+      nativeResultRecorded=result~=nil,
+      presentationBattlerId=source and source.targetBattlers and source.targetBattlers[t.id]}
+  end
+  self.targetTrace=self.targetTrace or {};self.targetTrace[#self.targetTrace+1]=row
+  if #self.targetTrace>16 then table.remove(self.targetTrace,1) end
+end
+
 function Core:performNext()
   local a=self.actionQueue[self.actionIndex]
   if not a then
@@ -370,7 +403,7 @@ function Core:performNext()
     end end
   end
   local def=self.adapter:moveDef(a.moveId)
-  local targets=self:resolvedTargets(s,a,def)
+  local targets,targetMode=self:resolvedTargets(s,a,def)
   -- A level-up/forget dialog may have changed this move SLOT. Never turn a
   -- frozen command into the newly learned move or charge its PP by accident.
   local selected=self.adapter:moves(s)[a.moveIndex]
@@ -384,6 +417,7 @@ function Core:performNext()
     if self.adapter.performNoTarget then source=self.adapter:performNoTarget(s,a)
     else self:message("There is no target for "..self.adapter:name(s.mon)..".") end
   else source=self.adapter:perform(s,targets,a) end
+  self:recordTargetResolution(s,a,targetMode,targets,source,before)
   self:recordVitals(before,source)
   self:noteFaints(source)
 end

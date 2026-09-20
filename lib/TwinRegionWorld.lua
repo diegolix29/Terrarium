@@ -3553,7 +3553,7 @@ Twin._classicRandomEncountersEnabled = classicRandomEncountersEnabled
 local function makeGoldWild(world, species, level)
   local game = world and world.game
   if not (game and game.data and species and level) then return nil end
-  local okMon, Mon = pcall(require, "src.battle.gen2.Mon")
+  local okMon, Mon = pcall(require, "src.pokemon.Pokemon")
   if not okMon or type(Mon) ~= "table" or type(Mon.new) ~= "function" then return nil end
   local ok, wild = pcall(Mon.new, game.data, species, tonumber(level) or 2)
   return ok and wild or nil
@@ -5455,7 +5455,7 @@ function KantoGameplay.storeGoldMon(world, mon)
   -- that path.  Current Gen1Recomp exposes this as Mon.stampOT; older hosts
   -- simply skip the optional normalization and retain their existing record.
   if mon.traded ~= true then
-    local okMon, Mon = pcall(require, "src.battle.gen2.Mon")
+    local okMon, Mon = pcall(require, "src.pokemon.Pokemon")
     if okMon and type(Mon) == "table" and type(Mon.stampOT) == "function" then
       local okStamp = pcall(Mon.stampOT, save, mon)
       if okStamp then Twin.yellowGoldOtStamps = (Twin.yellowGoldOtStamps or 0) + 1 end
@@ -5507,7 +5507,7 @@ Twin._kantoPikachuHappiness = KantoGameplay.goldPikachuHappiness
 function KantoGameplay.makeGoldGift(world, spec)
   local game = world and world.game
   if not (game and game.data and spec and spec.species) then return nil end
-  local okMon, Mon = pcall(require, "src.battle.gen2.Mon")
+  local okMon, Mon = pcall(require, "src.pokemon.Pokemon")
   if not (okMon and type(Mon) == "table" and type(Mon.new) == "function") then return nil end
   -- Gen 2 initializes gifts/hatched Pokemon at 120 happiness; wild captures
   -- start at 70.  This distinction matters immediately for friendship moves

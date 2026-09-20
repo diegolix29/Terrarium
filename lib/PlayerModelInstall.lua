@@ -74,6 +74,12 @@ function PlayerModelInstall.installed()
   if dexStr then
     return true  -- Stadium models don't need physical files
   end
+  -- Check if this is a Colosseum character marker (format:
+  -- colosseum_character_ID, see PlayerModel.loadColosseumCharacter) --
+  -- same deal, the model lives in the generated Colosseum cache, not here.
+  if marker.filename:match("^colosseum_character_.+$") then
+    return true
+  end
   -- For regular models, check if the file exists
   local path = PlayerModelInstall.DIR .. "/" .. marker.filename
   return isFile(path)

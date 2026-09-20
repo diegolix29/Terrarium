@@ -904,7 +904,7 @@ function C.install()
   end
   -- Actual native screen boundary: before singles/doubles can advance input or
   -- event clocks, not a draw-time placeholder. Recheck after switch/Transform.
-  local ok,B=pcall(req,generation==2 and 'src.ui.gen2.BattleState' or 'src.battle.BattleState')
+  local ok,B=pcall(req,generation==2 and 'src.ui.battle.BattleState' or 'src.battle.BattleState')
   if ok and B and B.update and not B.__cbeModelCache then
     local old=B.update
     B.update=function(screen,dt,...)

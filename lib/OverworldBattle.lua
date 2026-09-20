@@ -47,6 +47,8 @@ local BattleHud = V.require("BattleHud")
 local BattlePics = V.require("BattlePics")
 local Voxel3D = V.require("Voxel3D")
 local ChunkMesher = V.require("ChunkMesher")
+-- Battle UI hiding system
+local BattleBoxXY = V.require("BattleBoxXY")
 
 local OverworldBattle = {}
 
@@ -604,6 +606,12 @@ function OverworldBattle.begin(state, battle)
   local mode = OverworldBattle.setting:get()
   V.mod.log:info("[OverworldBattle] Calling Stadium.begin, mode=%s", tostring(mode))
   pcall(function() V.require("Stadium").begin(arena) end)
+  
+  -- Activate BattleBoxXY to hide the original fight box UI
+  if battle and BattleBoxXY and BattleBoxXY.claim then
+    pcall(function() BattleBoxXY.claim(battle) end)
+  end
+  
   return true
 end
 
@@ -621,6 +629,11 @@ function OverworldBattle.ensure(battle)
   local g = game()
   local ow = g and g.overworld
   if ow and ow.map then OverworldBattle.begin(ow, battle) end
+  
+  -- Also activate BattleBoxXY for battles that don't go through begin()
+  if battle and BattleBoxXY and BattleBoxXY.claim then
+    pcall(function() BattleBoxXY.claim(battle) end)
+  end
 end
 
 -- The arena this battle is staged on, or nil. Read by the shot driver so a

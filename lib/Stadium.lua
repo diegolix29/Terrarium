@@ -790,7 +790,7 @@ end
 
 function Stadium.install()
   -- Try Gen 2 battle system first (Gold/Crystal), then fall back to Gen 1
-  local okGen2, BattleState = pcall(require, "src.ui.gen2.BattleState")
+  local okGen2, BattleState = pcall(require, "src.ui.battle.BattleState")
   if not okGen2 then
     local okGen1, BattleStateGen1 = pcall(require, "src.battle.BattleState")
     if not okGen1 then return end
