@@ -6,7 +6,7 @@
     3
   ],
   "name": "Advanced Terrarium Voxel Mod",
-  "version": "1.6.5",
+  "version": "1.7.0",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
