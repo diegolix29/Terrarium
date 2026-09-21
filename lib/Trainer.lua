@@ -17,13 +17,12 @@ local function platformOS()
   end
   return "Unknown"
 end
-local PLATFORM_OS=platformOS()
-local ANDROID_RUNTIME=PLATFORM_OS=="Android"
-local WINDOWS_RUNTIME=PLATFORM_OS=="Windows"
+local ANDROID_RUNTIME=platformOS()=="Android"
+local WINDOWS_RUNTIME=platformOS()=="Windows"
 
--- Mesh layouts come from TrainerMorph so Trainer and PlayerTrainer cannot drift
--- apart. v27 DENSE preserves source HSD RGBA beside XYZ/UV/normal; COMPACT is
--- only used by the CPU fallback binding path.
+-- Mesh layouts now come from TrainerMorph so Trainer and PlayerTrainer cannot
+-- drift apart. DENSE is the unchanged 44-float cache/sidecar layout; COMPACT
+-- is only used by the CPU fallback binding path.
 local FORMAT=TrainerMorph.DENSE_FORMAT
 local FORMAT_COMPACT=TrainerMorph.COMPACT_FORMAT
 local DENSE_MESH=TrainerMorph.dense()
@@ -35,45 +34,16 @@ uniform vec4 materialColor;
 uniform float useTexture;
 uniform float unlit;
 uniform float opacity;
-uniform float sourceVertexColor;
-uniform float sourceVertexAlpha;
-uniform float alphaComp0; uniform float alphaRef0; uniform float alphaOp;
-uniform float alphaComp1; uniform float alphaRef1;
+uniform float flipV;
 varying vec3 worldPos;
 varying vec3 worldNormal;
-varying vec4 sourceColor;
-bool sourceAlphaCompare(float value,float mode,float refValue) {
-  float a=floor(clamp(value,0.0,1.0)*255.0+0.5);
-  float r=floor(clamp(refValue,0.0,255.0)+0.5);
-  if (mode<0.5) return false;
-  if (mode<1.5) return a<r;
-  if (mode<2.5) return a==r;
-  if (mode<3.5) return a<=r;
-  if (mode<4.5) return a>r;
-  if (mode<5.5) return a!=r;
-  if (mode<6.5) return a>=r;
-  return true;
-}
-bool sourceAlphaPass(float value) {
-  bool a=sourceAlphaCompare(value,alphaComp0,alphaRef0);
-  bool b=sourceAlphaCompare(value,alphaComp1,alphaRef1);
-  if (alphaOp<0.5) return a && b;
-  if (alphaOp<1.5) return a || b;
-  if (alphaOp<2.5) return a != b;
-  return a == b;
-}
 vec4 effect(vec4 color, Image texture, vec2 uv, vec2 screen) {
-  vec4 texel = Texel(texture,uv);
+  vec2 sampleUV=vec2(uv.x,mix(uv.y,1.0-uv.y,flipV));
+  vec4 texel = Texel(texture,sampleUV);
   float texAlpha=mix(1.0,texel.a,useTexture);
-  float sourceAlpha=mix(1.0,sourceColor.a,sourceVertexAlpha);
-  float sourceA = texAlpha * materialColor.a * sourceAlpha;
-  if (!sourceAlphaPass(sourceA)) discard;
-  float a = sourceA * tintColor.a * opacity * color.a;
-  /* HSD material diffuse still modulates textured DOBJ groups.  The old path
-     replaced it with raw texture RGB whenever a texture existed, washing out
-     source-tinted clothes/skin/material accents. */
-  vec3 vertexRGB=mix(vec3(1.0),sourceColor.rgb,sourceVertexColor);
-  vec3 sourceBase=mix(materialColor.rgb,texel.rgb*materialColor.rgb,useTexture)*vertexRGB;
+  float a = texAlpha * materialColor.a * tintColor.a * opacity * color.a;
+  if (a < 0.08) discard;
+  vec3 sourceBase=mix(materialColor.rgb,texel.rgb,useTexture);
   if (unlit > 0.5) return vec4(sourceBase*tintColor.rgb,a);
   vec3 n = normalize(worldNormal);
   vec3 lightDir = normalize(vec3(-0.42,0.82,0.38));
@@ -113,7 +83,6 @@ local initialSendoutQueued=false
 local initialOpeningQueued=false
 local lastSendingOut=false
 local pendingFrustration=nil
-local pendingApproval=nil
 local resultSeen=nil
 local activeNow=false
 local activationReason=nil
@@ -153,7 +122,7 @@ local function trainerSourceSize(cfg,meta)
 end
 local function trainerRuntimeUsable(meta,wanted,sourceSize)
   if not (RuntimeMeshCache and type(RuntimeMeshCache.readLua)=="function") then return false end
-  if type(meta)~="table" or tonumber(meta.runtimeMeshVersion)~=TRAINER_RUNTIME_MESH_VERSION or tonumber(meta.formatVersion)~=27 then return false end
+  if type(meta)~="table" or tonumber(meta.runtimeMeshVersion)~=TRAINER_RUNTIME_MESH_VERSION or tonumber(meta.formatVersion)~=26 then return false end
   if sourceSize==nil or type(meta.groups)~="table" or #meta.groups==0 then return false end
   local recorded=tonumber(meta.sourceSize) or 0
   if sourceSize>0 and recorded>0 and recorded~=sourceSize then return false end
@@ -162,7 +131,7 @@ local function trainerRuntimeUsable(meta,wanted,sourceSize)
     local info=path and GeneratedAssets.info and GeneratedAssets.info(path) or nil
     if not info then return false end
     local size=tonumber(info.size)
-    if size and (size<192 or size%192~=0) then return false end
+    if size and (size<176 or size%176~=0) then return false end
   end
   return true
 end
@@ -172,13 +141,13 @@ local function trainerGroupCompact(g,wanted,i)
   out.runtimeBin=trainerRuntimeBinPath(wanted,i)
   return out
 end
-local function writeTrainerRuntimeMeta(wanted,cache,sourceSize,preserveExisting)
+local function writeTrainerRuntimeMeta(wanted,cache,sourceSize)
   if not (RuntimeMeshCache and RuntimeMeshCache.writeLua) or sourceSize==nil then return false end
   local out={runtimeMeshVersion=TRAINER_RUNTIME_MESH_VERSION,sourceSize=sourceSize,formatVersion=cache.formatVersion}
   for k,v in pairs(cache or {}) do if k~="groups" then out[k]=v end end
   out.groups={}
   for i,g in ipairs(cache.groups or {}) do out.groups[i]=trainerGroupCompact(g,wanted,i) end
-  local ok=RuntimeMeshCache.writeLua(trainerRuntimeMetaPath(wanted),out,preserveExisting)
+  local ok=RuntimeMeshCache.writeLua(trainerRuntimeMetaPath(wanted),out)
   if ok then trainerRuntimeWrites=trainerRuntimeWrites+1 end
   return ok
 end
@@ -189,21 +158,20 @@ local function imageFromRaw(spec,wrapS,wrapT)
   local ok2,img=pcall(love.graphics.newImage,data)
   if not ok2 then return nil,img end
   if img.setFilter then
-    local minFilt=tonumber(spec.effectiveMinFilt)
-    if minFilt==nil then local raw=tonumber(spec.minFilt) or 5;minFilt=spec.mipmap and raw or raw%2 end
-    local minName=(minFilt%2)==0 and "nearest" or "linear"
-    local magName=(tonumber(spec.magFilt) or 1)==0 and "nearest" or "linear"
-    local gxAniso=math.max(0,math.min(2,math.floor(tonumber(spec.maxAnisotropy) or 0)))
-    local anisotropy=2^gxAniso
-    local okf=pcall(img.setFilter,img,minName,magName,anisotropy)
-    if not okf then pcall(img.setFilter,img,minName,magName) end
+    local okf=pcall(img.setFilter,img,"linear","linear",16)
+    if not okf then pcall(img.setFilter,img,"linear","linear") end
   end
   if img.setWrap then pcall(img.setWrap,img,wrapS or "clamp",wrapT or "clamp") end
   return img
 end
 local function shadowVertex(x,y,z,u,v)
   if not DENSE_MESH then return TrainerMorph.staticCompactVertex(x,y,z,u,v,0,1,0) end
-  return TrainerMorph.staticDenseVertex(x,y,z,u,v,0,1,0)
+  -- Same base position is supplied for every morph stream. Shadows never
+  -- morph, but the mesh must still satisfy the dense source format.
+  return {x,y,z,u,v,0,1,0,
+    x,y,z, x,y,z,
+    x,y,z, x,y,z, x,y,z, x,y,z, x,y,z,
+    x,y,z, x,y,z, x,y,z, x,y,z, x,y,z}
 end
 local function ensureShadow()
   if shadowImage and shadowMesh then return true end
@@ -229,7 +197,10 @@ local function ensureShadow()
 end
 local function ballVertex(x,y,z,u,v)
   if not DENSE_MESH then return TrainerMorph.staticCompactVertex(x,y,z,u,v,0,1,0) end
-  return TrainerMorph.staticDenseVertex(x,y,z,u,v,0,1,0)
+  return {x,y,z,u,v,0,1,0,
+    x,y,z, x,y,z,
+    x,y,z, x,y,z, x,y,z, x,y,z, x,y,z,
+    x,y,z, x,y,z, x,y,z, x,y,z, x,y,z}
 end
 local function sphereBand(y0,y1,r,segments)
   local out={};segments=segments or 12
@@ -263,8 +234,6 @@ local function ensureBall()
 end
 
 local function trainerModelFor(ctx)
-  local b=type(ctx)=="table" and (ctx.battle or (ctx.kind and ctx)) or nil
-  if b and b.__mtbHub==true then return nil,"mtbattle-hub-player-only" end
   if TrainerRoster and type(TrainerRoster.modelFor)=="function" then
     local cfg,reason=TrainerRoster.modelFor(ctx)
     return cfg,reason
@@ -347,18 +316,15 @@ local function loadConfig(ctx,cfg,reason)
   end
   local cache,err,fromRuntime
   local rt
-  local preserveTrainerRuntime=false
   if DENSE_MESH and RuntimeMeshCache and type(RuntimeMeshCache.readLua)=="function" then
-    local rtPath=trainerRuntimeMetaPath(wanted)
-    rt=select(1,RuntimeMeshCache.readLua(rtPath))
-    preserveTrainerRuntime=rt~=nil or (type(RuntimeMeshCache.exists)=="function" and RuntimeMeshCache.exists(rtPath)) or false
+    rt=select(1,RuntimeMeshCache.readLua(trainerRuntimeMetaPath(wanted)))
     local sourceSize=trainerSourceSize(cfg,rt)
     if trainerRuntimeUsable(rt,wanted,sourceSize) then cache=rt;fromRuntime=true;trainerRuntimeHits=trainerRuntimeHits+1 end
   end
   local sourceSize=trainerSourceSize(cfg,rt)
   if not cache then cache,err=readLua(cfg.cache) end
   if not cache then errorText=tostring(err);sceneErrors[wanted]=errorText;return nil,errorText end
-  if tonumber(cache.formatVersion)~=27 then
+  if tonumber(cache.formatVersion)~=26 then
     errorText=(cfg.label or wanted).." trainer cache format "..tostring(cache.formatVersion or "?").." is stale; rebuild required for dense source animation"
     sceneErrors[wanted]=errorText;return nil,errorText
   end
@@ -368,8 +334,7 @@ local function loadConfig(ctx,cfg,reason)
     local path=g.texture and g.texture.path
     local wrapS,wrapT="clamp","clamp"
     if path and TrainerMorph.textureWrap then wrapS,wrapT=TrainerMorph.textureWrap(g.texture,g,wanted) end
-    local textureKey=path and table.concat({path,wrapS,wrapT,tostring(g.texture.effectiveMinFilt or g.texture.minFilt or 1),
-      tostring(g.texture.magFilt or 1),tostring(g.texture.maxAnisotropy or 0)},":")
+    local textureKey=path and (path..":"..wrapS..":"..wrapT)
     local img=textureKey and textures[textureKey] or nil
     if path and not img then
       img,err=imageFromRaw(g.texture,wrapS,wrapT)
@@ -380,7 +345,7 @@ local function loadConfig(ctx,cfg,reason)
     local denseVertices
     local binPath=g.runtimeBin or trainerRuntimeBinPath(wanted,i)
     if fromRuntime and RuntimeMeshCache and type(RuntimeMeshCache.meshFromPath)=="function" then
-      mesh,meshErr=RuntimeMeshCache.meshFromPath(FORMAT,binPath,48,"static")
+      mesh,meshErr=RuntimeMeshCache.meshFromPath(FORMAT,binPath,44,"static")
     end
     if not mesh then
       -- A compact runtime meta intentionally contains no Lua vertex rows. If a
@@ -392,7 +357,7 @@ local function loadConfig(ctx,cfg,reason)
       if fromRuntime and type(g.vertices)~="table" then
         if canonicalFallback==nil then
           local canonical,cerr=readLua(cfg.cache)
-          if type(canonical)=="table" and tonumber(canonical.formatVersion)==27 then canonicalFallback=canonical else canonicalFallback=false;meshErr=tostring(cerr or meshErr or "canonical trainer fallback unavailable") end
+          if type(canonical)=="table" and tonumber(canonical.formatVersion)==26 then canonicalFallback=canonical else canonicalFallback=false;meshErr=tostring(cerr or meshErr or "canonical trainer fallback unavailable") end
         end
         if canonicalFallback and canonicalFallback.groups and canonicalFallback.groups[i] then
           sourceGroup=canonicalFallback.groups[i];trainerRuntimeFallbacks=trainerRuntimeFallbacks+1
@@ -403,7 +368,7 @@ local function loadConfig(ctx,cfg,reason)
         errorText=(cfg.label or wanted).." mesh "..i.." runtime sidecar failed and canonical vertices are unavailable: "..tostring(meshErr or "empty mesh")
         sceneErrors[wanted]=errorText;releaseScene({groups=groups,textures=textures});return nil,errorText
       end
-      for _,row in ipairs(vertices) do if type(row)=="table" then row[49]=nil end end
+      for _,row in ipairs(vertices) do if type(row)=="table" then row[45]=nil end end
       denseVertices=vertices
       if not DENSE_MESH then
         local compact={}
@@ -414,22 +379,17 @@ local function loadConfig(ctx,cfg,reason)
       if not ok then errorText=(cfg.label or wanted).." mesh "..i..": "..tostring(built);sceneErrors[wanted]=errorText;releaseScene({groups=groups,textures=textures});return nil,errorText end
       mesh=built
       if DENSE_MESH and RuntimeMeshCache and RuntimeMeshCache.supported and RuntimeMeshCache.supported() then
-        local wok=RuntimeMeshCache.writeRows(binPath,vertices,48,nil,preserveTrainerRuntime)
+        local wok=RuntimeMeshCache.writeRows(binPath,vertices,44)
         if not wok then meshErr="runtime sidecar write failed" end
       end
     end
     if img then mesh:setTexture(img) end
-    local d=g.diffuse or {1,1,1};local a=g.ambient or {0,0,0};local sp=g.specular or {0,0,0}
-    local renderFlags=tonumber(g.renderFlags) or 0
-    local alphaMode=math.floor(renderFlags/0x2000)%4
+    local d=g.diffuse or {1,1,1}
     groups[#groups+1]={mesh=mesh,material=g.material,image=img,textured=img~=nil,
       diffuse={tonumber(d[1]) or 1,tonumber(d[2]) or 1,tonumber(d[3]) or 1},
-      ambient={tonumber(a[1]) or 0,tonumber(a[2]) or 0,tonumber(a[3]) or 0},
-      specular={tonumber(sp[1]) or 0,tonumber(sp[2]) or 0,tonumber(sp[3]) or 0},shininess=tonumber(g.shininess) or 0,
       alpha=tonumber(g.alpha) or 1,xlu=g.xlu==true,noz=g.noz==true,
-      pe=g.pe,useConstant=g.useConstant==true,useVertexColor=g.useVertexColor==true,
-      useVertexAlpha=alphaMode==2 or alphaMode==3,useDiffuseLighting=g.useDiffuseLighting~=false,
-      renderFlags=renderFlags,shadow=g.shadow==true,effect=g.effect==true,
+      useDiffuseLighting=g.useDiffuseLighting~=false,
+      renderFlags=tonumber(g.renderFlags) or 0,shadow=g.shadow==true,effect=g.effect==true,
       poseSourceRows=(not DENSE_MESH) and denseVertices or nil,posePair=nil}
   end
   local sok,serr=ensureShadow()
@@ -440,9 +400,9 @@ local function loadConfig(ctx,cfg,reason)
       local info=GeneratedAssets.info and GeneratedAssets.info(trainerRuntimeBinPath(wanted,i)) or nil
       if not info then all=false;break end
       local size=tonumber(info.size)
-      if size and (size<192 or size%192~=0) then all=false;break end
+      if size and (size<176 or size%176~=0) then all=false;break end
     end
-    if all then writeTrainerRuntimeMeta(wanted,cache,sourceSize,preserveTrainerRuntime) end
+    if all then writeTrainerRuntimeMeta(wanted,cache,sourceSize) end
   end
   local entry={groups=groups,bounds=cache.bounds,source=cache.source,textures=textures,
     jointPositions=cache.jointPositions,poseJointPositions=cache.poseJointPositions,
@@ -553,11 +513,11 @@ local normalReleasePoint
 local sendoutTarget
 local sendoutForward
 local arenaForward={0,1}
-local trigger,performanceId,actionDuration
+local trigger,performanceId
 
 function T:begin(ctx)
   battleKey=battleOf(ctx)
-  age=0;actionKind=nil;actionAge=0;actionStrength=0;initialSendoutQueued=false;initialOpeningQueued=false;lastSendingOut=false;pendingFrustration=nil;pendingApproval=nil;pendingReaction=nil;resultSeen=nil;drawFrames=0;currentMotion=nil
+  age=0;actionKind=nil;actionAge=0;actionStrength=0;initialSendoutQueued=false;initialOpeningQueued=false;lastSendingOut=false;pendingFrustration=nil;pendingReaction=nil;resultSeen=nil;drawFrames=0;currentMotion=nil
   performanceState=TrainerPerformance and TrainerPerformance.resetState(performanceState,performanceId and performanceId() or "dakim") or nil
   local cfg,reason=trainerModelFor(ctx)
   activeNow=cfg~=nil
@@ -577,7 +537,7 @@ end
 function T:update(ctx,dt)
   local b=battleOf(ctx)
   if b~=battleKey then
-    battleKey=b;age=0;actionKind=nil;actionAge=0;actionStrength=0;initialSendoutQueued=false;initialOpeningQueued=false;lastSendingOut=false;pendingFrustration=nil;pendingApproval=nil;pendingReaction=nil;resultSeen=nil;activeNow=false;activationReason=nil;currentMotion=nil
+    battleKey=b;age=0;actionKind=nil;actionAge=0;actionStrength=0;initialSendoutQueued=false;initialOpeningQueued=false;lastSendingOut=false;pendingFrustration=nil;pendingReaction=nil;resultSeen=nil;activeNow=false;activationReason=nil;currentMotion=nil
     performanceState=TrainerPerformance and TrainerPerformance.resetState(performanceState,"dakim") or nil
   end
   local cfg,reason=trainerModelFor(ctx)
@@ -592,7 +552,7 @@ function T:update(ctx,dt)
       log(ctx,"error","Enemy Colosseum actor failed to load during update: %s",tostring(err or errorText))
     end
   elseif not should and activeNow then
-    activeNow=false;age=0;actionKind=nil;actionAge=0;actionStrength=0;initialOpeningQueued=false;pendingFrustration=nil;pendingApproval=nil;pendingReaction=nil;resultSeen=nil;activationReason=nil;currentMotion=nil
+    activeNow=false;age=0;actionKind=nil;actionAge=0;actionStrength=0;initialOpeningQueued=false;pendingFrustration=nil;pendingReaction=nil;resultSeen=nil;activationReason=nil;currentMotion=nil
   end
   local step=TrainerPerformance and TrainerPerformance.realDt(ctx,dt,animationClock) or (tonumber(dt) or 0)
   if activeNow then
@@ -624,13 +584,10 @@ function T:update(ctx,dt)
   if actionKind then actionAge=actionAge+step end
   if activeNow and pendingFrustration then
     pendingFrustration=pendingFrustration-step
-    if pendingFrustration<=0 then pendingFrustration=nil;pendingApproval=nil;pendingReaction=nil;trigger("frustration",1.0) end
-  elseif activeNow and pendingApproval then
-    pendingApproval=pendingApproval-step
-    if pendingApproval<=0 then pendingApproval=nil;trigger("approval",.88) end
+    if pendingFrustration<=0 then pendingFrustration=nil;pendingReaction=nil;trigger("frustration",1.0) end
   end
   if activeNow and TrainerPerformance then
-    local id=performanceId();local duration=actionKind and actionDuration(actionKind) or nil
+    local id=performanceId();local duration=actionKind and TrainerPerformance.duration(id,actionKind) or nil
     if actionKind and actionAge>(duration or 1.2) then
       if TrainerPerformance.terminal(actionKind) then actionAge=duration
       else actionKind=nil;actionStrength=0 end
@@ -662,22 +619,15 @@ local other=BattleSides.other
 performanceId=function()
   return tostring((currentConfig and currentConfig.id) or currentModel or "dakim"):lower()
 end
-actionDuration=function(kind)
-  if not kind then return nil end
-  local source=scene and scene.nativeTrack and TrainerMorph and TrainerMorph.sourceDuration
-    and TrainerMorph.sourceDuration(scene.nativeTrack,kind) or nil
-  if tonumber(source) and source>0 then return source end
-  return TrainerPerformance and TrainerPerformance.duration(performanceId(),kind) or nil
-end
 trigger=function(kind,strength,force)
   if TrainerPerformance and TrainerPerformance.terminal(actionKind) then return false end
-  if not force and TrainerPerformance and not TrainerPerformance.shouldTrigger({battle=battleKey},actionKind,actionAge,kind,actionDuration(actionKind)) then
+  if not force and TrainerPerformance and not TrainerPerformance.shouldTrigger({battle=battleKey},actionKind,actionAge,kind,TrainerPerformance.duration(performanceId(),actionKind)) then
     if kind~=actionKind and not (actionKind=="concern" and kind=="brace") then
       pendingReaction=TrainerPerformance.queueReaction(pendingReaction,kind,strength)
     end
     return false
   end
-  if TrainerPerformance and TrainerPerformance.terminal(kind) then pendingReaction=nil;pendingFrustration=nil;pendingApproval=nil end
+  if TrainerPerformance and TrainerPerformance.terminal(kind) then pendingReaction=nil;pendingFrustration=nil end
   normalReleasePoint=nil;sendoutTarget=nil;sendoutForward=nil
   actionKind=kind;actionAge=0;actionStrength=strength or 1
   return true
@@ -710,33 +660,29 @@ function T:event(ctx,name,payload)
     local target=payloadSide(ctx,payload,{"target","battler","side","targetSide"})
     if target=="enemy" then trigger("concern",.72) end
   elseif name=="battle.battler_switched" then
-    -- GC6E01's ordinary return path (fightOutPokemonModosuEffect) has no
-    -- companion fightTrainer animation. The Pokemon/WZX return owns this beat;
-    -- leave the trainer's current/idle track alone and only arm the next real
-    -- enemySendingOut edge. This also prevents a guessed recall clip from
-    -- holding equal priority with the following retail ball-throw action.
+    -- AI switch events can lead the actual enemySendingOut phase. Arm the
+    -- performance, but let update() start it on the authoritative phase edge.
     local switched=payloadSide(ctx,payload,{"side","battler","target","switchedSide"})
     if switched=="enemy" then
       initialSendoutQueued=false
+      local previous=payload.previous or payload.oldBattler
+      local mon=type(previous)=="table" and (previous.mon or previous) or nil
+      local hp=mon and tonumber(mon.hp)
+      if hp==nil or hp>0 then trigger("recall",.96) end
     end
   elseif semantic=="battle.fainted" then
     local fainted=payloadSide(ctx,payload,{"battler","target","side","faintedSide","targetSide"})
     if fainted=="enemy" then
       local fd=BattleDirector and type(BattleDirector.faintDuration)=="function"
         and BattleDirector:faintDuration(ctx,"enemy") or nil
-      pendingApproval=nil
       pendingFrustration=math.max(.52,math.min(1.35,(tonumber(fd) or 1.0)*.80))
-    elseif fainted=="player" and not pendingFrustration then
-      local fd=BattleDirector and type(BattleDirector.faintDuration)=="function"
-        and BattleDirector:faintDuration(ctx,"player") or nil
-      pendingApproval=math.max(tonumber(pendingApproval) or 0,math.max(.42,math.min(1.05,(tonumber(fd) or 1.0)*.68)))
     end
   elseif name=="battle.ended" then
     local b=battleOf(ctx);local result=payload.result or payload.outcome or (b and b.result)
     if result=="lose" or result=="loss" or result=="defeat" then trigger("victory",1.0)
     elseif result=="win" or result=="victory" then trigger("defeat",1.0)
     else actionKind=nil;actionAge=0;actionStrength=0 end
-    pendingFrustration=nil;pendingApproval=nil
+    pendingFrustration=nil
   end
 end
 
@@ -748,25 +694,17 @@ local function idleMotion()
   return {breath=.12,look=0,arm=0,shift=0,settle=0,lean=0,turn=0,bob=0,sway=0,command=0,brace=0,forward=0}
 end
 local function animatedModel(p,motion)
-  -- Full chronological source tracks already include the trainer's authored
-  -- root/body motion.  Applying the semantic performance root on top of those
-  -- vertices doubled lean, sway and translation and made otherwise-correct
-  -- Colosseum clips look exaggerated.  Procedural root motion remains only for
-  -- old/unsupported caches that genuinely need the fallback.
-  local sourceRoot=scene and scene.nativeTrack and TrainerMorph.nativeTrackOwnsRoot
-    and TrainerMorph.nativeTrackOwnsRoot(scene.nativeTrack,motion)
-  local root=sourceRoot and {pitch=0,roll=0,yaw=0,compression=0}
-    or (TrainerPerformance and TrainerPerformance.root(performanceId(),motion)
-      or {pitch=0,roll=0,yaw=(motion.turn or 0)*.8,compression=(motion.brace or 0)*.032})
+  -- Humanize the source morphs with restrained whole-body weight transfer.
+  -- Crucially this rotates around the hips instead of around the model origin
+  -- at the feet; the old foot-pivot made every gesture read like a rigid robot
+  -- tipping on a stand.
+  local root=TrainerPerformance and TrainerPerformance.root(performanceId(),motion) or {pitch=0,roll=0,yaw=(motion.turn or 0)*.8,compression=(motion.brace or 0)*.032}
   local pivotY=(currentConfig and tonumber(currentConfig.pivotY)) or ((MODEL_CONFIG[currentModel] or MODEL_CONFIG.dakim).pivotY or 12.8)
   local localAnim=Mat4.mul(Mat4.translate(0,pivotY,0),
     Mat4.mul(Mat4.rotateZ(root.roll or 0),
       Mat4.mul(Mat4.rotateX(root.pitch or 0),
         Mat4.mul(Mat4.rotateY(root.yaw or 0),Mat4.translate(0,-pivotY,0)))))
-  local sway=sourceRoot and 0 or (motion.sway or 0)
-  local bob=sourceRoot and 0 or (motion.bob or 0)
-  local forward=sourceRoot and 0 or (motion.forward or 0)
-  return Mat4.mul(Mat4.translate(p.x+sway,p.y+bob-(root.compression or 0),p.z+forward),
+  return Mat4.mul(Mat4.translate(p.x+motion.sway,p.y+motion.bob-(root.compression or 0),p.z+motion.forward),
     Mat4.mul(Mat4.rotateY(p.yaw),Mat4.mul(Mat4.scale(MODEL_SCALE,MODEL_SCALE,MODEL_SCALE),localAnim)))
 end
 
@@ -782,10 +720,7 @@ local function setShader(vp,model,pose,unlit,tint,opacity,motion)
   shader:send("opacity",opacity or 1)
   shader:send("materialColor",{1,1,1,1})
   shader:send("useTexture",1)
-  shader:send("sourceVertexColor",0)
-  shader:send("sourceVertexAlpha",0)
-  shader:send("alphaComp0",7);shader:send("alphaRef0",0);shader:send("alphaOp",0)
-  shader:send("alphaComp1",7);shader:send("alphaRef1",0)
+  shader:send("flipV",currentModel=="miror_b" and 1 or 0)
   TrainerMorph.sendMixes(shader,motion)
 end
 
@@ -795,9 +730,7 @@ function T:drawShadow(ctx,vp,pose)
   local p=self:entryPose()
   if p.progress<0.05 then return end
   local motion=idleMotion()
-  local sourceRoot=s.nativeTrack and TrainerMorph.nativeTrackOwnsRoot
-    and TrainerMorph.nativeTrackOwnsRoot(s.nativeTrack,motion)
-  local model=Mat4.translate(p.x+(sourceRoot and 0 or (motion.sway or 0)),0,p.z)
+  local model=Mat4.translate(p.x+motion.sway,0,p.z)
   love.graphics.setDepthMode("lequal",false)
   love.graphics.setBlendMode("alpha","alphamultiply")
   love.graphics.setMeshCullMode("none")
@@ -824,22 +757,14 @@ function T:draw(ctx,vp,pose)
   -- Retain source HSD material/pass semantics. Opaque groups write depth; XLU
   -- and NO_ZUPDATE helper/effect surfaces blend without corrupting the world Z.
   for _,grp in ipairs(s.drawGroups or s.groups) do
-    local animated=TrainerMorph.materialSample and TrainerMorph.materialSample(grp,motion) or nil
-    local channels=TrainerMorph.materialChannels(grp,animated)
-    shader:send("materialColor",channels.color)
+    local d=grp.diffuse or {1,1,1}
+    shader:send("materialColor",{d[1] or 1,d[2] or 1,d[3] or 1,grp.alpha or 1})
     shader:send("useTexture",grp.textured and 1 or 0)
-    shader:send("sourceVertexColor",channels.vertexColor)
-    shader:send("sourceVertexAlpha",channels.vertexAlpha)
     shader:send("unlit",grp.useDiffuseLighting==false and 1 or 0)
-    local pe=TrainerMorph.materialState and TrainerMorph.applyMaterialState(grp,animated) or nil
-    if pe then
-      shader:send("alphaComp0",pe.alphaComp0);shader:send("alphaRef0",pe.alphaRef0);shader:send("alphaOp",pe.alphaOp)
-      shader:send("alphaComp1",pe.alphaComp1);shader:send("alphaRef1",pe.alphaRef1)
-    elseif love.graphics.setDepthMode then love.graphics.setDepthMode("lequal",not grp.noz) end
+    if love.graphics.setDepthMode then love.graphics.setDepthMode("lequal",not (grp.noz or grp.xlu)) end
     love.graphics.draw(grp.mesh)
   end
   if love.graphics.setDepthMode then love.graphics.setDepthMode("lequal",true) end
-  love.graphics.setBlendMode("alpha","alphamultiply")
   love.graphics.setShader()
 end
 
@@ -852,7 +777,7 @@ local function sendoutYaw()
 end
 local function ballPose()
   if actionKind~="sendout" then return nil end
-  local id=performanceId();local d=actionDuration("sendout") or 1.48
+  local id=performanceId();local d=TrainerPerformance and TrainerPerformance.duration(id,"sendout") or 1.48
   local phase=clamp(actionAge/math.max(.001,d),0,1)
   if phase>.79 then return nil end
   local u=clamp((phase-.31)/.48,0,1)
@@ -893,7 +818,7 @@ local function ballPose()
 end
 function T:sendoutStatus()
   if not activeNow or actionKind~="sendout" then return nil end
-  local duration=actionDuration("sendout") or 1.48
+  local duration=TrainerPerformance.duration(performanceId(),"sendout")
   local phase=clamp(actionAge/math.max(.001,duration),0,1)
   return {active=phase<1,phase=phase,ball=ballPose(),duration=duration,age=actionAge}
 end
@@ -902,8 +827,8 @@ function T:beginSendout(target,forward)
   if not trigger("sendout",1,true) then return nil end
   sendoutTarget=target and {target[1],target[2],target[3]} or nil
   sendoutForward=forward and {forward[1],forward[2]} or nil
-  initialOpeningQueued=true;pendingReaction=nil;pendingFrustration=nil;pendingApproval=nil
-  return actionDuration("sendout") or 1.48
+  initialOpeningQueued=true;pendingReaction=nil;pendingFrustration=nil
+  return TrainerPerformance.duration(performanceId(),"sendout")
 end
 function T:clearSendoutTarget() sendoutTarget=nil;sendoutForward=nil end
 
@@ -925,7 +850,7 @@ function T:drawBall(ctx,vp,pose)
 end
 
 function T:finish(ctx,reason)
-  battleKey=nil;age=0;actionKind=nil;actionAge=0;actionStrength=0;initialSendoutQueued=false;initialOpeningQueued=false;lastSendingOut=false;pendingFrustration=nil;pendingApproval=nil;pendingReaction=nil;resultSeen=nil;activeNow=false;activationReason=nil
+  battleKey=nil;age=0;actionKind=nil;actionAge=0;actionStrength=0;initialSendoutQueued=false;initialOpeningQueued=false;lastSendingOut=false;pendingFrustration=nil;pendingReaction=nil;resultSeen=nil;activeNow=false;activationReason=nil
 end
 
 

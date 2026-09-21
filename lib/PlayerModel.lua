@@ -19,6 +19,7 @@ local ColosseumMon = V.require("ColosseumMon")
 local ColosseumTrainer = V.require("ColosseumTrainer")
 local GeneratedAssets = V.require("GeneratedAssets")
 local CharacterWalkCycle = V.require("CharacterWalkCycle")
+local CharacterNativeAnim = V.require("CharacterNativeAnim")
 
 local PlayerModel = {}
 
@@ -46,19 +47,14 @@ local currentColosseumDex = nil
 
 -- A Colosseum trainer/character model standing in for the player sprite
 -- (see PlayerModel.loadColosseumCharacter / lib/ColosseumTrainer.lua).
--- Static geometry only: the source dense-morph/idle-breath system that
--- animates a trainer in battle lives entirely in the battle-only
--- PlayerTrainer.lua/TrainerMorph.lua pipeline (its own shader, its own
--- vp/pose contract) and isn't something this overworld module can reach or
--- drive -- see ColosseumTrainer.lua's header for why. A motionless standing
--- figure using each model's authored rest pose is still a real, correctly
--- shaped/textured/scaled overworld option, the same kind of deliberate
--- scope limit GLBModel.lua documents for its own static-only .glb models.
+-- Standing still, the figure plays the character's own extracted Colosseum
+-- idle clip (cache/trainers/<id>/native_v1, see lib/CharacterNativeAnim.lua).
+-- Moving or hopping, the procedural CharacterWalkCycle takes over (the source
+-- game authored no walk clip for these battle actors). If a character has no
+-- native_v1 cache it simply stays in its authored rest pose.
 local usingCharacter = false
 local characterWalkTime = 0  -- Track walking animation time
-local characterIdleTime = 0  -- Track idle animation time
-local characterNativeTrack = nil  -- Store native animation track
-local characterNativeAge = 0  -- Track native animation age
+local characterNative = nil  -- CharacterNativeAnim handle for the current character, or nil
 local currentCharacterId = nil
 local characterGroups = nil    -- array of {mesh=, texture=, baseVertices=} for the current character
 local characterCache = {}      -- id -> {groups=, scale=, walkRig=}, kept separate from modelCache/textureCache below since a character is several mesh+texture pairs, not one
@@ -429,6 +425,8 @@ function PlayerModel.loadColosseumCharacter(id)
   if cached then
     characterGroups = cached.groups
     characterWalkRig = cached.walkRig
+    characterNative = cached.native
+    if characterNative then CharacterNativeAnim.reset(characterNative) end
     characterWalkVertexBuffers = {}
     currentCharacterId = id
     currentFilename = "colosseum_character_" .. id
@@ -500,7 +498,10 @@ function PlayerModel.loadColosseumCharacter(id)
             end
           end
         end
-        groups[#groups + 1] = { mesh = mesh, texture = texture, baseVertices = baseVertices, baseUVs = baseUVs }
+        -- srcIndex: this group's position in cache.groups. Empty/failed
+        -- groups are skipped above, so #groups is NOT the track's group
+        -- number -- CharacterNativeAnim matches tracks by srcIndex.
+        groups[#groups + 1] = { mesh = mesh, texture = texture, baseVertices = baseVertices, baseUVs = baseUVs, srcIndex = gi }
       end
     end
   end
@@ -520,9 +521,18 @@ function PlayerModel.loadColosseumCharacter(id)
   local walkRigOk, walkRig = pcall(CharacterWalkCycle.build, id, groups, b)
   if not walkRigOk then walkRig = nil end
 
-  characterCache[id] = { groups = groups, scale = scale, walkRig = walkRig }
+  -- Native idle clip from the extracted cache. Optional: a character with
+  -- no native_v1 cache (or a topology mismatch) just keeps its rest pose.
+  local nativeOk, native, nativeErr = pcall(CharacterNativeAnim.load, id, groups, { "idle" })
+  if not nativeOk then native, nativeErr = nil, native end
+  if not native then
+    print("[PlayerModel] no native idle animation for '" .. tostring(id) .. "': " .. tostring(nativeErr))
+  end
+
+  characterCache[id] = { groups = groups, scale = scale, walkRig = walkRig, native = native }
   characterGroups = groups
   characterWalkRig = walkRig
+  characterNative = native
   characterWalkVertexBuffers = {}
   currentCharacterId = id
   currentFilename = "colosseum_character_" .. id
@@ -533,16 +543,6 @@ function PlayerModel.loadColosseumCharacter(id)
   currentTexture = nil
   currentRig = nil
   currentStadiumModel = nil
-  
-  -- Load the native animation track for idle animations
-  local trackPath = ("cache/trainers/%s/native_v1/index.lua"):format(id)
-  local track, trackErr = GeneratedAssets.readLua(trackPath)
-  if track and track.version == 1 and track.roles then
-    characterNativeTrack = track
-    characterNativeAge = 0
-  else
-    characterNativeTrack = nil
-  end
 
   return true
 end
@@ -613,6 +613,7 @@ function PlayerModel.clear()
   usingCharacter = false
   currentCharacterId = nil
   characterGroups = nil
+  characterNative = nil
   characterWalkTime = 0  -- Reset walk animation time
   characterWalkBlend = 0
   characterWalkRig = nil
@@ -845,12 +846,6 @@ function PlayerModel.draw(px, py, y, facing, mirror)
   
   -- Handle Colosseum character models (static rest-pose trainer models)
   if usingCharacter and characterGroups then
-    -- Debug: log character draw (throttled)
-    if math.floor(characterIdleTime) > (PlayerModel._lastDrawLogTime or -999) then
-      PlayerModel._lastDrawLogTime = math.floor(characterIdleTime)
-      print("[PlayerModel.draw] Drawing character:", currentCharacterId, "idleTime:", characterIdleTime, "walkTime:", characterWalkTime, "hasNativeTrack:", characterNativeTrack ~= nil)
-    end
-
     -- Use the same movement behavior as Pokemon player models
     local FirstPerson = V.require("FirstPerson")
     local b = FirstPerson.cardBlend()
@@ -886,9 +881,9 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- Update animation time
     if isMoving then
       characterWalkTime = characterWalkTime + 0.15  -- Walk animation speed / gait phase
-      characterIdleTime = 0  -- Reset idle when walking
     else
-      characterIdleTime = characterIdleTime + 0.016  -- Idle animation speed (60fps)
+      -- The idle clip keeps its own real-time clock (CharacterNativeAnim);
+      -- nothing to advance here.
       -- characterWalkTime deliberately isn't reset here -- see the
       -- characterWalkBlend easing right below. Freezing the gait phase
       -- where it stopped (rather than snapping it to 0) is what lets the
@@ -933,103 +928,18 @@ function PlayerModel.draw(px, py, y, facing, mirror)
       end
     end
 
-    -- Sample native idle animation from track if available. Held off
-    -- until the walk swing has eased all the way back out (rather than
-    -- simply "not isMoving") so the two systems don't fight over the same
-    -- frame's vertex positions during the stop transition.
-    if characterNativeTrack and not isMoving and not jumpProgress and characterWalkBlend <= 0.001 then
-      local TrainerMorph = V.TrainerMorph
-      if TrainerMorph then
-        local clip, a, b, u, role = TrainerMorph.trackSample(characterNativeTrack, nil, characterIdleTime, nil, nil)
-
-        -- Debug: log sampling result
-        if math.floor(characterIdleTime) > (PlayerModel._lastNativeSampleLogTime or -999) then
-          PlayerModel._lastNativeSampleLogTime = math.floor(characterIdleTime)
-          print("[PlayerModel.draw] Native sample result: clip:", clip, "a:", a, "b:", b, "u:", u, "role:", role)
-          if clip then
-            print("[PlayerModel.draw] Clip has groups:", clip.groups and #clip.groups or "nil")
-          end
-        end
-
-        if clip and a and b and clip.groups then
-          -- Debug: log native sampling (throttled)
-          if math.floor(characterIdleTime) > (PlayerModel._lastNativeSampleLogTime or -999) then
-            PlayerModel._lastNativeSampleLogTime = math.floor(characterIdleTime)
-            print("[PlayerModel.draw] Native idle sample: clip:", a, b, "u:", u, "role:", role, "groups:", #clip.groups, "characterGroups:", #characterGroups)
-          end
-
-          -- Apply vertex offsets from native track to each mesh group
-          for gi, group in ipairs(characterGroups) do
-            local clipGroup = clip.groups[gi]
-            if clipGroup and clipGroup.path and group.baseVertices then
-              -- Read native vertex data for this frame
-              local clipPath = clipGroup.path
-              local verticesPerFrame = #group.baseVertices
-              local bytesPerVertex = 24  -- 6 floats * 4 bytes each (NativePosition + NativeNormal)
-              local frameOffsetA = (a - 1) * verticesPerFrame * bytesPerVertex
-              local frameOffsetB = (b - 1) * verticesPerFrame * bytesPerVertex
-
-              local bytes = GeneratedAssets.read(clipPath)
-              if bytes and #bytes >= frameOffsetB + verticesPerFrame * bytesPerVertex then
-                -- Apply interpolated offsets to mesh
-                local vertexData = {}
-                for vi = 1, #group.baseVertices do
-                  local base = group.baseVertices[vi]
-                  local uv = group.baseUVs[vi]
-                  local offsetA = frameOffsetA + (vi - 1) * bytesPerVertex
-                  local offsetB = frameOffsetB + (vi - 1) * bytesPerVertex
-
-                  -- Read interpolated position (first 3 floats = NativePosition)
-                  local ax, ay, az = 0, 0, 0
-                  local bx, by, bz = 0, 0, 0
-
-                  -- Parse frame A position
-                  if offsetA + 12 <= #bytes then
-                    ax = string.unpack("<f", bytes, offsetA + 1)
-                    ay = string.unpack("<f", bytes, offsetA + 5)
-                    az = string.unpack("<f", bytes, offsetA + 9)
-                  end
-
-                  -- Parse frame B position
-                  if offsetB + 12 <= #bytes then
-                    bx = string.unpack("<f", bytes, offsetB + 1)
-                    by = string.unpack("<f", bytes, offsetB + 5)
-                    bz = string.unpack("<f", bytes, offsetB + 9)
-                  end
-
-                  -- Native track stores absolute positions, use them directly (interpolated)
-                  local ox = ax + (bx - ax) * u
-                  local oy = ay + (by - ay) * u
-                  local oz = az + (bz - az) * u
-
-                  vertexData[#vertexData + 1] = {
-                    ox, oy, oz,
-                    uv[1] or 0, uv[2] or 0,
-                    1.0, 0.0
-                  }
-                end
-
-                -- Update mesh with new vertex positions
-                if group.mesh then
-                  group.mesh:setVertices(vertexData)
-                end
-              else
-                -- Debug: log why bytes check failed
-                if math.floor(characterIdleTime) > (PlayerModel._lastNativeSampleLogTime or -999) then
-                  print("[PlayerModel.draw] Bytes check failed: bytes:", bytes and #bytes or "nil", "needed:", frameOffsetB + verticesPerFrame * bytesPerVertex, "path:", clipPath)
-                end
-              end
-            else
-              -- Debug: log why clipGroup check failed
-              if math.floor(characterIdleTime) > (PlayerModel._lastNativeSampleLogTime or -999) then
-                print("[PlayerModel.draw] ClipGroup check failed: clipGroup:", clipGroup, "has baseVertices:", group.baseVertices ~= nil)
-              end
-            end
-          end
-        end
+    -- Native idle clip. Held off until the walk swing has eased all the way
+    -- back out (not merely "not isMoving") so the two systems never fight
+    -- over the same frame's vertices. While walking or hopping the clip is
+    -- rewound, so it always restarts from frame 0 when the player stops.
+    if characterNative then
+      if isMoving or jumpProgress or characterWalkBlend > 0.001 then
+        CharacterNativeAnim.reset(characterNative)
+      else
+        CharacterNativeAnim.tick(characterNative, "idle")
       end
     end
-    
+
     -- Calculate the model matrix based on position and facing
     local m = Mat4.translate(px + 8, y, py + 8)
     
@@ -1162,6 +1072,9 @@ function PlayerModel.clearCache()
   end
   -- Clear character cache
   for id, cached in pairs(characterCache) do
+    if cached and cached.native then
+      pcall(CharacterNativeAnim.release, cached.native)
+    end
     if cached and cached.groups then
       for _, group in ipairs(cached.groups) do
         if group.mesh then
@@ -1187,6 +1100,7 @@ function PlayerModel.clearCache()
   usingCharacter = false
   currentCharacterId = nil
   characterGroups = nil
+  characterNative = nil
   characterWalkTime = 0
   characterWalkBlend = 0
   characterWalkRig = nil
