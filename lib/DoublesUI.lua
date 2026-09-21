@@ -568,12 +568,30 @@ function U.draw(game,battle)
   local u=state(s)
   if T.displayCompat then s=T.displayCompat.enrich(game,battle,s,u.page) end
   local g=love.graphics;local w,h=g.getDimensions()
+  -- Check if this is a Gen 3 battle with a 240x160 surface
+  local isGen3 = game and game.data and game.data.audio and tonumber(game.data.audio.generation)==3
+  local battleW,battleH = w,h
+  local ox,oy = 0,0
+  if isGen3 then
+    -- Use the actual battle surface size for Gen 3
+    local Renderer = require("src.render.Renderer")
+    if Renderer and type(Renderer.uiSize)=="function" then
+      local ok,uiW,uiH = pcall(Renderer.uiSize,Renderer)
+      if ok and tonumber(uiW) and tonumber(uiH) then
+        battleW,battleH = tonumber(uiW),tonumber(uiH)
+        -- Center the UI in the window for Gen 3
+        ox,oy = math.floor((w - battleW) / 2), math.floor((h - battleH) / 2)
+      end
+    end
+  end
   local mobile=T.mobile and T.mobile() or false
-  local L=U.layout(w,h,u.page,mobile);local unit=L.u
+  local L=U.layout(battleW,battleH,u.page,mobile);local unit=L.u
   local choosing=s.phase=='command' or s.phase=='replace'
   local ids=targets(s,u);local selectedTarget=u.page=='targets' and ids[u.index]
   local visible=U.visibility(s,u.page,selectedTarget)
   g.push('all');g.origin();g.setShader();g.setScissor()
+  -- Translate to battle surface origin for Gen 3
+  if isGen3 and (ox~=0 or oy~=0) then g.translate(ox,oy) end
   if choosing and (u.page=='party' or u.page=='item-party') then
     g.setColor(0,.015,.02,.28);g.rectangle('fill',0,0,w,h)
     if T.party then

@@ -70,7 +70,7 @@ end
 function A.install()
  if A.installed then return end
  local generation=V.GenerationCompat.current()
- local cls=(V.engineRequire or require)(generation==2 and 'src.ui.battle.BattleState' or 'src.battle.BattleState')
+ local cls=(V.engineRequire or require)(generation==2 and 'src.battle.BattleState' or 'src.gen2.BattleState')
  local inner=cls.update
  cls.update=function(screen,dt,...)
   return A.call(inner,screen,A.update(screen,generation,dt),dt,...)

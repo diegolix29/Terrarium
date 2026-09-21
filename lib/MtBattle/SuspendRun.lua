@@ -150,7 +150,7 @@ function SR.install(mod)
   if SR.installed then return true end
   mod=mod or V.mod
   local generation=(V.GenerationCompat and V.GenerationCompat.current and V.GenerationCompat.current()) or 1
-  local class=req(generation==2 and "src.ui.battle.BattleState" or "src.battle.BattleState")
+  local class=req(generation==2 and "src.battle.BattleState" or "src.battle.BattleState")
   local old=class and class.update
   if type(old)~="function" then return false,"battle update unavailable" end
   SR.updateWrapper=function(screen,dt,...)

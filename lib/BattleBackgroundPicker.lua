@@ -546,7 +546,7 @@ function M.install()
   -- applies to live-world battles and to classic battles using a picked image.
   -- Install this first so the engine HUD tiles are keyed before drawPanel.
   installTransparentHudTiles()
-  local okState, BattleState = pcall(require, "src.ui.battle.BattleState")
+  local okState, BattleState = pcall(require, "src.battle.BattleState")
   local okChrome, Chrome = pcall(require, "src.ui.gen2.Chrome")
   if not (okState and type(BattleState) == "table"
       and type(BattleState.drawPanel) == "function") then

@@ -96,6 +96,25 @@ local KNEE_LAG = 0.12 -- fraction of a full stride the knee-bend peak lags the h
 -- idea applied to its bone rig.
 local BOB_AMOUNT = 0.05
 
+-- ------- jump pose tuning (see M.applyJump below)
+--
+-- A manual hop (main.lua's JUMP key, thrown when it isn't crossing a real
+-- ledge) is one clean up/down arc rather than a repeating stride, so it
+-- doesn't have a "phase" to loop the way HIP_SWING/KNEE_BEND above do --
+-- just a single 0 (takeoff) .. 1 (landing) progress. JUMP_HIP_MAX/
+-- JUMP_KNEE_MAX/JUMP_ARM_MAX are the pose at full airborne tuck (progress
+-- 0.5); JUMP_LOAD_FRAC/JUMP_SETTLE_FRAC are how much of the jump, at each
+-- end, is spent easing into/out of a shallower JUMP_CROUCH_FRAC anticipation
+-- crouch before the legs pull all the way up. Same "retune the constant,
+-- not the FK math" note as HIP_FRACTION_OF_SHOULDER etc. above applies here.
+local JUMP_LOAD_FRAC = 0.18    -- fraction of the jump spent easing into the windup crouch
+local JUMP_SETTLE_FRAC = 0.18  -- fraction spent easing out of the landing crouch
+local JUMP_CROUCH_FRAC = 0.30  -- windup/landing crouch depth, as a fraction of full tuck
+local JUMP_HIP_MAX = 0.35      -- hip flexion (radians) at full airborne tuck
+local JUMP_KNEE_MAX = 1.10     -- knee bend (radians) at full airborne tuck -- deeper than
+                                -- KNEE_BEND since a hop tucks both feet up, not one recovering leg
+local JUMP_ARM_MAX = 0.50      -- arm swing (radians), back and away from the tucked legs
+
 local function clamp(v, a, b) if v < a then return a elseif v > b then return b else return v end end
 local function smooth01(t) t = clamp(t, 0, 1); return t * t * (3 - 2 * t) end
 
@@ -168,6 +187,38 @@ function M.build(id, groups, bounds)
   return rig
 end
 
+-- Apply manual vertex overrides exported from the Python editor.
+-- `overridesPath` is the path to a Lua file like {char_id}_walk_overrides.lua
+-- that contains: return { [1]={{ [1]={bucket="arm",weight=1.0}, ... }}, ... }
+-- where the outer keys are 1-based group indices and inner keys are 1-based vertex indices.
+function M.applyOverrides(rig, overridesPath)
+  local ok, overrides = pcall(dofile, overridesPath)
+  if not ok or type(overrides) ~= "table" then
+    print("CharacterWalkCycle: failed to load overrides from " .. tostring(overridesPath))
+    return
+  end
+  
+  local appliedCount = 0
+  for groupIdx, groupOverrides in pairs(overrides) do
+    if rig.groups[groupIdx] then
+      for vertexIdx, override in pairs(groupOverrides) do
+        local bucket = rig.groups[groupIdx][vertexIdx]
+        if bucket then
+          if override.bucket then
+            bucket.bucket = override.bucket
+          end
+          if override.weight then
+            bucket.weight = override.weight
+          end
+          appliedCount = appliedCount + 1
+        end
+      end
+    end
+  end
+  
+  print("CharacterWalkCycle: applied " .. appliedCount .. " manual overrides from " .. tostring(overridesPath))
+end
+
 -- Advance/decay a smooth 0..1 blend toward `movingNow`, so starting or
 -- stopping eases the swing in/out over a few frames instead of snapping --
 -- same idea as red_3d_player's startBlendRate/stopBlendRate.
@@ -238,6 +289,94 @@ function M.apply(rig, groupIndex, group, phase, blend, out)
     -- Reassemble (side, up, fwd) back into (x, y, z) using whichever axis
     -- FORWARD_INDEX/SIDE_INDEX picked -- these are fixed module constants,
     -- not per-vertex, so this is just undoing the split above.
+    local ox, oy, oz
+    oy = up
+    if FORWARD_INDEX == 3 then ox, oz = side, fwd else ox, oz = fwd, side end
+
+    local slot = out[vi]
+    local uvv = uv[vi]
+    if slot then
+      slot[1], slot[2], slot[3] = ox, oy, oz
+      slot[4], slot[5] = uvv[1] or 0, uvv[2] or 0
+      slot[6], slot[7] = 1.0, 0.0
+    else
+      out[vi] = { ox, oy, oz, uvv[1] or 0, uvv[2] or 0, 1.0, 0.0 }
+    end
+  end
+
+  return out
+end
+
+-- Single 0..1 "how bent right now" curve for a manual hop: rises from 0
+-- (standing) through a shallow JUMP_CROUCH_FRAC windup crouch at
+-- JUMP_LOAD_FRAC, on up to a full 1.0 tuck at the midpoint (progress 0.5,
+-- the top of the hop), back down through a shallow landing crouch at
+-- 1 - JUMP_SETTLE_FRAC, and down to 0 again by progress 1 (feet planted).
+-- Every limb in M.applyJump below reads this same curve, just scaled by
+-- its own JUMP_*_MAX, rather than each keeping its own separate timing --
+-- one shared curve is what keeps the hip/knee/arm moving as one motion
+-- instead of three animations that happen to overlap.
+local function jumpEnvelope(p)
+  local L, S = JUMP_LOAD_FRAC, JUMP_SETTLE_FRAC
+  if p <= L then
+    return JUMP_CROUCH_FRAC * smooth01(p / L)
+  elseif p <= 0.5 then
+    return JUMP_CROUCH_FRAC + (1 - JUMP_CROUCH_FRAC) * smooth01((p - L) / (0.5 - L))
+  elseif p <= 1 - S then
+    return 1 - (1 - JUMP_CROUCH_FRAC) * smooth01((p - 0.5) / (0.5 - S))
+  else
+    return JUMP_CROUCH_FRAC * (1 - smooth01((p - (1 - S)) / S))
+  end
+end
+
+-- Produce a fresh vertexData array for one mesh group during a manual
+-- (cosmetic, in-place) hop -- see PlayerModel.draw for where `progress`
+-- (0 at takeoff, 1 at landing) comes from. Same output shape and same
+-- `out`-reuse convention as M.apply, and callers should use ONE or the
+-- OTHER per frame, never both: a hop and a stride are different motions
+-- of the same buckets, not two things to blend together.
+--
+-- Unlike M.apply, there is no left/right alternation here -- both feet
+-- leave the ground together on a hop, so every bucket gets the same
+-- magnitude regardless of `b.side` -- and no torso bob, since the actual
+-- vertical travel of the whole model is the engine's own jump arc,
+-- already baked into the `y` PlayerModel.draw is called with.
+function M.applyJump(rig, groupIndex, group, progress, out)
+  out = out or {}
+  local buckets = rig.groups[groupIndex]
+  local base, uv = group.baseVertices, group.baseUVs
+  if not buckets or not base then return out end
+
+  local hipY, kneeY, shoulderY = rig.hipY, rig.kneeY, rig.shoulderY
+  local e = jumpEnvelope(clamp(progress or 0, 0, 1))
+  local hipAngle = JUMP_HIP_MAX * e
+  local kneeAngle = JUMP_KNEE_MAX * e
+  local armAngle = JUMP_ARM_MAX * e
+
+  for vi = 1, #base do
+    local v = base[vi]
+    local side = v[SIDE_INDEX]
+    local up = v[2]
+    local fwd = v[FORWARD_INDEX]
+
+    local b = buckets[vi]
+    if b and b.weight > 0 and e > 0 then
+      if b.bucket == "arm" then
+        -- Both arms swing back together, away from the tucked legs, same
+        -- "negative = backward" sign M.apply's own arm swing uses.
+        up, fwd = rotate2(up, fwd, shoulderY, 0, -armAngle * b.weight)
+      elseif b.bucket == "thigh" then
+        up, fwd = rotate2(up, fwd, hipY, 0, hipAngle * b.weight)
+      elseif b.bucket == "shin" then
+        -- Same hip-then-knee FK chain as M.apply: swing the whole leg
+        -- (including the knee pivot) around the hip first, then fold the
+        -- shin further around the knee's already-swung position.
+        local kneeUpNow, kneeFwdNow = rotate2(kneeY, 0, hipY, 0, hipAngle * b.weight)
+        up, fwd = rotate2(up, fwd, hipY, 0, hipAngle * b.weight)
+        up, fwd = rotate2(up, fwd, kneeUpNow, kneeFwdNow, kneeAngle * b.weight)
+      end
+    end
+
     local ox, oy, oz
     oy = up
     if FORWARD_INDEX == 3 then ox, oz = side, fwd else ox, oz = fwd, side end

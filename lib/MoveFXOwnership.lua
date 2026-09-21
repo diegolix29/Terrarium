@@ -311,7 +311,7 @@ end
 local function installGen2()
   local req=V.engineRequire or require
   local okView,AnimView=pcall(req,"src.ui.battle.BattleAnimView")
-  local okState,BattleState=pcall(req,"src.ui.battle.BattleState")
+  local okState,BattleState=pcall(req,"src.battle.BattleState")
   if not okView or type(AnimView)~="table" then return false,tostring(AnimView) end
   if not okState or type(BattleState)~="table" then return false,tostring(BattleState) end
 

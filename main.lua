@@ -1700,39 +1700,44 @@ SettingsMenu.update = function(self)
   return originalUpdate(self)
 end
 
--- Handle key capture for jump binding
-mod.hooks:wrap("Game.keypressed", function(next, game, key)
-  if _G.keyBindingState and _G.keyBindingState.active then
-    if _G.keyBindingState.justActivated then
-      _G.keyBindingState.justActivated = false
-      return true -- Consume the activation key
-    end
-    
-    -- Don't bind menu navigation keys
-    local menuKeys = {
-      "escape", "return", "tab", "up", "down", "left", "right",
-      "w", "a", "s", "d", "z", "x", "c", "v", "b", "n", "m"
-    }
-    local isMenuKey = false
-    for _, mk in ipairs(menuKeys) do
-      if key == mk then
-        isMenuKey = true
-        break
+-- Handle key capture for jump binding. Mirrors the gamepadpressed
+-- hook pattern - directly override the Game method to ensure reliable
+-- key event interception in the settings menu.
+do
+  local Game = require("src.core.Game")
+  local inner = Game.keypressed
+  function Game:keypressed(key, ...)
+    if _G.keyBindingState and _G.keyBindingState.active then
+      if _G.keyBindingState.justActivated then
+        _G.keyBindingState.justActivated = false
+        return true -- Consume the activation key
+      end
+
+      -- Don't bind menu navigation keys
+      local menuKeys = {
+        "escape", "return", "tab", "up", "down", "left", "right",
+        "w", "a", "s", "d", "z", "x", "c", "v", "b", "n", "m"
+      }
+      local isMenuKey = false
+      for _, mk in ipairs(menuKeys) do
+        if key == mk then
+          isMenuKey = true
+          break
+        end
+      end
+
+      if not isMenuKey then
+        setJumpKey("keyboard:" .. key)
+        _G.keyBindingState.active = false
+        return true
+      elseif key == "escape" then
+        _G.keyBindingState.active = false
+        return true
       end
     end
-    
-    if not isMenuKey then
-      setJumpKey("keyboard:" .. key)
-      _G.keyBindingState.active = false
-      return true
-    elseif key == "escape" then
-      _G.keyBindingState.active = false
-      return true
-    end
-    return next(game, key)
+    if inner then return inner(self, key, ...) end
   end
-  return next(game, key)
-end)
+end
 
 -- Handle gamepad button capture for jump binding. Mirrors the keypressed
 -- hook above but for a real pad press (button names here are LÖVE's own

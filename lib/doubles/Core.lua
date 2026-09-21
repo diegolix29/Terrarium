@@ -136,7 +136,20 @@ end
 function Core:markParticipants()
   for _,e in ipairs(self:aliveSlots("enemy")) do
     local p=self.participants[e.mon] or {}; self.participants[e.mon]=p
-    for _,s in ipairs(self:aliveSlots("player")) do p[s.partyIndex]=true end
+    for _,s in ipairs(self:aliveSlots("player")) do p[s.mon]=true end
+  end
+  -- Debug: ensure participants table is populated
+  local enemyCount=#self:aliveSlots("enemy")
+  local playerCount=#self:aliveSlots("player")
+  if enemyCount>0 and playerCount>0 then
+    for _,e in ipairs(self:aliveSlots("enemy")) do
+      if not self.participants[e.mon] or next(self.participants[e.mon])==nil then
+        self.participants[e.mon]={}
+        for _,s in ipairs(self:aliveSlots("player")) do
+          self.participants[e.mon][s.mon]=true
+        end
+      end
+    end
   end
 end
 function Core:checkOutcome()
@@ -157,10 +170,10 @@ function Core:noteFaints(source)
       if s.side=="enemy" and not self.seenFaints[s.mon] then
         self.seenFaints[s.mon]=true
         local p=copy(self.participants[s.mon])
-        for i in pairs(p) do if not healthy(self.playerParty[i]) then p[i]=nil end end
+        for mon in pairs(p) do if not healthy(mon) then p[mon]=nil end end
         local eligible={}
-        for i,m in ipairs(self.playerParty) do
-          eligible[i]={mon=m,alive=healthy(m)==true,item=m.item,hp=m.hp}
+        for _,m in ipairs(self.playerParty) do
+          eligible[m]={mon=m,alive=healthy(m)==true,item=m.item,hp=m.hp}
         end
         self.defeated[#self.defeated+1]={mon=s.mon,battler=s.battler,participants=p,
           partyIndex=s.partyIndex,battlerId=s.battlerId,eligibleParty=eligible,

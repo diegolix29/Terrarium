@@ -811,7 +811,7 @@ function M.install()
     return nil
   end
 
-  local okGold, GoldBattleState = pcall(require, "src.ui.battle.BattleState")
+  local okGold, GoldBattleState = pcall(require, "src.battle.BattleState")
   if okGold and type(GoldBattleState) == "table"
       and type(GoldBattleState.animForMove) == "function"
       and not GoldBattleState._stadium3DFxMoveHook then

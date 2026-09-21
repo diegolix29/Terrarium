@@ -3384,6 +3384,25 @@ function GoldCompat.locationBannerPresentationEnabled()
 end
 
 function GoldCompat.battlePresentationEnabledFor(battle)
+  -- Check if this is a doubles battle - multiple detection methods
+  local isDoubles = battle and (battle.__cbeDoublesActive or 
+    (battle.battle and battle.battle.__cbeDoublesActive) or
+    (battle.screen and battle.screen.__cbeDoublesActive))
+  
+  -- Also check for engine-level double battle indicators - be very permissive
+  if battle and not isDoubles then
+    local host = battle.battle or battle
+    -- Check if enemy has multiple Pokemon (common double battle indicator)
+    isDoubles = (host.enemyParty and #host.enemyParty>=2) or
+                 (host.doubleBattle == true) or 
+                 (host.isDoubleBattle == true) or
+                 (host.battleType and (host.battleType==2 or host.battleType=="double"))
+  end
+  
+  if isDoubles then
+    return true  -- Always hide native UI during doubles battles
+  end
+  
   local safari=battle and GoldCompat.resolvedSafariState(battle) or nil
   if not safari then
     local game=(battle and battle.game) or GoldCompat.game

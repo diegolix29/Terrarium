@@ -633,6 +633,18 @@ end
 
 -- Draw the player model at the given position with the given transform.
 -- This integrates with the existing Voxel3D pipeline.
+--- `mirror` is the sprite step-flip flag (see stepFlip in movement.lua /
+--- GoldVoxelBridge.lua): the 2D sprite renderer toggles it every other
+--- footstep and flips the flat sprite card left/right to fake a second walk
+--- frame out of one drawn frame. That trick only works because a sprite is a
+--- flat billboard with no back side. None of the four model branches below
+--- apply it to the mesh: mirroring real geometry with Mat4.scale(-1,1,1)
+--- inverts triangle winding (culling/lighting read as inverted) and mirrors
+--- any asymmetric detail to the wrong side, on top of whatever real walk
+--- animation the branch already drives from movement/time (CharacterWalkCycle,
+--- the Stadium rig, ColosseumMon). `mirror` is only still accepted as a
+--- parameter so callers can keep passing the same stepFlip value used for
+--- the 2D sprite path without needing a special case.
 function PlayerModel.draw(px, py, y, facing, mirror)
   -- In free-roam mode with FreeMove, use the actual body facing direction
   local FirstPerson = V.require("FirstPerson")
@@ -749,9 +761,7 @@ function PlayerModel.draw(px, py, y, facing, mirror)
       end
     end
 
-    if mirror then
-      m = Mat4.mul(m, Mat4.scale(-1, 1, 1))
-    end
+    -- `mirror` intentionally unused here -- see the note above PlayerModel.draw.
 
     return ColosseumMon.draw(currentColosseumDex, colosseumVariant, m)
   end
@@ -808,10 +818,7 @@ function PlayerModel.draw(px, py, y, facing, mirror)
       m = Mat4.mul(m, Mat4.rotateY(yaw))
     end
     
-    -- Apply mirroring if needed
-    if mirror then
-      m = Mat4.mul(m, Mat4.scale(-1, 1, 1))
-    end
+    -- `mirror` intentionally unused here -- see the note above PlayerModel.draw.
     
     -- Apply scaling for Stadium model (use similar scale to Pokemon in battles)
     local model = currentStadiumModel
@@ -853,6 +860,29 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     local isMoving = Game.input:isDown("up") or Game.input:isDown("down")
                     or Game.input:isDown("left") or Game.input:isDown("right")
 
+    -- Detect whether a manual (cosmetic, in-place) hop is currently
+    -- playing, by reading the exact same fields off the exact same player
+    -- table main.lua's "jump" key handler writes to. That handler (search
+    -- main.lua for `claim == "jump"`) sets red3dManualJumpFrames/Total on
+    -- `self.overworld.player` -- i.e. Game.overworld.player, the same
+    -- accessor every other lib file in this mod uses to reach the live
+    -- player (see e.g. WildRoamers.lua, MiniMap.lua, Weather.lua) -- not
+    -- Game.stack:top(), which can be some other screen (a dialog, a menu)
+    -- stacked on top of the frozen overworld while this still draws.
+    -- Nothing in this mod ticks the counter down; that's the same engine
+    -- that owns the actual vertical jump arc, so by the time this draws
+    -- it's already been advanced. It counts down linearly from Total to 0,
+    -- so 1 - frames/total is a clean 0 (takeoff) .. 1 (landing) progress
+    -- with no extra smoothing needed -- CharacterWalkCycle.applyJump's own
+    -- envelope already fades to 0 at both ends, so there's nothing to pop
+    -- when the jump starts or ends.
+    local ow = Game.overworld
+    local jumper = ow and ow.player
+    local jumpFrames = jumper and jumper.red3dManualJumpFrames
+    local jumpTotal = jumper and jumper.red3dManualJumpTotal
+    local jumpProgress = (jumpFrames and jumpTotal and jumpTotal > 0)
+      and (1 - jumpFrames / jumpTotal) or nil
+
     -- Update animation time
     if isMoving then
       characterWalkTime = characterWalkTime + 0.15  -- Walk animation speed / gait phase
@@ -878,14 +908,25 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- there's any swing left to show, not just while isMoving is literally
     -- true this frame, so characterWalkBlend's stop-easing above actually
     -- has motion to ease out of.
-    if characterWalkRig and characterWalkBlend > 0.001 then
+    if characterWalkRig and (jumpProgress or characterWalkBlend > 0.001) then
       for gi, group in ipairs(characterGroups) do
         if group.mesh and group.baseVertices then
-          local buf = CharacterWalkCycle.apply(
-            characterWalkRig, gi, group,
-            characterWalkTime, characterWalkBlend,
-            characterWalkVertexBuffers[gi]
-          )
+          local buf
+          if jumpProgress then
+            -- A hop has no gait to loop -- one clean up/down arc, not a
+            -- repeating stride -- so it gets its own single-pass pose
+            -- instead of another position on the walk cycle's phase wheel.
+            buf = CharacterWalkCycle.applyJump(
+              characterWalkRig, gi, group, jumpProgress,
+              characterWalkVertexBuffers[gi]
+            )
+          else
+            buf = CharacterWalkCycle.apply(
+              characterWalkRig, gi, group,
+              characterWalkTime, characterWalkBlend,
+              characterWalkVertexBuffers[gi]
+            )
+          end
           characterWalkVertexBuffers[gi] = buf
           group.mesh:setVertices(buf)
         end
@@ -896,7 +937,7 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- until the walk swing has eased all the way back out (rather than
     -- simply "not isMoving") so the two systems don't fight over the same
     -- frame's vertex positions during the stop transition.
-    if characterNativeTrack and not isMoving and characterWalkBlend <= 0.001 then
+    if characterNativeTrack and not isMoving and not jumpProgress and characterWalkBlend <= 0.001 then
       local TrainerMorph = V.TrainerMorph
       if TrainerMorph then
         local clip, a, b, u, role = TrainerMorph.trackSample(characterNativeTrack, nil, characterIdleTime, nil, nil)
@@ -1046,10 +1087,7 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- smaller torso bob, timed to the footfalls rather than a flat sine on
     -- the whole matrix). See the vertex-buffer block above.
 
-    -- Apply mirroring if needed
-    if mirror then
-      m = Mat4.mul(m, Mat4.scale(-1, 1, 1))
-    end
+    -- `mirror` intentionally unused here -- see the note above PlayerModel.draw.
     
     -- Apply character scale from cache
     local cached = characterCache[currentCharacterId]
@@ -1090,10 +1128,7 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     m = Mat4.mul(m, Mat4.rotateY(yaw))
   end
   
-  -- Apply mirroring if needed
-  if mirror then
-    m = Mat4.mul(m, Mat4.scale(-1, 1, 1))
-  end
+  -- `mirror` intentionally unused here -- see the note above PlayerModel.draw.
   
   -- Apply scaling to match game world units
   -- Increased scale to make the model more visible

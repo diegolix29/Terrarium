@@ -684,7 +684,7 @@ end
 
 -- ----- trainer portraits ------------------------------------------------------------
 local function installPortraitBridge()
-  local ok, BattleState = pcall(require, "src.ui.battle.BattleState")
+  local ok, BattleState = pcall(require, "src.battle.BattleState")
   if not (ok and type(BattleState) == "table" and type(BattleState.new) == "function") then return false end
   if BattleState._stadiumBattleFx217PortraitBridge then return true end
   local inner = BattleState.new

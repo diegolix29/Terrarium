@@ -15,6 +15,7 @@ local MASK_A = "assets/transition/wipe_ball00.rgba"
 local MASK_B = "assets/transition/wipe_ball01.rgba"
 local WIPE_SECONDS = 0.62
 local BLACK_HOLD_SECONDS = 0.0
+local BLACK_HOLD_SECONDS_GEN3 = 0.1
 local REFERENCE_SFX_SECONDS = 0.678
 local installed = false
 local rendererPatched = false
@@ -49,6 +50,10 @@ local function shouldOwnTransition(mod,game)
     local ok,on=pcall(catalog.enabled,game)
     if ok and not on then return false end
   end
+  -- Skip transition for doubles battles
+  if game and game.save and game.save.colosseumBattle and game.save.colosseumBattle.mode=='colosseumA' then
+    return false
+  end
   return true
 end
 
@@ -63,6 +68,15 @@ local function isGen2Transition(game,ctx)
   if type(ctx)=="table" and (ctx.environment~=nil or ctx.playerLevel~=nil or ctx.enemyLevel~=nil) then
     return true
   end
+  return false
+end
+
+local function isGen3Transition(game,ctx)
+  local audio=game and game.data and game.data.audio
+  if type(audio)=="table" and tonumber(audio.generation)==3 then return true end
+  -- Fallback: check if Gen 3 battle classes exist
+  local ok,BattleState=pcall(require,"src.battle.BattleState")
+  if ok and BattleState and BattleState.gen3Layout then return true end
   return false
 end
 local transitionSource=nil
@@ -241,7 +255,10 @@ local function patchClock(mod)
       local len=math.max(1,tonumber(self.wipeLen) or 60)
       self.phase="wipe"
       self.t=math.min(len,(elapsed/WIPE_SECONDS)*len)
-      if elapsed>=WIPE_SECONDS+BLACK_HOLD_SECONDS and not self.__colosseumDone then
+      -- Use Gen 3-specific hold time for Gen 3 battles
+      local isGen3=isGen3Transition(self.game,nil)
+      local hold=isGen3 and BLACK_HOLD_SECONDS_GEN3 or BLACK_HOLD_SECONDS
+      if elapsed>=WIPE_SECONDS+hold and not self.__colosseumDone then
         self.__colosseumDone=true
         self.game.stack:pop()
         if self.onDone then self.onDone() end

@@ -201,12 +201,12 @@ end
 function M.install()
   if M.installed then return true end
   local okBattle, Battle = pcall(require, "src.battle.BattleState")
-  local okState, BattleState = pcall(require, "src.ui.battle.BattleState")
+  local okState, BattleState = pcall(require, "src.battle.BattleState")
   if not (okBattle and type(Battle) == "table") then
     return false, "src.battle.BattleState unavailable"
   end
   if not (okState and type(BattleState) == "table") then
-    return false, "src.ui.battle.BattleState unavailable"
+    return false, "src.battle.BattleState unavailable"
   end
   if BattleState._stadiumDoubleBattleMode then
     M.installed = true

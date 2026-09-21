@@ -47,7 +47,12 @@ function A.new(host,generation)
     -- leaving native singles/mod registries untouched. Gen II source semantics:
     -- pret/pokecrystal engine/battle/move_effects/psych_up.asm and the PsychUp
     -- list in data/moves/effects.asm (no checkhit; fail for all-neutral stages).
-    local psych=self.native.moveEffectRecordFor(self.data,'EFFECT_PSYCH_UP')
+    -- self.native.moveEffectRecordFor never existed on the native module (only
+    -- BattleState:effectRecord(effect) does, which reads self.data internally
+    -- rather than taking it as a parameter). Calling the old name crashed here
+    -- unconditionally -- every time a Gen II kernel was constructed, whether or
+    -- not Psych Up was ever used -- which is why Gen II doubles never started.
+    local psych=self.native.effectRecord and self.native.effectRecord(self,'EFFECT_PSYCH_UP')
     if not (psych and type(psych.run)=='function') then
       k.data=copy(self.data);k.data.gen2MoveEffects=copy(self.data.gen2MoveEffects)
       k.data.gen2MoveEffects.EFFECT_PSYCH_UP={kind='primary',run=function(kernel,user,target)
@@ -235,7 +240,18 @@ function A:targetMode(def)
   return 'selected'
 end
 function A:forced(s)
-  if self.generation==2 then local id=self.k:forcedMove(s.mon);return id and {id=id} end
+  if self.generation==2 then
+    -- self.k:forcedMove never existed on the native module (BattleState has
+    -- no forcedMove method at all -- confirmed by search). Gen II's lock-in
+    -- state lives in mon.volatile under recharge/chargeMove/rampageMove/
+    -- rolloutLock, exactly as switchLocked() and perform() already read it
+    -- a few functions away; forced() just needs to agree with them instead
+    -- of calling into the engine for something the engine never exposed.
+    local v=self.k:volatile(s.mon)
+    if v.recharge then return {special='recharge'} end
+    local id=v.chargeMove or v.rampageMove or v.rolloutLock
+    return id and {id=id}
+  end
   local b=s.battler
   if b.mustRecharge then return {special='recharge'} end
   return b.charging or b.thrashMove or b.rageMove
@@ -294,7 +310,10 @@ function A:bind(s,t)
     for _,slot in pairs(self.core.slots) do if slot.mon then
       k.stages[slot.id]=slot.stages;k.screens[slot.id]=self.screens[slot.side]
     end end
-    k.stages.player=self.core:slotFor(k.player).stages;k.stages.enemy=self.core:slotFor(k.enemy).stages
+    local playerSlot=self.core:slotFor(k.player);local enemySlot=self.core:slotFor(k.enemy)
+    -- If slot lookup fails, use the source slot's stages as fallback
+    k.stages.player=(playerSlot and playerSlot.stages) or (s.side=='player' and s.stages) or {}
+    k.stages.enemy=(enemySlot and enemySlot.stages) or (s.side=='enemy' and s.stages) or {}
     k.spikes=setmetatable({}, {__index=function(_,id) local slot=self.core.slots[id];return self.spikes[slot and slot.side or id] end,
       __newindex=function(_,id,value) local slot=self.core.slots[id];self.spikes[slot and slot.side or id]=value end})
   else
@@ -310,11 +329,16 @@ function A:onEnterAbilities(s)
     if AbilityEffectsGen2 then
       local oppMons={}
       for _,opp in ipairs(opponents) do oppMons[#oppMons+1]=opp.mon end
-      AbilityEffectsGen2.onEnter(self.k, s.mon, oppMons)
+      -- Check if onEnter method exists before calling
+      if type(AbilityEffectsGen2.onEnter)=='function' then
+        AbilityEffectsGen2.onEnter(self.k, s.mon, oppMons)
+      end
     end
   elseif AbilityEffectsGen1 then
     local battlers={};for _,opp in ipairs(opponents) do battlers[#battlers+1]=opp.battler end
-    AbilityEffectsGen1.onEnter(self.k,s.battler,battlers)
+    if type(AbilityEffectsGen1.onEnter)=='function' then
+      AbilityEffectsGen1.onEnter(self.k,s.battler,battlers)
+    end
   end
 end
 function A:onOpeningAbilities()
@@ -331,15 +355,29 @@ function A:abilityInfo(mon)
 end
 function A:onEnter(s)
   if self.generation==2 then
-    self:bind(s,s)
-    self.k:spikesDamage(s.mon)
+    -- Find an opponent to bind against, prefer live opponent over self
+    local opponents=self.core:aliveSlots(s.side=='player' and 'enemy' or 'player')
+    local target=opponents[1] or s
+    self:bind(s,target)
+    -- Apply spikes damage if the side has spikes set
+    if self.spikes and self.spikes[s.side] then
+      local mon=s.mon
+      if mon and mon.hp and mon.hp>0 then
+        local damage=math.max(1,math.floor((mon.stats and mon.stats.hp or mon.maxHp or 100)/8))
+        mon.hp=math.max(0,mon.hp-damage)
+        self.core:message(self:name(mon).." was hurt by the spikes!")
+      end
+    end
   end
   self:onEnterAbilities(s)
 end
 function A:speed(s)
-  if self.generation==2 then self:bind(s,s);return self.k:effectiveSpeed(s.mon) end
+  if self.generation==2 then
+    self:bind(s,s)
+    return self.k:effectiveSpeed(s.mon)
+  end
   local multiplier=AbilityEffectsGen1 and AbilityEffectsGen1.speedMultiplier(self.k,s.battler) or 1
-  return self.order.effectiveSpeed(s.battler)*multiplier
+  return (self.order.effectiveSpeed(s.battler) or 0)*multiplier
 end
 function A:priority(id)
   local d=self:moveDef(id)
@@ -683,9 +721,15 @@ function A:onReveal(s)
   local save=self.host.save or (self.host.game and self.host.game.save)
   if not save then return end
   if self.generation==2 then
-    local screen=req('src.ui.battle.BattleState')
-    local view=self.screen or {save=save}
-    screen.markSeen(view,s.mon);screen.noteFirstUnown(view,s.mon)
+    local BattleState=req('src.battle.BattleState')
+    if BattleState and type(BattleState.markSeen)=='function' then
+      BattleState.markSeen(self.host.game,s.mon.species)
+    else
+      -- Fallback if module or function doesn't exist
+      save.pokedex=save.pokedex or {seen={},owned={}}
+      save.pokedex.seen=save.pokedex.seen or {}
+      save.pokedex.seen[s.mon.species]=true
+    end
   else
     save.pokedex=save.pokedex or {seen={},owned={}}
     save.pokedex.seen=save.pokedex.seen or {}

@@ -9,7 +9,10 @@ end
 local battleItems={X_ATTACK=true,X_DEFEND=true,X_DEFENSE=true,X_SPEED=true,X_SPECIAL=true,X_SP_ATK=true,X_ACCURACY=true,DIRE_HIT=true,GUARD_SPEC=true}
 local ppItems={ETHER=true,MAX_ETHER=true,ELIXER=true,MAX_ELIXER=true,MYSTERYBERRY=true}
 local fullMask={FULL_HEAL=true,FULL_RESTORE=true,HEAL_POWDER=true,MIRACLEBERRY=true}
-local function effects(a)return req(a.generation==2 and 'src.core.gen2.ItemEffects' or 'src.inventory.ItemEffects')end
+local function effects(a)
+  -- Gen 3 uses the same ItemEffects as Gen 1
+  return req(a.generation==2 and 'src.core.gen2.ItemEffects' or 'src.inventory.ItemEffects')
+end
 function I.save(a)
  local host=a and a.host
  -- Mt. Battle supplies a save-shaped proxy whose inventory is the temporary
@@ -23,14 +26,23 @@ function I.classify(a,id)
  local E=effects(a)
  if battleItems[id] then
   if a.generation==2 and not (a.native.X_ITEMS[id] or a.native.SUBSTATUS_ITEMS[id]) then return nil end
-  if a.generation==1 and (id=='X_DEFENSE' or id=='X_SP_ATK') then return nil end
+  if (a.generation==1 or a.generation==3) and (id=='X_DEFENSE' or id=='X_SP_ATK') then return nil end
   return 'battle'
  end
  if a.generation==2 then
-  local kind=E.partyAction(id,a.data)
+  local kind=type(E.partyAction)=='function' and E.partyAction(id,a.data)
   if kind=='heal' or kind=='status' or kind=='revive' or (kind=='pp' and ppItems[id]) then return kind end
- elseif E.isBattleMedicine(id) then return 'medicine'
- elseif ppItems[id] and id~='MYSTERYBERRY' then return 'pp' end
+ else
+  -- Gen 1 and Gen 3 use the same item classification logic
+  -- Gen 1: check if item is battle medicine (healing/status items usable in battle)
+  -- Use the existing ItemEffects.healsHP function or check against known medicine items
+  local okHeals, isHeal = pcall(E.healsHP, id)
+  if okHeals and isHeal then return 'medicine' end
+  -- Also check status healing items
+  local STATUS_HEAL = {ANTIDOTE=true, BURN_HEAL=true, ICE_HEAL=true, AWAKENING=true, PARLYZ_HEAL=true, FULL_HEAL=true}
+  if STATUS_HEAL[id] then return 'medicine' end
+ end
+ if ppItems[id] and id~='MYSTERYBERRY' then return 'pp' end
 end
 function I.available(a,id)
  local save=I.save(a);local n=save and save.inventory and tonumber(save.inventory[id]) or 0
@@ -64,6 +76,9 @@ function I.apply(a,id,mon,moveIndex,preview)
    return a.k:useBattleItem(id),{}
   end
   local result=kind=='pp' and E.usePpItem(id,target,moveIndex,a.data) or E.useOnMon(id,target,a.data)
+ else
+  -- Gen 1 and Gen 3 use the same item application logic
+  local result={used=false,text=nil}
   if active and fullMask[id] then
    local volatile=mon.volatile or {}
    if volatile.confuseCount then

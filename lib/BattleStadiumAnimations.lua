@@ -237,7 +237,7 @@ function M.install()
   -- same call that starts the cart-authentic AnimRunner.  Drive the Stadium
   -- actor from that exact event so wild AND trainer battles animate.
   local goldMoveToken = 0
-  local okGold, GoldBattleState = pcall(require, "src.ui.battle.BattleState")
+  local okGold, GoldBattleState = pcall(require, "src.battle.BattleState")
   if okGold and type(GoldBattleState) == "table"
       and type(GoldBattleState.animForMove) == "function"
       and not GoldBattleState._stadiumStage1GoldMove then
