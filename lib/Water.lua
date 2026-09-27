@@ -55,7 +55,8 @@ Water.ART_SCALE = 64
 --
 -- A third is enough to keep the sheet's detail and not enough for any one of
 -- its shapes to become a silhouette the eye names.
-Water.ART_MIX = 0.35
+-- Reduced to 0.10 for much more transparency (water art is very subtle)
+Water.ART_MIX = 0.80
 Water.ASSET_DIR = "assets/water/"
 Water.ASSET_FILE = "water.png"
 
@@ -848,7 +849,26 @@ local function loadArt()
     artImage = false
     return nil
   end
-  local ok, img = pcall(Assets.image, path)
+  
+  -- Load as ImageData first to modify RGB values directly
+  local okData, imageData = pcall(Assets.imageData, path)
+  if not (okData and imageData) then
+    artImage = false
+    return nil
+  end
+  
+  -- Apply transparency by reducing RGB values (shader ignores alpha)
+  local width, height = imageData:getWidth(), imageData:getHeight()
+  for y = 0, height - 1 do
+    for x = 0, width - 1 do
+      local r, g, b, a = imageData:getPixel(x, y)
+      -- Reduce RGB to 30% of original for more transparency
+      imageData:setPixel(x, y, r * 0.3, g * 0.3, b * 0.3, a)
+    end
+  end
+  
+  -- Create Image from modified ImageData
+  local ok, img = pcall(love.graphics.newImage, imageData)
   if not (ok and img) then
     artImage = false
     return nil

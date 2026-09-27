@@ -846,7 +846,7 @@ function FirstPerson.install()
     return ok and v or nil
   end
 
-  local function rightJoystickVector(x, y)
+  local function getRightJoystickVector(x, y)
     local ok, v = pcall(function()
       local L = TouchControls:layout()
       local rj = L.rightJoystick
@@ -866,7 +866,7 @@ function FirstPerson.install()
         pcall(function() onControl = TouchControls:hitTest(x, y) end)
         
         -- Check if touch is on right joystick
-        local rjVec = rightJoystickVector(x, y)
+        local rjVec = getRightJoystickVector(x, y)
         if rjVec and not rightJoystickTouch then
           rightJoystickTouch = { id = id, x = x, y = y }
           rightJoystickVector = rjVec
@@ -898,7 +898,7 @@ function FirstPerson.install()
     local inner = Game.touchmoved
     function Game:touchmoved(id, x, y)
       if rightJoystickTouch and rightJoystickTouch.id == id then
-        local rjVec = rightJoystickVector(x, y)
+        local rjVec = getRightJoystickVector(x, y)
         if rjVec then
           rightJoystickVector = rjVec
         end

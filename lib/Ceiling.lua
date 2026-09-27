@@ -54,6 +54,11 @@ end
 local ModSetting = V.require("ModSetting")
 -- Dramatic Shape's own answer for maps under leaves rather than a roof
 local okDN, DayNight = pcall(V.require, "DayNight")
+-- doubling in that case rather than taking the whole module down.
+local okG3, Gen3 = pcall(V.require, "Gen3")
+if not (okG3 and type(Gen3) == "table" and Gen3.mapIsGen3) then
+  Gen3 = { mapIsGen3 = function() return false end }
+end
 
 -- telemetry for the companion's on-screen panel; absence of the global
 -- means this module never loaded this session
@@ -108,7 +113,20 @@ end
 local OPEN_AIR_TILESETS = {
   OVERWORLD = true, FOREST = true, PLATEAU = true, SHIP_PORT = true,
 }
-
+local ROOFTOP_OVERRIDE = {
+  MAP_G13_N21 = true,   -- Hoenn: LilycoveCity_DepartmentStoreRooftop
+  MAP_G26_N65 = true,   -- Hoenn: TrainerHill_Roof
+  MAP_G02_N09 = true,   -- FRLG:  TrainerTower_Roof
+  MAP_G10_N05 = true,   -- FRLG:  CeladonCity_DepartmentStore_Roof
+  MAP_G10_N10 = true,   -- FRLG:  CeladonCity_Condominiums_Roof
+}
+local function gen3Outdoor(map)
+  local okMaps, m = pcall(V.data, "gen3_maps")
+  if not (okMaps and type(m) == "table" and m.maps) then return nil end
+  local entry = m.maps[tostring(map.id)]
+  if not entry or entry.outdoor == nil then return nil end
+  return entry.outdoor and true or false
+end
 -- Dramatic Shape 1.5.5 added a 3RD rung: the same first-person rig with
 -- the eye boomed back behind the shoulder.  The blend reads as engaged
 -- there, so a sealed ceiling would slam shut in front of a camera that
@@ -148,18 +166,31 @@ local function isInterior(map)
   local tid = def.tileset or (map.tileset and map.tileset.id)
   if tid and OPEN_AIR_TILESETS[tid] then return false end
 
-  -- 3. the engine's own outdoor test where it has one
+
+  -- 3. Gen 3/FRLG's named rooftop exceptions: physically open air even
+  -- though the ROM calls the room indoors (see ROOFTOP_OVERRIDE)
+  if map.id and ROOFTOP_OVERRIDE[tostring(map.id)] then return false end
+
+  -- 4. Gen 3/FRLG's own MAP_TYPE outdoor answer, where the data file has
+  -- heard of the map (see gen3Outdoor's own note). Checked before the
+  -- generic engine test and the connections fallback below because it is
+  -- the ROM's own statement, not an inference -- and it is what steps 5
+  -- and 6 were only ever standing in for on a Gen 3 map.
+  if Gen3.mapIsGen3(map) then
+    local outdoor = gen3Outdoor(map)
+  end
+
+  -- 5. the engine's own outdoor test where it has one
   local ok, outdoor = pcall(function()
     local Map = require("src.world.Map")
     return Map.isOutdoor and Map.isOutdoor(def)
   end)
   if ok and outdoor ~= nil then return not outdoor end
 
-  -- 4. last resort: a map with neighbours is a map with sky
+  -- 6. last resort: a map with neighbours is a map with sky
   local conns = def.connections
   return not (conns and next(conns) ~= nil)
 end
-
 -- ------- per-cell facts, by the same shapes the mesher used:
 --   h      extrusion height (max of the four tiles)
 --   wall   true when any tile classifies as wall/cliff -- furniture at

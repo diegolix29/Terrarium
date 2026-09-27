@@ -51,7 +51,7 @@ local function shouldOwnTransition(mod,game)
     if ok and not on then return false end
   end
   -- Skip transition for doubles battles
-  if game and game.save and game.save.colosseumBattle and game.save.colosseumBattle.mode=='colosseumA' then
+  if game and game.save and game.save.terrariumBattle and game.save.terrariumBattle.mode=='colosseumA' then
     return false
   end
   return true

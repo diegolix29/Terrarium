@@ -3,7 +3,7 @@
 local V=...
 local A={states=setmetatable({},{__mode='k'})}
 function A.enabled(game)
- local p=game and game.save and game.save.colosseumBattle
+ local p=game and game.save and game.save.terrariumBattle
  return not p or p.autoProgressEnabled~=false
 end
 function A.readDelay(text)

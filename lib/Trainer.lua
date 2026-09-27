@@ -433,7 +433,7 @@ function T:isBossBattle(ctx)
 end
 
 function T:getMode(game)
-  local p=game and game.save and game.save.colosseumBattle
+  local p=game and game.save and game.save.terrariumBattle
   if type(p)=="table" then
     if p.enemyTrainerModel then return tostring(p.enemyTrainerModel) end
     if p.enemyTrainerModels==false then return "off" end
@@ -442,8 +442,8 @@ function T:getMode(game)
 end
 function T:setMode(game,mode)
   if not (game and game.save) then return end
-  local p=game.save.colosseumBattle
-  if type(p)~="table" then p={};game.save.colosseumBattle=p end
+  local p=game.save.terrariumBattle
+  if type(p)~="table" then p={};game.save.terrariumBattle=p end
   local off=mode=="off" or mode=="player"
   p.enemyTrainerModels=not off
   if off then p.enemyTrainerModel="off" elseif not p.enemyTrainerModel or p.enemyTrainerModel=="off" then p.enemyTrainerModel="auto" end
@@ -599,6 +599,11 @@ function T:update(ctx,dt)
   end
 end
 
+local function fieldLift(ctx)
+  local a=ctx and ctx.arena
+  if a and a.liveField then return tonumber(a.groundY) or 0 end
+  return 0
+end
 function T:entryPose()
   local p=smooth((age-0.08)/1.18)
   -- Settle from just outside the active arena's enemy back-line.
@@ -730,7 +735,7 @@ function T:drawShadow(ctx,vp,pose)
   local p=self:entryPose()
   if p.progress<0.05 then return end
   local motion=idleMotion()
-  local model=Mat4.translate(p.x+motion.sway,0,p.z)
+  local model=Mat4.translate(p.x+motion.sway,fieldLift(ctx),p.z)
   love.graphics.setDepthMode("lequal",false)
   love.graphics.setBlendMode("alpha","alphamultiply")
   love.graphics.setMeshCullMode("none")
@@ -748,6 +753,8 @@ function T:draw(ctx,vp,pose)
   if p.progress<0.03 then return end
   local motion=idleMotion()
   local model=animatedModel(p,motion)
+  local lift=fieldLift(ctx)
+  if lift~=0 then model=Mat4.mul(Mat4.translate(0,lift,0),model) end
   TrainerMorph.bindPair(s.groups,motion)
   love.graphics.setDepthMode("lequal",true)
   love.graphics.setBlendMode("alpha","alphamultiply")

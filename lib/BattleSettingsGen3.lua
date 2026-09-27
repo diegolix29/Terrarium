@@ -9,9 +9,11 @@ local function prefs(game)
   if not (game and game.save) then
     return {
       music="normal",arena="auto",arenasEnabled=true,cameraEnabled=true,pokemonModelsEnabled=true,
+      realtimeBattle=false,realtimeZoom=1.0,
       playerModel="red",enemyTrainerModel="auto",rivalModel="leaf",
       doubleBattlesEnabled=true,abilitiesEnabled=true,freeLookEnabled=true,
       autoProgressEnabled=true,bossIntroEnabled=false,battleSoundsEnabled=true,
+      actorScaleMultiplier=1.0,
     }
   end
   local p=game.save.colosseumBattle
@@ -22,6 +24,11 @@ local function prefs(game)
   p.cameraEnabled=p.cameraEnabled and true or false
   if p.pokemonModelsEnabled==nil then p.pokemonModelsEnabled=true end
   p.pokemonModelsEnabled=p.pokemonModelsEnabled and true or false
+  if p.realtimeBattle==nil then p.realtimeBattle=false end
+  p.realtimeBattle=p.realtimeBattle==true
+  p.realtimeZoom=tonumber(p.realtimeZoom) or 1.0
+  local zoomOK={ [1.0]=true,[1.25]=true,[1.5]=true,[1.75]=true,[2.0]=true }
+  if not zoomOK[p.realtimeZoom] then p.realtimeZoom=1.0 end
   if p.battleSoundsEnabled==nil then p.battleSoundsEnabled=true end
   p.battleSoundsEnabled=p.battleSoundsEnabled==true
   if p.bossIntroEnabled==nil then p.bossIntroEnabled=false end
@@ -32,6 +39,8 @@ local function prefs(game)
   p.abilitiesEnabled=p.abilitiesEnabled==true
   if p.freeLookEnabled==nil then p.freeLookEnabled=true end
   if p.autoProgressEnabled==nil then p.autoProgressEnabled=true end
+  if p.actorScaleMultiplier==nil then p.actorScaleMultiplier=1.0 end
+  p.actorScaleMultiplier=tonumber(p.actorScaleMultiplier) or 1.0
   local legacy=p.sprites
   if p.playerModel==nil then
     p.playerModel=(p.playerTrainerModel==false or legacy=="off") and "off" or "red"
@@ -54,8 +63,10 @@ local function prefs(game)
   local validMusic={random=true,normal=true,first=true,cipher_peon=true,miror_b=true,cipher_admin=true,mirakle_b=true,semifinal=true,final=true,link1=true,link2=true,link3=true,original=true}
   if p.music=="colosseum" or p.music=="wild" or p.music=="trainer" or p.music=="gym" then p.music="normal" end
   if not validMusic[p.music] then p.music="normal" end
-  local validArena={auto=true,random=true,water=true,orre_colosseum=true,relic_chamber=true,relic_cave=true,outskirts=true,pyrite_colosseum=true,deep_colosseum=true,realgam_colosseum=true,outdoor_wild=true,mt_battle_summit=true,cipher_lab_underground=true}
+  local validArena={auto=true,random=true,open_water=true,water=true,orre_colosseum=true,relic_chamber=true,relic_cave=true,outskirts=true,pyrite_colosseum=true,deep_colosseum=true,realgam_colosseum=true,outdoor_wild=true,mt_battle_summit=true,cipher_lab_underground=true,overworld=true}
   if not validArena[p.arena] then p.arena="auto" end
+  local validScale={ [1.0]=true, [1.5]=true, [2.0]=true, [2.5]=true, [3.0]=true }
+  if not validScale[p.actorScaleMultiplier] then p.actorScaleMultiplier=1.0 end
   return p
 end
 
@@ -72,9 +83,14 @@ local function buildBattleMenu(game)
   local p=prefs(game)
   if ArenaCatalog and ArenaCatalog.sync then ArenaCatalog.sync(game) end
   if ArenaCatalog and ArenaCatalog.selected then p.arena=ArenaCatalog.selected(game) end
+  if ArenaCatalog and ArenaCatalog.loadUserPreference then ArenaCatalog.loadUserPreference(game) end
 
   local function refresh()
     if modRef and modRef.log then modRef.log:info("Refreshing Gen3 battle settings menu") end
+    -- Ensure settings are persisted to save
+    if game and game.save then
+      game.save.colosseumBattle = p
+    end
   end
 
   -- Helper to cycle through lists (e.g. for arenas, music, player models)
@@ -97,11 +113,12 @@ local function buildBattleMenu(game)
     refresh()
   end
 
-  local arenaOpts = {"auto", "random", "water", "orre_colosseum", "relic_chamber", "relic_cave", "outskirts", "pyrite_colosseum", "deep_colosseum", "realgam_colosseum", "outdoor_wild", "mt_battle_summit", "cipher_lab_underground"}
+  local arenaOpts = {"auto", "random", "water", "orre_colosseum", "relic_chamber", "relic_cave", "outskirts", "pyrite_colosseum", "deep_colosseum", "realgam_colosseum", "outdoor_wild", "mt_battle_summit", "cipher_lab_underground", "overworld"}
   local arenaSelectToggle = {keepOpen=true, label="ARENA  "..string.upper(p.arena)}
   arenaSelectToggle.onSelect = function()
     p.arena = cycle(arenaOpts, p.arena)
     arenaSelectToggle.label = "ARENA  "..string.upper(p.arena)
+    if ArenaCatalog and ArenaCatalog.setSelected then ArenaCatalog.setSelected(game, p.arena) end
     refresh()
   end
 
@@ -125,6 +142,21 @@ local function buildBattleMenu(game)
     modelsToggle.label="COLOSSEUM MODELS  "..(p.pokemonModelsEnabled and "ON" or "OFF")
     refresh()
   end
+
+  local realtimeToggle={keepOpen=true,label="REALTIME BATTLE  "..(p.realtimeBattle and "ON" or "OFF")}
+  realtimeToggle.onSelect=function()
+    p.realtimeBattle=not p.realtimeBattle
+    realtimeToggle.label="REALTIME BATTLE  "..(p.realtimeBattle and "ON" or "OFF")
+    refresh()
+  end
+
+  local realtimeZoomOpts={1.0,1.25,1.5,1.75,2.0}
+  local realtimeZoomToggle={keepOpen=true,label=("REALTIME ZOOM  %.2fX"):format(p.realtimeZoom or 1.0)}
+  realtimeZoomToggle.onSelect=function()
+    p.realtimeZoom=cycle(realtimeZoomOpts,p.realtimeZoom or 1.0)
+    realtimeZoomToggle.label=("REALTIME ZOOM  %.2fX"):format(p.realtimeZoom or 1.0)
+    refresh()
+  end
   
   local playerOpts = {"red", "leaf", "brendan", "may", "off"}
   local playerModelToggle = {keepOpen=true, label="PLAYER MODEL  "..string.upper(p.playerModel)}
@@ -132,6 +164,7 @@ local function buildBattleMenu(game)
     p.playerModel = cycle(playerOpts, p.playerModel)
     p.playerTrainerModel = (p.playerModel ~= "off")
     playerModelToggle.label = "PLAYER MODEL  "..string.upper(p.playerModel)
+    if TrainerRoster and TrainerRoster.setPlayerModel then TrainerRoster.setPlayerModel(game, p.playerModel) end
     refresh()
   end
   
@@ -141,6 +174,7 @@ local function buildBattleMenu(game)
     p.enemyTrainerModel = cycle(enemyOpts, p.enemyTrainerModel)
     p.enemyTrainerModels = (p.enemyTrainerModel ~= "off")
     enemyModelToggle.label = "ENEMY MODEL  "..string.upper(p.enemyTrainerModel)
+    if TrainerRoster and TrainerRoster.setEnemyModel then TrainerRoster.setEnemyModel(game, p.enemyTrainerModel) end
     refresh()
   end
 
@@ -156,6 +190,7 @@ local function buildBattleMenu(game)
   musicToggle.onSelect = function()
     p.music = cycle(musicOpts, p.music)
     musicToggle.label = "MUSIC  "..string.upper(p.music)
+    if Music and Music.setTheme then Music.setTheme(game, p.music) end
     refresh()
   end
 
@@ -187,6 +222,15 @@ local function buildBattleMenu(game)
     refresh()
   end
 
+  local actorScaleOpts = {1.0, 1.5, 2.0, 2.5, 3.0}
+  local actorScaleToggle = {keepOpen=true, label=("ACTOR SIZE  %.1fX"):format(p.actorScaleMultiplier or 1.0)}
+  actorScaleToggle.onSelect = function()
+    p.actorScaleMultiplier = cycle(actorScaleOpts, p.actorScaleMultiplier or 1.0)
+    actorScaleToggle.label = ("ACTOR SIZE  %.1fX"):format(p.actorScaleMultiplier or 1.0)
+    if ArenaCatalog and ArenaCatalog.setScaleMultiplier then ArenaCatalog.setScaleMultiplier(p.actorScaleMultiplier) end
+    refresh()
+  end
+
   -- Assemble all active items into our UI array
   local mainRows={
     arenaToggle,
@@ -194,6 +238,8 @@ local function buildBattleMenu(game)
     cameraToggle,
     freeLookToggle,
     modelsToggle,
+    realtimeToggle,
+    realtimeZoomToggle,
     playerModelToggle,
     enemyModelToggle,
     soundsToggle,
@@ -202,6 +248,7 @@ local function buildBattleMenu(game)
     abilitiesToggle,
     autoProgressToggle,
     bossIntroToggle,
+    actorScaleToggle,
     {label="BACK",onSelect=function()
       if modRef and modRef.log then modRef.log:info("BACK selected in Gen3 battle settings") end
       if game.stack and type(game.stack.pop)=="function" then
@@ -227,7 +274,7 @@ local function buildBattleMenu(game)
   menu.screenId="CbeBattleSettingsGen3"
 
   if BattleMenuUI and BattleMenuUI.mark then
-    BattleMenuUI.mark(menu,"COLOSSEUM BATTLE",mainRows,10,"ENVIRONMENT / CAMERA / POKEMON / AUDIO")
+    BattleMenuUI.mark(menu,"COLOSSEUM BATTLE",mainRows,10,"ENVIRONMENT / CAMERA / REALTIME / POKEMON / AUDIO")
   end
 
   if modRef and modRef.log then modRef.log:info("Gen3 battle settings menu created successfully") end
@@ -330,6 +377,11 @@ end
 function S.prefs(game) return prefs(game) end
 function S.cameraEnabled(game) return prefs(game or (modRef and modRef.game)).cameraEnabled~=false end
 function S.pokemonModelsEnabled(game) return prefs(game or (modRef and modRef.game)).pokemonModelsEnabled~=false end
+function S.realtimeEnabled(game) return prefs(game or (modRef and modRef.game)).realtimeBattle==true end
+function S.realtimeZoom(game) return tonumber(prefs(game or (modRef and modRef.game)).realtimeZoom) or 1.0 end
+function S.setRealtimeEnabled(game,value)
+  local p=prefs(game or (modRef and modRef.game)); p.realtimeBattle=value==true; return p.realtimeBattle
+end
 function S.abilitiesEnabled(game) return prefs(game or (modRef and modRef.game)).abilitiesEnabled==true end
 function S.setCameraEnabled(game,value)
   local p=prefs(game or (modRef and modRef.game)); p.cameraEnabled=value~=false; return p.cameraEnabled
@@ -338,11 +390,13 @@ function S.status(game)
   local p=prefs(game or (modRef and modRef.game))
   return {
     installed=installed,arenasEnabled=p.arenasEnabled,cameraEnabled=p.cameraEnabled,pokemonModelsEnabled=p.pokemonModelsEnabled,
+    realtimeBattle=p.realtimeBattle,realtimeZoom=p.realtimeZoom,
     battleSoundsEnabled=p.battleSoundsEnabled,freeLookEnabled=p.freeLookEnabled,autoProgressEnabled=p.autoProgressEnabled,bossIntroEnabled=p.bossIntroEnabled,doubleBattlesEnabled=p.doubleBattlesEnabled,
     abilitiesEnabled=p.abilitiesEnabled,
     music=p.music,musicLabel=Music and Music.themeLabel and Music.themeLabel(game,p.music),
     arena=p.arena,playerModel=p.playerModel,enemyTrainerModel=p.enemyTrainerModel,rivalModel=p.rivalModel,
     playerTrainerModel=p.playerTrainerModel,enemyTrainerModels=p.enemyTrainerModels,
+    actorScaleMultiplier=p.actorScaleMultiplier,
     cache=CacheManager and CacheManager.status and CacheManager.status() or nil,
     audioFidelity=AudioFidelity and AudioFidelity.status(modRef) or nil,
   }

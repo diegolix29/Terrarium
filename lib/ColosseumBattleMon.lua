@@ -356,7 +356,9 @@ function ColosseumBattleMon:update(dt)
   end
   local actor = self.actor
   if not actor then return end
-  local ok = pcall(actor.update, actor, dt)
+  local fx = V.ColosseumMoveFX
+  local step = fx and fx.actorStep(self.side, dt) or dt
+  local ok = pcall(actor.update, actor, step)
   if not ok then return end
   self.state = actor.state
   if actor.state == "faint" then

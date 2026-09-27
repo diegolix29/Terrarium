@@ -29,6 +29,20 @@ local BattleBoxXY = {}
 
 BattleBoxXY.ENABLED = true
 
+-- The engine's box may only be silenced while THIS file's replacement is
+-- actually being drawn. Before this guard, claim() shadowed drawTextArea for
+-- the whole battle while draw() had no caller anywhere, so the FIGHT / PKMN /
+-- ITEM / RUN box and the message box vanished permanently with nothing in
+-- their place. draw() stamps the battle each frame it really paints; covers()
+-- only reports true while that stamp is fresh, so if the replacement is not
+-- wired, not loaded or errors out, the engine's own box comes straight back.
+BattleBoxXY.LIVE_WINDOW = 0.25     -- seconds a draw() stamp stays valid
+
+local function clockNow()
+  if love and love.timer and love.timer.getTime then return love.timer.getTime() end
+  return os.clock()
+end
+
 BattleBoxXY.ASSET_DIR = "assets/battlexy/"
 
 -- The four commands, in the order menuIndex counts them. Measured, not
@@ -128,16 +142,111 @@ BattleBoxXY.PHASES = {
   messages = true,    -- the typed message
 }
 
+-- Is this battle in a phase the replacement knows how to draw? (Says nothing
+-- about whether it is drawing right now -- that is covers().)
+function BattleBoxXY.wants(battle)
+  if not (battle and BattleBoxXY.available()) then return false end
+  
+  -- Check if doubles UI token is set - this takes priority
+  if battle and (battle.__doublesBattleToken or 
+    (battle.battle and battle.battle.__doublesBattleToken) or
+    (battle.screen and battle.screen.__doublesBattleToken)) then
+    return false
+  end
+  
+  -- Check if this is a doubles battle - if so, let the doubles UI handle it
+  local isDoubles = battle and (battle.__cbeDoublesActive or 
+    (battle.battle and battle.battle.__cbeDoublesActive) or
+    (battle.screen and battle.screen.__cbeDoublesActive))
+  
+  -- Engine-level doubles indicators
+  if battle and not isDoubles then
+    local host = battle.battle or battle
+    isDoubles = (host.double == true)
+      or (type(host.isDouble)=="function" and host:isDouble() == true)
+      or (host.doubleBattle == true)
+      or (host.isDoubleBattle == true)
+  end
+  
+  -- Don't try to draw for doubles battles - let the doubles UI handle it
+  if isDoubles then return false end
+  
+  -- Stadium Battle FX sets stadiumTrainerPortraitToken when it takes control
+  if battle.stadiumTrainerPortraitToken then return false end
+  return BattleBoxXY.PHASES[battle.phase] and true or false
+end
+
+-- A UI layer that draws the whole battle box itself (UIMain's Colosseum UI)
+-- registers a predicate here: function(battle) -> true while it owns the
+-- native box. While it answers true the engine's box stays silent; when it
+-- answers false (Colosseum UI off) the engine's box is shown again.
+BattleBoxXY.ownedByExternalUI = nil
+
+-- Every phase whose native drawing an owning external UI replaces. A superset
+-- of PHASES: this file's own replacement only paints menu + messages, so the
+-- extra ones are only ever silenced on an external UI's say-so.
+BattleBoxXY.EXTERNAL_PHASES = {
+  menu = true, messages = true,
+  moves = true, moveSelect = true, mimicSelect = true, ["choose-forget"] = true,
+}
+
+function BattleBoxXY.externalOwns(battle)
+  -- Check if doubles UI token is set - this takes priority
+  if battle and (battle.__doublesBattleToken or 
+    (battle.battle and battle.battle.__doublesBattleToken) or
+    (battle.screen and battle.screen.__doublesBattleToken)) then
+    return true
+  end
+  
+  -- Check if doubles UI is active (legacy check)
+  if battle and (battle.__doublesUIActive or 
+    (battle.battle and battle.battle.__doublesUIActive) or
+    (battle.screen and battle.screen.__doublesUIActive)) then
+    return true
+  end
+  
+  -- Check the external UI callback
+  local fn = BattleBoxXY.ownedByExternalUI
+  if type(fn) ~= "function" then return false end
+  local ok, owns = pcall(fn, battle)
+  return ok and owns == true
+end
+
+-- Should the ENGINE'S box stay silent? Only if an external UI owns it, or the
+-- replacement in this file painted this battle very recently.
 function BattleBoxXY.covers(battle)
   if not (battle and BattleBoxXY.available()) then return false end
-  -- Check if external UI mod has taken control of the battle
-  -- Stadium Battle FX sets stadiumTrainerPortraitToken when it takes control
-  if battle and battle.stadiumTrainerPortraitToken then
-    return false -- Let external mod handle the UI
+  
+  -- Check if this is a doubles battle - multiple detection methods
+  local isDoubles = battle and (battle.__cbeDoublesActive or 
+    (battle.battle and battle.battle.__cbeDoublesActive) or
+    (battle.screen and battle.screen.__cbeDoublesActive))
+  
+  -- Engine-level doubles indicators
+  if battle and not isDoubles then
+    local host = battle.battle or battle
+    isDoubles = (host.double == true)
+      or (type(host.isDouble)=="function" and host:isDouble() == true)
+      or (host.doubleBattle == true)
+      or (host.isDoubleBattle == true)
   end
-  -- Always cover the battle UI for supported phases
-  -- This ensures the native fight box is hidden even if custom UI isn't drawn
-  return BattleBoxXY.PHASES[battle.phase] and true or false
+  
+  -- Always hide native UI during doubles battles
+  if isDoubles then
+    return BattleBoxXY.EXTERNAL_PHASES[battle.phase] and true or false
+  end
+  
+  -- The Colosseum UI draws the command menu, the messages AND the attack list
+  -- itself, so while it owns the box every one of those phases is silenced in
+  -- the engine (the attack list is "moves" in Gen I, "moveSelect" in the Gold
+  -- presentation, plus Mimic's picker and the forget-a-move picker).
+  if BattleBoxXY.EXTERNAL_PHASES[battle.phase] and BattleBoxXY.externalOwns(battle) then
+    return true
+  end
+  if not BattleBoxXY.wants(battle) then return false end
+  local at = rawget(battle, "__xyBoxDrawnAt")
+  if type(at) ~= "number" then return false end
+  return (clockNow() - at) <= BattleBoxXY.LIVE_WINDOW
 end
 
 local function setColor(c, a)
@@ -260,13 +369,14 @@ end
 -- `rect` is the text box in WORLD-canvas pixels, which is what the caller
 -- already computed for the frosted panel it is replacing.
 function BattleBoxXY.draw(battle, rect)
-  if not (rect and BattleBoxXY.covers(battle)) then return false end
+  if not (rect and BattleBoxXY.wants(battle)) then return false end
   local x, y, w, h = rect[1], rect[2], rect[3], rect[4]
   if not (w and h) or w < 8 or h < 8 then return false end
 
   -- If BattleHudXY art isn't available, just hide the native UI without drawing replacement
+  -- Nothing was painted, so do not claim the box: the engine keeps drawing it.
   if not BattleHudXY.available() then
-    return true -- Still return true to indicate we've handled the suppression
+    return false
   end
 
   local menuUp = (battle.phase == "menu")
@@ -314,6 +424,7 @@ function BattleBoxXY.draw(battle, rect)
     end
   end
   love.graphics.setColor(1, 1, 1, 1)
+  rawset(battle, "__xyBoxDrawnAt", clockNow())   -- the engine's box may go quiet
   return true
 end
 
@@ -372,10 +483,28 @@ function BattleBoxXY.install()
                 (BattleBoxXY.available() and ".avail" or ".unavail")
       st[k] = (st[k] or 0) + 1
     end
+    
+    local isDoubles = self and (self.__cbeDoublesActive or 
+      (self.battle and self.battle.__cbeDoublesActive) or
+      (self.screen and self.screen.__cbeDoublesActive) or
+      (self.__doublesBattleToken) or 
+      (self.battle and self.battle.__doublesBattleToken) or
+      (self.screen and self.screen.__doublesBattleToken))
+    
+    if self and not isDoubles then
+      local host = self.battle or self
+      isDoubles = (host.double == true)
+        or (type(host.isDouble)=="function" and host:isDouble() == true)
+        or (host.doubleBattle == true)
+        or (host.isDoubleBattle == true)
+    end
+    
+    if isDoubles then return end
+    
     -- `dramaticShapeShot` is how the rest of the mod asks "is this battle
     -- being drawn over the diorama": on the plain battle background the
     -- engine's own box is right and nothing here should run.
-    if self.dramaticShapeShot and BattleBoxXY.available() then return end
+    if self.dramaticShapeShot and BattleBoxXY.covers(self) then return end
     return inner(self, ...)
   end
   BattleState.terrariumXYBox = true

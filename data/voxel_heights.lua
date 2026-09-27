@@ -193,15 +193,35 @@ local profile = {
   -- classes whose meaning is only guessable from their distribution are left
   -- to the detector, which is what rule 1 means by hand-authored.
   collision = {
-    -- $15 is a tree standing alone on grass (Johto blocks $3C-$3F, $5B-$67),
-    -- $12 the berry tree in the same drawings' corners, $7B the low round
-    -- bush tucked against a cliff base (Johto block $73).  All three are
-    -- drawn ROUND, so all three take the voxel-hull archetype; the tree
-    -- WALL, class $07, is rounded by tile instead -- see TilesetJohto's
-    -- `planter`, which is the only reading that gets its two-cell height
+    -- $15 is a tree standing alone on grass (Johto blocks $3C-$3F, $5B-$67)
+    -- and $12 the cuttable tree in the same drawings' corners.  Both are
+    -- drawn ROUND, so both take the voxel-hull archetype; the tree WALL,
+    -- class $07, is rounded by tile instead -- see TilesetJohto's `planter`,
+    -- which is the only reading that gets its two-cell height.
+    --
+    -- $7B WAS HERE AND IT IS NOT A BUSH.  It is COLL_CAVE -- the cave mouth
+    -- (pokecrystal constants/collision_constants.asm: `DEF COLL_CAVE EQU
+    -- $7b`), and this engine already says so in its own voice:
+    -- Map.gen2IsDoorway tests `coll == 0x71 or coll == 0x7B` and calls them
+    -- "the outdoor building door and the cave mouth".  The old note here read
+    -- "Johto block $73" -- a METATILE index, not a collision class -- and the
+    -- two numberings are unrelated; COLL_STAIRCASE_73 is the class at $73 and
+    -- the cartridge marks it unused.
+    --
+    -- A coll pin is AUTHORED (shapeFor(..., true)), and rule 1 of the
+    -- resolution order is that an authored tile bypasses detection -- so the
+    -- pin also took the cell out of Structures' door fold, which is the one
+    -- pass that knows a doorway answers to the cliff it is cut into.  Every
+    -- cave entrance in the game therefore stood up as a round hull at the
+    -- cylinder height, proud of the ground in front of it: the reported
+    -- "cave entrances are one block too high".
+    --
+    -- `wall` for the same reason $71 below is `wall`: the cell is WALKABLE
+    -- (you step onto it to warp), so the cell rules resolve it to ground and
+    -- punch a hole through the rock face it is drawn in.
     [0x12] = "cylinder",
     [0x15] = "cylinder",
-    [0x7B] = "cylinder",
+    [0x7B] = "wall",
     -- CheckGrassCollision's own list, minus the classes the permission table
     -- calls water: standing tufts the player walks between, not flat ground
     [0x18] = "grass",
@@ -488,21 +508,6 @@ local profile = {
         [0x1F] = { { below = { 0x2F }, class = "planter" } },
       },
       cylinder = { 0x1E, 0x1F, 0x3E, 0x3F },
-      -- THE UNDERSIDE IS THE TREE'S FOOT, and it has to say so, or the
-      -- run-length scan in Structures.buildCylinders never finds it: that
-      -- loop only continues past the crown when the cell BELOW it also
-      -- resolves to "planter", and unpromoted $3E/$3F left every tall
-      -- Johto tree at L=1 -- a floating 16px crown+middle hull with its
-      -- trunk orphaned as a separate, disconnected cylinder below it (the
-      -- "top hat, no bottom" bug: the crown stood as a plain ball with no
-      -- trunk under it, and the underside carved as its own unrelated
-      -- 16px stump one cell south).
-      --
-      -- Promoted only when $2E is drawn directly above -- the lone tree's
-      -- crown-over-underside pair (no middle course between them) must
-      -- NOT trigger this, and it never does: that pair's row above the
-      -- underside is $1E, not $2E, so it keeps its plain 16px hull.
-      column_foot = { 0x3E, 0x3F },
       -- $4C is the cliff's FOOT as well as the ledge's lip -- the same
       -- eight pixels of dark rim, and the mountain drawings ($0A, $6C-$6F,
       -- $72, $73) end on a course of it. There it is the bottom band of a
@@ -510,8 +515,6 @@ local profile = {
       -- cut round its base. What separates the two is what stands above:
       -- open ground over a ledge, more cliff over a cliff.
       when_above = {
-        [0x3E] = { { above = { 0x2E }, class = "planter" } },
-        [0x3F] = { { above = { 0x2F }, class = "planter" } },
         [0x4C] = { { above = { 0x3C, 0x4B, 0x4C, 0x4D }, class = "wall" } },
       },
     },
@@ -3350,6 +3353,9 @@ local profile = {
   --   frontEave  how far the roof overhangs the facade
   --   ledge      a band that juts two voxels past the walls (an awning),
   --              or nil
+  --   silhouette  `footprint` when the drawing is clipped without a closed
+  --              outline and its matched tile grid is the authoritative
+  --              silhouette; otherwise the light-pixel border flood is used
   --   seal       sides the drawing runs off rather than closing with its
   --              own outline, as a string of n/s/e/w; the silhouette
   --              flood does not seed there. Only needed by a drawing
@@ -4141,11 +4147,13 @@ local profile = {
       -- out as two buildings, one per half.
       --
       -- `topRows` composites ROUTE_10's twelve rows ABOVE the matched
-      -- grid, so the model is built from the COMPLETE twenty-row drawing
-      -- -- 96px of facade under the real 64px roof -- while placement
-      -- still matches only the eight Lavender rows.  Its `claimOnly`
-      -- twin below claims the ROUTE_10 rows and stamps nothing, so the
-      -- roof half does not also stand as its own building.
+      -- grid, so the model is built from the COMPLETE twenty-row facade
+      -- while placement still matches only the eight Lavender rows.  The
+      -- drawing runs off every edge and has no closed roof outline, so the
+      -- explicit footprint silhouette keeps its light window courses in the
+      -- upright model instead of flooding them away as terrain.  Its
+      -- `claimOnly` twin below claims the ROUTE_10 rows and stamps nothing,
+      -- so the upper half does not also stand as its own building.
       --
       -- BOTH COME FIRST IN THIS LIST ON PURPOSE.  The tower's upper
       -- twelve rows are `gabled_block_6x6` tile for tile -- the artist
@@ -4187,8 +4195,9 @@ local profile = {
           { 15, 75, 75, 75, 75, 75, 75, 75, 75, 75, 75, 31 },
           { 78, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 79, 17 },
         },
-        roofRows = 64, roofBack = 8, roofFront = 8, roofCycle = { 8, 31 },
-        slab = 4, frontEave = 4, ledge = nil,
+        silhouette = "footprint",
+        roofRows = 0, roofBack = 0, roofFront = 0, roofCycle = { 0, 0 },
+        slab = 0, frontEave = 0, ledge = nil,
       },
       -- the tower's roof half, where it actually stands on ROUTE_10:
       -- claimed flat so the drawing does not ALSO fold up as a building

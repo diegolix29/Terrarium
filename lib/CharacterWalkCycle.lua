@@ -20,12 +20,15 @@
 -- "purpose=trainer throw/release anchoring"). There is no per-vertex skin
 -- weight anywhere in that cache, so there are no bones here to rotate.
 --
--- Short of going back into extract/TrainerExtractor.lua and HSD.lua to pull
--- a real joint hierarchy + skin weights out of the source discs (a much
--- bigger job, and Colosseum's battle actors may not even have authored
--- locomotion joints to extract), the only animation surface this module has
--- to work with is the rest-pose vertex positions themselves. So instead of
--- rotating bones, this rotates BUCKETS of vertices -- picked by height and
+-- Native locomotion tracks were tried: they dropped feet and corrupted other
+-- clips' lower body, so they stay unextracted. Overworld walking instead
+-- overlays this gait on the live idle/victory pose PlayerModel samples each
+-- frame (see CharacterNativeAnim.sample / copyPositions). Short of going back
+-- into extract/TrainerExtractor.lua and HSD.lua to pull a real joint hierarchy
+-- + skin weights out of the source discs (a much bigger job, and Colosseum's
+-- battle actors may not even have authored locomotion joints to extract), the
+-- animation surface this module has is those posed vertex positions. So instead
+-- of rotating bones, this rotates BUCKETS of vertices -- picked by height and
 -- left/right side, reusing the same per-character shoulder-height/width
 -- landmarks TrainerRig.profile already exposes for the throw-anchor system
 -- -- as a coarse two-joint (hip+knee) leg and one-joint (shoulder) arm
@@ -239,7 +242,11 @@ end
 -- lap = one full left-right-left stride) and swing `blend` (0..1). Written
 -- to `out` in place when given, so callers can reuse the same table every
 -- frame instead of allocating one per vertex per frame.
-function M.apply(rig, groupIndex, group, phase, blend, out)
+-- `posedVertices`, when given, is the live idle/victory pose for this group
+-- (CharacterNativeAnim.copyPositions). The gait then swings those posed verts
+-- instead of the rest-pose mesh, so walking keeps the character's authored
+-- idle body language. Buckets/pivots still come from the rest-pose rig.
+function M.apply(rig, groupIndex, group, phase, blend, out, posedVertices)
   out = out or {}
   local buckets = rig.groups[groupIndex]
   local base, uv = group.baseVertices, group.baseUVs
@@ -255,7 +262,7 @@ function M.apply(rig, groupIndex, group, phase, blend, out)
   local bob = blend * BOB_AMOUNT * (0.5 - 0.5 * math.cos(phase * 2))
 
   for vi = 1, #base do
-    local v = base[vi]
+    local v = (posedVertices and posedVertices[vi]) or base[vi]
     local side = v[SIDE_INDEX]
     local up = v[2] + bob
     local fwd = v[FORWARD_INDEX]
@@ -341,7 +348,7 @@ end
 -- magnitude regardless of `b.side` -- and no torso bob, since the actual
 -- vertical travel of the whole model is the engine's own jump arc,
 -- already baked into the `y` PlayerModel.draw is called with.
-function M.applyJump(rig, groupIndex, group, progress, out)
+function M.applyJump(rig, groupIndex, group, progress, out, posedVertices)
   out = out or {}
   local buckets = rig.groups[groupIndex]
   local base, uv = group.baseVertices, group.baseUVs
@@ -354,7 +361,7 @@ function M.applyJump(rig, groupIndex, group, progress, out)
   local armAngle = JUMP_ARM_MAX * e
 
   for vi = 1, #base do
-    local v = base[vi]
+    local v = (posedVertices and posedVertices[vi]) or base[vi]
     local side = v[SIDE_INDEX]
     local up = v[2]
     local fwd = v[FORWARD_INDEX]

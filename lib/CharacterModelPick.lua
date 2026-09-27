@@ -8,11 +8,13 @@ local V = ...
 local TrainerRoster = V.TrainerRoster
 local PlayerModelInstall = V.require("PlayerModelInstall")
 local ColosseumTrainer = V.require("ColosseumTrainer")
+local GeneratedAssets = V.require("GeneratedAssets")
 
 local CharacterModelPick = {}
 
 CharacterModelPick.LABEL = "CHARACTER MODEL"
 CharacterModelPick.ID = "DRAMATIC_SHAPE:characterModel"
+CharacterModelPick.ANIMATION_ID = "DRAMATIC_SHAPE:characterAnimation"
 
 -- Use the same character list as ColosseumTrainer for consistency
 CharacterModelPick.CHARACTERS = {}
@@ -103,6 +105,20 @@ function CharacterModelPick.setCharacterModel(characterId)
     mod.options:set("character_model", characterId)
   end
   
+  -- Set appropriate default animation based on character
+  local defaultAnim = "idle"
+  if characterId == "wes" then
+    defaultAnim = "victory"
+  elseif characterId == "off" then
+    defaultAnim = "idle"
+  end
+  
+  if Config and type(Config.setOption) == "function" then
+    Config.setOption(mod, "character_animation", defaultAnim, "character_animation_set", {})
+  elseif mod.options and type(mod.options.set) == "function" then
+    mod.options:set("character_animation", defaultAnim)
+  end
+  
   -- Load the model and write marker immediately
   local PlayerModel = V.require("PlayerModel")
   local PlayerModelInstall = V.require("PlayerModelInstall")
@@ -157,6 +173,134 @@ function CharacterModelPick.row()
     step = function(game, dir)
       CharacterModelPick.cycleCharacterModel(dir)
       return true
+    end,
+  }
+end
+
+-- Get available animations for a character
+function CharacterModelPick.getAvailableAnimations(characterId)
+  if not characterId or characterId == "off" then
+    return {}
+  end
+  
+  local path = ("cache/trainers/%s/native_v1/index.lua"):format(characterId)
+  local index, err = GeneratedAssets.readLua(path)
+  
+  if type(index) ~= "table" or type(index.roles) ~= "table" then
+    return {}
+  end
+  
+  local animations = {}
+  for roleName, roleData in pairs(index.roles) do
+    if type(roleData) == "table" and roleData.count and roleData.count > 0 then
+      table.insert(animations, {
+        name = roleName,
+        label = roleName:upper()
+      })
+    end
+  end
+  
+  -- Sort animations alphabetically
+  table.sort(animations, function(a, b)
+    return a.name < b.name
+  end)
+  
+  return animations
+end
+
+-- Get the current animation selection from settings
+function CharacterModelPick.getCurrentAnimation()
+  local mod = V.mod
+  local Config = V.require("config")
+  
+  -- Get the stored animation setting
+  local storedAnim = nil
+  if Config and type(Config.get) == "function" then
+    storedAnim = Config.get(mod, "character_animation")
+  elseif mod.options and type(mod.options.get) == "function" then
+    storedAnim = mod.options:get("character_animation")
+  end
+  
+  -- Return stored animation or default to idle
+  return storedAnim or "idle"
+end
+
+-- Set the animation in settings
+function CharacterModelPick.setAnimation(animationName)
+  local mod = V.mod
+  local Config = V.require("config")
+  
+  animationName = animationName or "idle"
+  
+  if Config and type(Config.setOption) == "function" then
+    Config.setOption(mod, "character_animation", animationName, "character_animation_set", {})
+  elseif mod.options and type(mod.options.set) == "function" then
+    mod.options:set("character_animation", animationName)
+  end
+  
+  -- Reload the animation in PlayerModel
+  local PlayerModel = V.require("PlayerModel")
+  pcall(PlayerModel.reloadCharacterAnimation)
+end
+
+-- Cycle through available animations
+function CharacterModelPick.cycleAnimation(dir)
+  dir = dir or 1
+  
+  local currentId = CharacterModelPick.getCurrentCharacterId()
+  if currentId == "off" then
+    return
+  end
+  
+  local animations = CharacterModelPick.getAvailableAnimations(currentId)
+  if #animations == 0 then
+    return
+  end
+  
+  local currentAnim = CharacterModelPick.getCurrentAnimation()
+  local currentIndex = 0
+  for i, anim in ipairs(animations) do
+    if anim.name == currentAnim then
+      currentIndex = i
+      break
+    end
+  end
+  
+  local nextIndex = currentIndex + dir
+  if nextIndex < 1 then
+    nextIndex = #animations
+  elseif nextIndex > #animations then
+    nextIndex = 1
+  end
+  
+  CharacterModelPick.setAnimation(animations[nextIndex].name)
+end
+
+-- Create the settings row for animation selection
+function CharacterModelPick.animationRow()
+  return {
+    id = CharacterModelPick.ANIMATION_ID,
+    label = "ANIMATION",
+    value = function()
+      local currentId = CharacterModelPick.getCurrentCharacterId()
+      if currentId == "off" then
+        return "OFF"
+      end
+      
+      local currentAnim = CharacterModelPick.getCurrentAnimation()
+      return currentAnim:upper()
+    end,
+    step = function(game, dir)
+      local currentId = CharacterModelPick.getCurrentCharacterId()
+      if currentId == "off" then
+        return false
+      end
+      CharacterModelPick.cycleAnimation(dir)
+      return true
+    end,
+    when = function()
+      local currentId = CharacterModelPick.getCurrentCharacterId()
+      return currentId ~= "off"
     end,
   }
 end

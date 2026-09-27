@@ -16,15 +16,17 @@ local function prefs(game)
   if not (game and game.save) then
     return {
       music="normal",arena="auto",arenasEnabled=true,cameraEnabled=true,pokemonModelsEnabled=true,
+      realtimeBattle=false,realtimeZoom=1.0,
       playerModel="red",enemyTrainerModel="auto",rivalModel="leaf",
       doubleBattlesEnabled=true,abilitiesEnabled=true,freeLookEnabled=true,
       autoProgressEnabled=true,bossIntroEnabled=false,battleSoundsEnabled=true,
       wildSpawnMode="mixed",
       wildEncountersEnabled=true,trainerEncountersEnabled=true,gymEncountersEnabled=true,eliteFourEncountersEnabled=true,
+      actorScaleMultiplier=1.0,
     }
   end
-  local p=game.save.colosseumBattle
-  if type(p)~="table" then p={}; game.save.colosseumBattle=p end
+  local p=game.save.terrariumBattle
+  if type(p)~="table" then p={}; game.save.terrariumBattle=p end
   if p.arenasEnabled==nil then p.arenasEnabled=true end
   p.arenasEnabled=p.arenasEnabled and true or false
   if p.cameraEnabled==nil then p.cameraEnabled=true end
@@ -34,6 +36,11 @@ local function prefs(game)
   -- declines them and the user's normal resolved sprite/model pipeline wins.
   if p.pokemonModelsEnabled==nil then p.pokemonModelsEnabled=true end
   p.pokemonModelsEnabled=p.pokemonModelsEnabled and true or false
+  if p.realtimeBattle==nil then p.realtimeBattle=false end
+  p.realtimeBattle=p.realtimeBattle==true
+  p.realtimeZoom=tonumber(p.realtimeZoom) or 1.0
+  local zoomOK={ [1.0]=true,[1.25]=true,[1.5]=true,[1.75]=true,[2.0]=true }
+  if not zoomOK[p.realtimeZoom] then p.realtimeZoom=1.0 end
 
   -- Migrate older boolean trainer settings into the current model selectors.
   if p.battleSoundsEnabled==nil then p.battleSoundsEnabled=true end
@@ -56,6 +63,10 @@ local function prefs(game)
   p.gymEncountersEnabled=p.gymEncountersEnabled and true or false
   if p.eliteFourEncountersEnabled==nil then p.eliteFourEncountersEnabled=true end
   p.eliteFourEncountersEnabled=p.eliteFourEncountersEnabled and true or false
+  if p.actorScaleMultiplier==nil then p.actorScaleMultiplier=1.0 end
+  p.actorScaleMultiplier=tonumber(p.actorScaleMultiplier) or 1.0
+  local validScale={ [1.0]=true, [1.5]=true, [2.0]=true, [2.5]=true, [3.0]=true }
+  if not validScale[p.actorScaleMultiplier] then p.actorScaleMultiplier=1.0 end
   local legacy=p.sprites
   if p.playerModel==nil then
     p.playerModel=(p.playerTrainerModel==false or legacy=="off") and "off" or "red"
@@ -80,7 +91,7 @@ local function prefs(game)
   local validMusic={random=true,normal=true,first=true,cipher_peon=true,miror_b=true,cipher_admin=true,mirakle_b=true,semifinal=true,final=true,link1=true,link2=true,link3=true,original=true}
   if p.music=="colosseum" or p.music=="wild" or p.music=="trainer" or p.music=="gym" then p.music="normal" end
   if not validMusic[p.music] then p.music="normal" end
-  local validArena={auto=true,random=true,open_water=true,water=true,orre_colosseum=true,relic_chamber=true,relic_cave=true,outskirts=true,pyrite_colosseum=true,deep_colosseum=true,realgam_colosseum=true,outdoor_wild=true,mt_battle_summit=true,cipher_lab_underground=true}
+  local validArena={auto=true,random=true,open_water=true,water=true,orre_colosseum=true,relic_chamber=true,relic_cave=true,outskirts=true,pyrite_colosseum=true,deep_colosseum=true,realgam_colosseum=true,outdoor_wild=true,mt_battle_summit=true,cipher_lab_underground=true,overworld=true}
   if not validArena[p.arena] then p.arena="auto" end
   return p
 end
@@ -122,11 +133,14 @@ local function openBattleMenu(game,returnId,returnParent)
   if not ok or not Menu then return end
   local p=prefs(game)
   if ArenaCatalog and ArenaCatalog.sync then ArenaCatalog.sync(game) end
+  if ArenaCatalog and ArenaCatalog.loadUserPreference then ArenaCatalog.loadUserPreference(game) end
   if ArenaCatalog and ArenaCatalog.selected then p.arena=ArenaCatalog.selected(game) end
   local menu
   local environmentToggle={keepOpen=true}
   local cameraToggle={keepOpen=true}
   local pokemonModelsToggle={keepOpen=true}
+  local realtimeToggle={keepOpen=true}
+  local realtimeZoomRow={keepOpen=true}
   local doublesToggle={keepOpen=true}
   local abilitiesToggle={keepOpen=true}
   local bossIntroToggle={keepOpen=true}
@@ -145,12 +159,15 @@ local function openBattleMenu(game,returnId,returnParent)
   local playerTrainerRow={keepOpen=true}
   local enemyTrainerRow={keepOpen=true}
   local rivalRow={keepOpen=true}
+  local actorScaleRow={keepOpen=true}
   local hardCacheRow={keepOpen=true}
   local cacheRow={keepOpen=true}
   local function refresh()
     environmentToggle.label="COLOSSEUM ARENAS  "..(p.arenasEnabled and "ON" or "OFF")
     cameraToggle.label="COLOSSEUM CAMERA  "..(p.cameraEnabled and "ON" or "OFF")
     pokemonModelsToggle.label="COLOSSEUM MODELS  "..(p.pokemonModelsEnabled and "ON" or "OFF")
+    realtimeToggle.label="REALTIME BATTLE  "..(p.realtimeBattle and "ON" or "OFF")
+    realtimeZoomRow.label=("REALTIME ZOOM  %.2fX"):format(p.realtimeZoom or 1.0)
     freeLookToggle.label="FREE LOOK CAMERA  "..(p.freeLookEnabled~=false and "ON" or "OFF")
     autoProgressToggle.label="AUTO BATTLE FLOW  "..(p.autoProgressEnabled~=false and "ON" or "OFF")
     soundsToggle.label="BATTLE SOUNDS  "..(p.battleSoundsEnabled and "COLOSSEUM" or "ORIGINAL")
@@ -164,6 +181,7 @@ local function openBattleMenu(game,returnId,returnParent)
     trainerEncountersToggle.label="TRAINER BATTLES  "..(p.trainerEncountersEnabled and "ON" or "OFF")
     gymEncountersToggle.label="GYM BATTLES  "..(p.gymEncountersEnabled and "ON" or "OFF")
     eliteFourEncountersToggle.label="ELITE FOUR  "..(p.eliteFourEncountersEnabled and "ON" or "OFF")
+    actorScaleRow.label=("ACTOR SIZE  %.1fX"):format(p.actorScaleMultiplier or 1.0)
     local ws=S.wildSpawnStatus()
     wildSpawnStatusRow.label="SPAWN STATUS  "..(ws.active and "ACTIVE" or "UNAVAILABLE")
     local musicLabel=(Music and Music.themeLabel and Music.themeLabel(game,p.music)) or tostring(p.music):upper()
@@ -210,6 +228,20 @@ local function openBattleMenu(game,returnId,returnParent)
   end
   pokemonModelsToggle.onSelect=function()
     p.pokemonModelsEnabled=not p.pokemonModelsEnabled
+    refresh()
+  end
+  realtimeToggle.onSelect=function()
+    p.realtimeBattle=not p.realtimeBattle
+    refresh()
+  end
+  realtimeZoomRow.onSelect=function()
+    local z=tonumber(p.realtimeZoom) or 1.0
+    if z<1.24 then z=1.25
+    elseif z<1.49 then z=1.50
+    elseif z<1.74 then z=1.75
+    elseif z<1.99 then z=2.00
+    else z=1.00 end
+    p.realtimeZoom=z
     refresh()
   end
   doublesToggle.onSelect=function()
@@ -488,15 +520,32 @@ local function openBattleMenu(game,returnId,returnParent)
   rivalRow.onSelect=function()
     openTrainerPicker("rival",p.rivalModel,function(id) p.rivalModel=id end,"RIVAL MODEL")
   end
+
+  -- Actor scale multiplier option
+  local actorScaleOpts = {1.0, 1.5, 2.0, 2.5, 3.0}
+  local actorScaleRow={keepOpen=true,label=("ACTOR SIZE  %.1fX"):format(p.actorScaleMultiplier or 1.0)}
+  actorScaleRow.onSelect=function()
+    local currentIndex
+    for i,v in ipairs(actorScaleOpts) do
+      if v==p.actorScaleMultiplier then currentIndex=i; break end
+    end
+    if not currentIndex then currentIndex=1 end
+    local nextIndex=(currentIndex % #actorScaleOpts)+1
+    p.actorScaleMultiplier=actorScaleOpts[nextIndex]
+    actorScaleRow.label=("ACTOR SIZE  %.1fX"):format(p.actorScaleMultiplier)
+    if ArenaCatalog and ArenaCatalog.setScaleMultiplier then ArenaCatalog.setScaleMultiplier(p.actorScaleMultiplier) end
+    refresh()
+  end
+
   local back={label="BACK",onSelect=function() reopen(game,returnId,returnParent) end}
   refresh()
   -- Trainer presentation is intentionally three independent ownership rows:
   -- player Red, ordinary/special enemy trainers, and the Kanto rival substitute.
-  local mainRows={environmentToggle,cameraToggle,pokemonModelsToggle,doublesToggle,abilitiesToggle,wildSpawnRow,wildSpawnStatusRow,wildEncountersToggle,trainerEncountersToggle,gymEncountersToggle,eliteFourEncountersToggle,autoProgressToggle,freeLookToggle,bossIntroToggle,musicRow,soundsToggle,audioQualityRow,arenaRow,playerTrainerRow,enemyTrainerRow,rivalRow,hardCacheRow,cacheRow,back}
+  local mainRows={environmentToggle,cameraToggle,pokemonModelsToggle,realtimeToggle,realtimeZoomRow,doublesToggle,abilitiesToggle,wildSpawnRow,wildSpawnStatusRow,wildEncountersToggle,trainerEncountersToggle,gymEncountersToggle,eliteFourEncountersToggle,autoProgressToggle,freeLookToggle,bossIntroToggle,musicRow,soundsToggle,audioQualityRow,arenaRow,playerTrainerRow,enemyTrainerRow,rivalRow,actorScaleRow,hardCacheRow,cacheRow,back}
   menu=Menu.new(game,mainRows,{tx=1,ty=2,tw=24,maxVisible=12,onCancel=function() reopen(game,returnId,returnParent) end})
-  menu.screenId="CbeBattleSettings"
+  menu.screenId="TerrariumBattleSettings"
   if BattleMenuUI and BattleMenuUI.mark then
-    BattleMenuUI.mark(menu,"COLOSSEUM BATTLE",mainRows,12,"ENVIRONMENT / CAMERA / POKEMON / AUDIO / TRAINERS / ROM SOURCE")
+    BattleMenuUI.mark(menu,"TERRARIUM BATTLES",mainRows,12,"ENVIRONMENT / CAMERA / REALTIME / POKEMON / AUDIO / TRAINERS / ACTOR SIZE / ROM SOURCE")
   end
   game.stack:push(menu)
 end
@@ -506,17 +555,18 @@ function S.install(mod,trainer,music,arenaCatalog,battleMenuUI,cacheManager,trai
   modRef,Trainer,Music,ArenaCatalog,BattleMenuUI,CacheManager,TrainerRoster,Compat,AudioFidelity=mod,trainer,music,arenaCatalog,battleMenuUI,cacheManager,trainerRoster,compat,audioFidelity
   if BattleMenuUI and BattleMenuUI.install then BattleMenuUI.install() end
   if not (mod and mod.hooks and type(mod.hooks.wrap)=="function") then return false end
+  -- Use a higher priority to run after other mods like XD_BATTLE_ENVIRONMENTS
   mod.hooks:wrap("ui.start_menu.items",function(next,game,items)
     local out=next(game,items)
     if type(out)~="table" then out=items end
     for _,entry in ipairs(out) do
-      if entry.__colosseumBattleEntry or tostring(entry.label or ""):upper()=="BATTLE" then return out end
+      if entry.__terrariumBattleEntry then return out end
     end
     local at=#out+1
     for i,entry in ipairs(out) do
       if tostring(entry.label or ""):upper()=="OPTION" then at=i;break end
     end
-    table.insert(out,at,{label="BATTLE",__colosseumBattleEntry=true,onSelect=function()
+    table.insert(out,at,{label="TERRARIUM BATTLES",__terrariumBattleEntry=true,onSelect=function()
       -- Gen 1's generic StartMenu pops before invoking onSelect. Gold's
       -- injected-row arm intentionally does not. Keep a live Gold parent on
       -- the stack; a synthetic replacement lacks onChoose/onClose and is dead.
@@ -527,13 +577,18 @@ function S.install(mod,trainer,music,arenaCatalog,battleMenuUI,cacheManager,trai
       openBattleMenu(game,returnId,returnParent)
     end})
     return out
-  end,650)
+  end,200) -- Run after XD_BATTLE_ENVIRONMENTS (priority 115) but before other high-priority mods
   installed=true
   return true
 end
 function S.prefs(game) return prefs(game) end
 function S.cameraEnabled(game) return prefs(game or (modRef and modRef.game)).cameraEnabled~=false end
 function S.pokemonModelsEnabled(game) return prefs(game or (modRef and modRef.game)).pokemonModelsEnabled~=false end
+function S.realtimeEnabled(game) return prefs(game or (modRef and modRef.game)).realtimeBattle==true end
+function S.realtimeZoom(game) return tonumber(prefs(game or (modRef and modRef.game)).realtimeZoom) or 1.0 end
+function S.setRealtimeEnabled(game,value)
+  local p=prefs(game or (modRef and modRef.game)); p.realtimeBattle=value==true; return p.realtimeBattle
+end
 function S.abilitiesEnabled(game) return prefs(game or (modRef and modRef.game)).abilitiesEnabled==true end
 function S.wildSpawnMode(game) return prefs(game or (modRef and modRef.game)).wildSpawnMode end
 function S.setCameraEnabled(game,value)
@@ -547,12 +602,14 @@ function S.status(game)
   local p=prefs(game or (modRef and modRef.game))
   return {
     installed=installed,arenasEnabled=p.arenasEnabled,cameraEnabled=p.cameraEnabled,pokemonModelsEnabled=p.pokemonModelsEnabled,
+    realtimeBattle=p.realtimeBattle,realtimeZoom=p.realtimeZoom,
     battleSoundsEnabled=p.battleSoundsEnabled,freeLookEnabled=p.freeLookEnabled,autoProgressEnabled=p.autoProgressEnabled,bossIntroEnabled=p.bossIntroEnabled,doubleBattlesEnabled=p.doubleBattlesEnabled,
     abilitiesEnabled=p.abilitiesEnabled,wildSpawnMode=p.wildSpawnMode,wildSpawnRuntime=S.wildSpawnStatus(),
     wildEncountersEnabled=p.wildEncountersEnabled,trainerEncountersEnabled=p.trainerEncountersEnabled,gymEncountersEnabled=p.gymEncountersEnabled,eliteFourEncountersEnabled=p.eliteFourEncountersEnabled,
     music=p.music,musicLabel=Music and Music.themeLabel and Music.themeLabel(game,p.music),
     arena=p.arena,playerModel=p.playerModel,enemyTrainerModel=p.enemyTrainerModel,rivalModel=p.rivalModel,
     playerTrainerModel=p.playerTrainerModel,enemyTrainerModels=p.enemyTrainerModels,
+    actorScaleMultiplier=p.actorScaleMultiplier,
     cache=CacheManager and CacheManager.status and CacheManager.status() or nil,
     audioFidelity=AudioFidelity and AudioFidelity.status(modRef) or nil,
   }

@@ -19,7 +19,7 @@ function F.allowed(ctx)
  local hub=battle and battle.__mtbHub==true
  if hub then
   if not game then return false end
-  local p=game.save and game.save.colosseumBattle
+  local p=game.save and game.save.terrariumBattle
   if p and p.freeLookEnabled==false then return false end
   if game.stack and game.stack.top then
    local top=game.stack:top()
@@ -30,7 +30,7 @@ function F.allowed(ctx)
   return true
  end
  if not screen or not game then return false end
- local p=game.save and game.save.colosseumBattle
+ local p=game.save and game.save.terrariumBattle
  if p and p.freeLookEnabled==false then return false end
  if game.stack and game.stack.top then
   local top=game.stack:top()
@@ -140,7 +140,7 @@ function F.pose(ctx,base)
  local allowed=F.allowed(ctx)
  if not allowed then
   local d=doubles(ctx);local game=ctx and (ctx.game or (ctx.battle and ctx.battle.game))
-  local prefs=game and game.save and game.save.colosseumBattle
+  local prefs=game and game.save and game.save.terrariumBattle
   if prefs and prefs.freeLookEnabled==false then F.reset();return nil end
   -- Overlay ownership blocks sampling, not the underlying automatic shots.
   s.mode=nil;s.drag=nil;s.pinch=nil

@@ -18,18 +18,10 @@
 -- walk stands, then reuses the engine's own machinery for every one of
 -- those questions:
 --
---   passability      Collision.mayEnter -- the grid walker's own verdict,
---                    whole, asked per cell the player's body overlaps:
---                    side walls, bounds, passability, ELEVATION, acro
---                    tiles and rails, tile pairs, occupancy. Asked, not
---                    restated; a copy of it here lost three of the seven.
---
---   the forced moves the eddy that spins you back out (Gen 2's
---                    whirlpool) is asked once per moving frame, before the
---                    slide covers ground, because it is not a refusal the
---                    body can clamp against -- an eddy reads as plain
---                    water. Once it fires the engine's spin owns the
---                    player and this module stands aside.
+--   passability      the same isWalkableCell / water-while-surfing /
+--                    tile-pair / entity-occupancy verdicts Collision
+--                    hands the grid walker, asked per cell the player's
+--                    body overlaps.
 --
 --   cell arrival     OverworldState:onStepComplete, the same landing
 --                    pipeline a grid step runs -- warps, spinners, gates,
@@ -37,14 +29,12 @@
 --                    step counters -- fired once per cell crossed, which
 --                    is exactly the rate a grid walk fires it.
 --
---   the special pushes   walking out of a door, off the map edge, into a
---                    ledge, or into a boulder hands the quantised
---                    direction straight to checkGen2CarpetExit /
---                    checkGen3ArrowWarp / checkEdgeExit / checkLedgeHop /
---                    checkBoulderPush, the engine's own handlers, which
---                    validate and stage everything themselves (the mat's
---                    own direction, connections, the hop arc, the
---                    two-push arm). While any of those animates a
+--   the special pushes   walking off the map edge, into a ledge, or into
+--                    a boulder hands the quantised direction straight to
+--                    checkEdgeExit / checkLedgeHop / checkBoulderPush,
+--                    the engine's own handlers, which validate and stage
+--                    everything themselves (connections, the hop arc,
+--                    the two-push arm). While any of those animates a
 --                    scripted grid move, this module stands aside and
 --                    adopts the result.
 --
@@ -187,11 +177,10 @@ local function slideX(state, p, dx)
   local z0 = math.floor((pos.z - r + EPS) / 16)
   local z1 = math.floor((pos.z + r - EPS) / 16)
   local hit = nil
-  local dir = dx > 0 and "right" or "left"
   local edge = dx > 0 and math.floor((nx + r) / 16)
                or math.floor((nx - r) / 16)
   for zc = z0, z1 do
-    hit = blockedCell(state, p, edge, zc, dir)
+    hit = blockedCell(state, p, edge, zc)
     if hit then break end
   end
   if hit then
@@ -209,11 +198,10 @@ local function slideZ(state, p, dz)
   local x0 = math.floor((pos.x - r + EPS) / 16)
   local x1 = math.floor((pos.x + r - EPS) / 16)
   local hit = nil
-  local dir = dz > 0 and "down" or "up"
   local edge = dz > 0 and math.floor((nz + r) / 16)
                or math.floor((nz - r) / 16)
   for xc = x0, x1 do
-    hit = blockedCell(state, p, xc, edge, dir)
+    hit = blockedCell(state, p, xc, edge)
     if hit then break end
   end
   if hit then
@@ -305,15 +293,17 @@ local function pushSpecials(state, dir, why)
       state:takeWarp(w.def)
       return true
     end
+
+    -- Fallback to directional carpets
+    if state:canCollisionWarp() then
+      w = Warp.onCollision(state.map, Game.data.field.warpCarpets,
+                                 p.cellX, p.cellY, dir)
+      if w then
+        state:takeWarp(w.def)
+        return true
+      end
+    end
   end
-  -- and NO bonk. The grid walk's collision sound marks a discrete event:
-  -- you pressed a direction, the step was refused, nothing happened. A
-  -- free walk has no such moment -- the body slides along every wall it
-  -- grazes, continuously, and a corridor taken at a slight angle is a
-  -- steady graze from end to end. Rate-limited or not, that came out as a
-  -- machine-gun of bonks for walking normally down a hallway. The wall
-  -- stopping you is the feedback; the sound only ever said so twice a
-  -- second whether or not anything had changed.
   return false
 end
 
@@ -400,6 +390,10 @@ function FreeMove.tick(state)
 
   local speed = (Game.save and Game.save.onBike) and FreeMove.BIKE
                 or FreeMove.WALK
+  -- Hold B to run: 2x movement speed when option enabled and B held
+  if Game.save and Game.save.options and Game.save.options.holdBToRun and input:isDown("b") then
+    speed = speed * 2
+  end
   local dx, dz = wx * speed, wz * speed
 
   -- AN EDDY IS NOT A WALL, WHICH IS WHY THE BLOCKED-PUSH LIST COULD NOT HOLD

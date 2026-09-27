@@ -1497,6 +1497,7 @@ local SHADER = [[
 -- Each entry is nil = untried, false = unavailable.
 local shaders = { [false] = nil, [true] = nil }
 local activeShader = nil      -- the variant this pass bound
+local externalTarget = false  -- beginScene("current"): draw into the caller's canvas
 
 -- Scene canvases, one per NAMED SLOT. There are exactly two callers and
 -- they want different sizes -- the free-roam pass renders at the window's
@@ -2196,12 +2197,25 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, yaw)
     grid, sh = false, Voxel3D.shader()
   end
   if not sh then return false end
-  local name = slot or "world"
+  externalTarget = (slot == "current")
+  local name = externalTarget and "current" or (slot or "world")
+  local div = Quality.scale()
+  local rw, rh
+  if externalTarget then
+    -- Draw into the already-bound framebuffer (CBE arena canvas). Do not
+    -- steal the canvas, clear, or paint a sky -- the caller owns those.
+    rw, rh = w, h
+    renderW, renderH = w, h
+    canvasW, canvasH = w, h
+    presentName, sceneName = nil, "current"
+    sceneDepth = nil
+    Voxel3D.skyFill = sky
+    Voxel3D.vp = Voxel3D.viewProjection(cx, cy, vw, vh, yaw)
+  else
   -- the size the scene is RASTERISED at, against the size the caller (and
   -- the engine's composite behind it) is owed. See the slot block above.
-  local div = Quality.scale()
-  local rw = math.max(1, math.floor(w / div))
-  local rh = math.max(1, math.floor(h / div))
+  rw = math.max(1, math.floor(w / div))
+  rh = math.max(1, math.floor(h / div))
   local c = slotCanvas(name, rw, rh)
   if not c then return false end
   canvas = c
@@ -2269,6 +2283,7 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, yaw)
   else
     love.graphics.clear(0, 0, 0, 0, true, true)
   end
+  end -- not externalTarget
   love.graphics.setDepthMode("lequal", true)
   -- models mirror on X for right-facing and alternate walk steps, which
   -- flips winding; hidden faces are already culled at build time, so there
@@ -3210,6 +3225,12 @@ function Voxel3D.endScene()
   love.graphics.setShader()
   love.graphics.setDepthMode()
   love.graphics.setMeshCullMode("none")
+  if externalTarget then
+    -- Caller still owns the framebuffer (CBE arena pass).
+    active, activeShader = false, nil
+    externalTarget = false
+    return nil
+  end
   love.graphics.setCanvas()
   active, activeShader = false, nil
   local small = canvas

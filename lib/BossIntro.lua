@@ -38,7 +38,7 @@ end
 local function sourceCall(source,key,...)
   if source and type(source[key])=='function' then return pcall(source[key],source,...) end
 end
-local function prefs(screen) return screen.game and screen.game.save and screen.game.save.colosseumBattle or {} end
+local function prefs(screen) return screen.game and screen.game.save and screen.game.save.terrariumBattle or {} end
 local function matches(a,b)
   if a==b then return true end
   if V.GenerationCompat and V.GenerationCompat.matches then return V.GenerationCompat.matches(a,b) end

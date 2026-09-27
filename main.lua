@@ -141,6 +141,7 @@ local Voxel3D = V.require("Voxel3D")
 local VoxelScene = V.require("VoxelScene")
 local TiltShift = V.require("TiltShift")
 local ChunkMesher = V.require("ChunkMesher")
+local WarpPrefetch = V.require("WarpPrefetch")
 local VoxelGrid = V.require("VoxelGrid")
 local WorldCurve = V.require("WorldCurve")
 local Aerial = V.require("Aerial")
@@ -245,81 +246,22 @@ local stadiumFxFallbackNotice = ModSetting.new("stadiumFxFallbackNotice", "FALLB
 local stadiumFx2DLayer = ModSetting.new("stadiumFx2DLayer", "2D EFFECT LAYER",
   { "authentic", "all", "off" }, { "AUTHENTIC", "ALL", "OFF" })
 
--- ds_fp_ceiling additional settings
-local fpShadows = ModSetting.new("fpshadows", "CONTACT SHADOW",
+-- Battle canvas background settings (assigned to BattleCanvas module after load)
+local battleCanvasEnabled = ModSetting.new("battleCanvasEnabled", "BATTLE BACKGROUNDS",
   { true, false }, { "ON", "OFF" })
-local fpRails = ModSetting.new("fprails", "RAIL AND SKIRTING",
+local battleCanvasStyle = ModSetting.new("battleCanvasStyle", "BATTLE STYLE",
+  { "arena", "off" }, { "ARENA", "OFF" })
+local overworldSceneryEnabled = ModSetting.new("overworldSceneryEnabled", "OVERWORLD SCENERY",
   { true, false }, { "ON", "OFF" })
-local fpSpill = ModSetting.new("fpspill", "DOORWAY LIGHT",
-  { true, false }, { "ON", "OFF" })
-local fpFittings = ModSetting.new("fpfittings", "CEILING LAMPS",
-  { true, false }, { "ON", "OFF" })
-local fpBacks = ModSetting.new("fpbacks", "BUILDING BACKS",
-  { true, false }, { "ON", "OFF" })
-local fpRock = ModSetting.new("fprock", "CAVE ROCK",
-  { true, false }, { "ON", "OFF" })
-local fpPools = ModSetting.new("fppools", "CAVE POOLS",
-  { true, false }, { "ON", "OFF" })
-local fpSconces = ModSetting.new("fpsconces", "CAVE TORCHES",
-  { true, false }, { "ON", "OFF" })
-local fpBats = ModSetting.new("fpbats", "BATS",
-  { true, false }, { "ON", "OFF" })
-local fpDark = ModSetting.new("fpdark", "CAVE DARKNESS",
-  { true, false }, { "ON", "OFF" })
-local fpThird = ModSetting.new("fpthird", "3RD CEILING",
-  { "NONE", "CUTAWAY", "FULL" }, { "NONE", "CUTAWAY", "FULL" })
-local fpBackdrop = ModSetting.new("fpbackdrop", "HORIZON",
-  { true, false }, { "ON", "OFF" })
-local fpHorizonart = ModSetting.new("fphorizonart", "HORIZON ART",
-  { "KANTO", "FUJI", "VALLEY", "CITY" }, { "KANTO", "FUJI", "VALLEY", "CITY" })
-local fpClouds = ModSetting.new("fpclouds", "CLOUDS",
-  { true, false }, { "ON", "OFF" })
-local fpStars = ModSetting.new("fpstars", "NIGHT SKY",
-  { true, false }, { "ON", "OFF" })
-local fpBirds = ModSetting.new("fpbirds", "BIRDS",
-  { true, false }, { "ON", "OFF" })
-local fpAircraft = ModSetting.new("fpaircraft", "AIRCRAFT",
-  { true, false }, { "ON", "OFF" })
-local fpRainbows = ModSetting.new("fprainbows", "RAINBOWS",
-  { true, false }, { "ON", "OFF" })
-local fpRain = ModSetting.new("fprain", "RAIN",
-  { "OFF", "SOMETIMES", "ALWAYS" }, { "OFF", "SOMETIMES", "ALWAYS" })
-local fpLightning = ModSetting.new("fplightning", "LIGHTNING",
-  { true, false }, { "ON", "OFF" })
-local fpUmbrellas = ModSetting.new("fpumbrellas", "NPC UMBRELLAS",
-  { true, false }, { "ON", "OFF" })
-local fpPuddles = ModSetting.new("fppuddles", "PUDDLES",
-  { true, false }, { "ON", "OFF" })
-local fpGrass = ModSetting.new("fpgrass", "GRASS HEIGHT",
-  { "OFF", "SUBTLE", "WILD" }, { "OFF", "SUBTLE", "WILD" })
-local fpWind = ModSetting.new("fpwind", "WIND",
-  { "OFF", "BREEZE", "GUSTY" }, { "OFF", "BREEZE", "GUSTY" })
-local fpParticles = ModSetting.new("fpparticles", "PARTICLES",
-  { true, false }, { "ON", "OFF" })
-local fpInsects = ModSetting.new("fpinsects", "INSECTS",
-  { true, false }, { "ON", "OFF" })
-local fpGroundflock = ModSetting.new("fpgroundflock", "GROUND FLOCK",
-  { true, false }, { "ON", "OFF" })
-local fpCanopy = ModSetting.new("fpcanopy", "FOREST CANOPY",
-  { true, false }, { "ON", "OFF" })
-local fpVines = ModSetting.new("fpvines", "HANGING VINES",
-  { true, false }, { "ON", "OFF" })
-local fpShafts = ModSetting.new("fpshafts", "SUN SHAFTS",
-  { true, false }, { "ON", "OFF" })
-local fpFog = ModSetting.new("fpfog", "LAVENDER FOG",
-  { true, false }, { "ON", "OFF" })
-local fpLights = ModSetting.new("fplights", "LAMPLIGHT",
-  { true, false }, { "ON", "OFF" })
-local fpJump = ModSetting.new("fpjump", "JUMP FEEL",
-  { "OFF", "SUBTLE", "BIG" }, { "OFF", "SUBTLE", "BIG" })
-local fpDoorstep = ModSetting.new("fpdoorstep", "DOORWAY STEP",
-  { true, false }, { "ON", "OFF" })
+
 -- Camera and movement modules for 1ST/3RD person views
 local Jump = V.require("Jump")
 local FirstPerson = V.require("FirstPerson")
 local ThirdPerson = V.require("ThirdPerson")
 local CamControl = V.require("CamControl")
 local FreeMove = V.require("FreeMove")
+-- ds_fp_ceiling settings module (to reduce local variable count)
+local FpCeilingSettings = V.require("FpCeilingSettings")
 -- restored from DRAMATIC_SHAPE: PCVR through OpenXR
 local VR = V.require("VR")
 -- restored: custom 3D models for the player character, built from the
@@ -331,6 +273,11 @@ local PlayerModelPick = V.require("PlayerModelPick")
 local ModelRender = V.require("model_render")
 -- restored: Stadium models for wild Pokemon in the overworld
 local StadiumWilds = V.require("StadiumWilds")
+-- restored: battle canvas backgrounds and scenery assets
+local BattleCanvas = V.require("BattleCanvas")
+-- Assign battle canvas settings to the module
+BattleCanvas.enabled = battleCanvasEnabled
+BattleCanvas.style = battleCanvasStyle
 -- restored: the mod's own settings menus -- the categories, the screens
 -- they open, and the red ink that marks this mod's one row on the
 -- engine's OPTIONS list. See "the mode's rows" section below for how it
@@ -397,7 +344,7 @@ V.followersWater = FollowersWaterCompat.new(mod, {
 })
 
 -- Create follower settings rows
-local ModSetting = V.require("ModSetting")
+-- Note: ModSetting already loaded above
 
 -- Follow Control Mode: trainer (player controls follower) vs pokemon (you control pokemon)
 local followControlSetting = ModSetting.new(
@@ -675,8 +622,13 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
     -- is the flag the rest of the mod already reads as "stand down, the
     -- screen is not the player's right now" (Weather, AmbientSound,
     -- WildRoamers all gate on it), and it is the honest answer here too.
-    ChunkMesher.pump((Game and Game.stack and Game.stack:top() ~= ow)
-                     or (ow and ow.transitioning) or false)
+    local covered = (Game and Game.stack and Game.stack:top() ~= ow)
+                     or (ow and ow.transitioning) or false
+    -- Same COVERED window a door fade gives ChunkMesher's own idle slice:
+    -- the destination of an in-flight warp is known the instant the fade
+    -- starts, so its mesh can be built during the fade instead of after it.
+    pcall(WarpPrefetch.update, Game, covered)
+    ChunkMesher.pump(covered)
   end,
 
   drawWorld = function(ctx)
@@ -1272,6 +1224,18 @@ local SETTINGS = {
   { stadiumFx2DLayer,
     "Controls which 2D battle effects are shown: authentic Stadium effects, all effects, or none.",
     cat = "battles" },
+  -- Battle canvas background settings
+  { battleCanvasEnabled,
+    "Enables custom battle backgrounds for 2D-3D, Stadium, and Colosseum battle modes. "
+    .. "Uses assets/battle/ arena backgrounds when ON.",
+    cat = "battles" },
+  { battleCanvasStyle,
+    "Choose battle background style: ARENA (battle arenas) or OFF (default).",
+    when = function() return battleCanvasEnabled:get() == true end,
+    cat = "battles" },
+  { overworldSceneryEnabled,
+    "Enables horizon scenery props in the overworld 3D world. Uses assets/scenery/ images.",
+    cat = "world" },
   -- `full` for the reason the battle rows have it and more plainly: this is
   -- not a knob on the diorama at all, it is what the grass is made of. A
   -- preset that owns the look has no business owning it.
@@ -1446,49 +1410,49 @@ local SETTINGS = {
     .. "see into rooms from outside.",
     cat = "world" },
   -- Interior details
-  { fpShadows, "Contact shadows under furniture and props.", cat = "world" },
-  { fpRails, "Rail and skirting boards along walls.", cat = "world" },
-  { fpSpill, "Light spilling from doorways into dark rooms.", cat = "world" },
-  { fpFittings, "Ceiling lamps and light fixtures.", cat = "world" },
-  { fpBacks, "Building backs - rear walls on exterior buildings.", cat = "world" },
+  { FpCeilingSettings.shadows, "Contact shadows under furniture and props.", cat = "world" },
+  { FpCeilingSettings.rails, "Rail and skirting boards along walls.", cat = "world" },
+  { FpCeilingSettings.spill, "Light spilling from doorways into dark rooms.", cat = "world" },
+  { FpCeilingSettings.fittings, "Ceiling lamps and light fixtures.", cat = "world" },
+  { FpCeilingSettings.backs, "Building backs - rear walls on exterior buildings.", cat = "world" },
   -- Cave features
-  { fpRock, "Rock formations in caves.", cat = "world" },
-  { fpPools, "Water pools in cave floors.", cat = "world" },
-  { fpSconces, "Wall torches in caves.", cat = "world" },
-  { fpBats, "Flying bats in caves.", cat = "world" },
-  { fpDark, "Cave darkness effect in unlit areas.", cat = "world" },
+  { FpCeilingSettings.rock, "Rock formations in caves.", cat = "world" },
+  { FpCeilingSettings.pools, "Water pools in cave floors.", cat = "world" },
+  { FpCeilingSettings.sconces, "Wall torches in caves.", cat = "world" },
+  { FpCeilingSettings.bats, "Flying bats in caves.", cat = "world" },
+  { FpCeilingSettings.dark, "Cave darkness effect in unlit areas.", cat = "world" },
   -- Third person ceiling
-  { fpThird, "Ceiling visibility in third-person mode: NONE, CUTAWAY, or FULL.", cat = "world" },
+  { FpCeilingSettings.third, "Ceiling visibility in third-person mode: NONE, CUTAWAY, or FULL.", cat = "world" },
   -- Horizon backdrop
-  { fpBackdrop, "Distant horizon backdrop for outdoor maps.", cat = "world" },
-  { fpHorizonart, "Horizon art style: KANTO, FUJI, VALLEY, or CITY.", cat = "world" },
+  { FpCeilingSettings.backdrop, "Distant horizon backdrop for outdoor maps.", cat = "world" },
+  { FpCeilingSettings.horizonart, "Horizon art style: KANTO, FUJI, VALLEY, or CITY.", cat = "world" },
   -- Sky features
-  { fpClouds, "Clouds drifting across the sky.", cat = "world" },
-  { fpStars, "Stars and nebula at night.", cat = "world" },
-  { fpBirds, "Birds flying in the sky.", cat = "world" },
-  { fpAircraft, "Rare aircraft (planes and blimps) in the sky.", cat = "world" },
-  { fpRainbows, "Rainbows after rain showers.", cat = "world" },
+  { FpCeilingSettings.clouds, "Clouds drifting across the sky.", cat = "world" },
+  { FpCeilingSettings.stars, "Stars and nebula at night.", cat = "world" },
+  { FpCeilingSettings.birds, "Birds flying in the sky.", cat = "world" },
+  { FpCeilingSettings.aircraft, "Rare aircraft (planes and blimps) in the sky.", cat = "world" },
+  { FpCeilingSettings.rainbows, "Rainbows after rain showers.", cat = "world" },
   -- Weather effects
-  { fpRain, "Rain frequency: OFF, SOMETIMES, or ALWAYS.", cat = "world" },
-  { fpLightning, "Lightning during storms.", cat = "world" },
-  { fpUmbrellas, "NPCs open umbrellas during rain.", cat = "world" },
-  { fpPuddles, "Puddles form on the ground during rain.", cat = "world" },
+  { FpCeilingSettings.rain, "Rain frequency: OFF, SOMETIMES, or ALWAYS.", cat = "world" },
+  { FpCeilingSettings.lightning, "Lightning during storms.", cat = "world" },
+  { FpCeilingSettings.umbrellas, "NPCs open umbrellas during rain.", cat = "world" },
+  { FpCeilingSettings.puddles, "Puddles form on the ground during rain.", cat = "world" },
   -- Ground detail
-  { fpGrass, "Grass height: OFF, SUBTLE, or WILD.", cat = "world" },
-  { fpWind, "Wind effect on grass: OFF, BREEZE, or GUSTY.", cat = "world" },
-  { fpParticles, "Particle effects (seeds, drips, fireflies, etc.).", cat = "world" },
-  { fpInsects, "Insects buzzing around.", cat = "world" },
-  { fpGroundflock, "Ground flocks of birds that flush when approached.", cat = "world" },
+  { FpCeilingSettings.grass, "Grass height: OFF, SUBTLE, or WILD.", cat = "world" },
+  { FpCeilingSettings.wind, "Wind effect on grass: OFF, BREEZE, or GUSTY.", cat = "world" },
+  { FpCeilingSettings.particles, "Particle effects (seeds, drips, fireflies, etc.).", cat = "world" },
+  { FpCeilingSettings.insects, "Insects buzzing around.", cat = "world" },
+  { FpCeilingSettings.groundflock, "Ground flocks of birds that flush when approached.", cat = "world" },
   -- Forest features
-  { fpCanopy, "Forest canopy overhead.", cat = "world" },
-  { fpVines, "Hanging vines in forests.", cat = "world" },
-  { fpShafts, "Sun shafts through forest canopy.", cat = "world" },
+  { FpCeilingSettings.canopy, "Forest canopy overhead.", cat = "world" },
+  { FpCeilingSettings.vines, "Hanging vines in forests.", cat = "world" },
+  { FpCeilingSettings.shafts, "Sun shafts through forest canopy.", cat = "world" },
   -- Town features
-  { fpFog, "Lavender Town fog effect.", cat = "world" },
-  { fpLights, "Street lamps and town lighting.", cat = "world" },
+  { FpCeilingSettings.fog, "Lavender Town fog effect.", cat = "world" },
+  { FpCeilingSettings.lights, "Street lamps and town lighting.", cat = "world" },
   -- Movement
-  { fpJump, "Jump feel: OFF, SUBTLE, or BIG.", cat = "world" },
-  { fpDoorstep, "Step up/down when passing through doorways.", cat = "world" },
+  { FpCeilingSettings.jump, "Jump feel: OFF, SUBTLE, or BIG.", cat = "world" },
+  { FpCeilingSettings.doorstep, "Step up/down when passing through doorways.", cat = "world" },
   -- Free Fly settings
   { altitudeSetting,
     "Flight altitude: LOW (32px), MED (56px), or HIGH (80px). "
@@ -1785,7 +1749,37 @@ SettingsMenu.define(SETTINGS)
 -- mod (ds_fp_ceiling) to publish configuration via _G.__ds_ceiling_config.
 -- Since we've integrated those modules directly, we provide this bridge
 -- so they can read from our own options instead.
-local HEADROOM = { AIRY = 32, MID = 24, SNUG = 16 }
+-- AIRY raised 32 -> 50: general interiors read too low-ceilinged at the
+-- old figure. Caves don't get a separate row here -- this function isn't
+-- told which room the player is standing in, so it can't tell a cave
+-- from a Mart. Cave.lua's build() *does* know the room (it has the map),
+-- so it doubles whatever headroom comes back from here when the room is
+-- a cave, and lifts it a further 25% on Gen3 -- 50 becomes 100 in a
+-- Gen1/Gen2 cave, 125 in a Gen3 one. Change AIRY here and both follow.
+-- Now supports independent headroom values per generation.
+local HEADROOM = {
+  GEN1 = { AIRY = 32, MID = 24, SNUG = 16 },
+  GEN2 = { AIRY = 100, MID = 32, SNUG = 24 },
+  GEN3 = { AIRY = 32, MID = 24, SNUG = 16 }
+}
+-- Ceiling.headroom:get() returns the option VALUE (100/50/24), not the
+-- label (AIRY/MID/SNUG). Map both so generation tables can be keyed by name.
+local HEADROOM_KEY = {
+  AIRY = "AIRY", MID = "MID", SNUG = "SNUG",
+  [32] = "AIRY", [24] = "MID", [16] = "SNUG",
+}
+local function ceilingGeneration()
+  -- GenerationCompat is a Colosseum local loaded much later and never
+  -- published on _G, so looking it up here always missed and fell to GEN1.
+  -- GameVersion.generation() is the live cartridge generation.
+  local ok, GameVersion = pcall(require, "src.core.GameVersion")
+  if ok and GameVersion and type(GameVersion.generation) == "function" then
+    local okGen, value = pcall(GameVersion.generation)
+    local n = okGen and tonumber(value)
+    if n == 1 or n == 2 or n == 3 then return n end
+  end
+  return 1
+end
 _G.__ds_ceiling_config = function()
   -- Use the actual setting objects where available
   local ceilingOn = true
@@ -1797,7 +1791,18 @@ _G.__ds_ceiling_config = function()
   end
   if Ceiling and Ceiling.headroom then
     local ok, v = pcall(function() return Ceiling.headroom:get() end)
-    if ok and v then headroomVal = HEADROOM[v] or 32 end
+    if ok and v then
+      local generation = ceilingGeneration()
+      local headroomTable = HEADROOM["GEN" .. tostring(generation)] or HEADROOM.GEN1
+      local key = HEADROOM_KEY[v]
+      if key and headroomTable[key] then
+        headroomVal = headroomTable[key]
+      elseif headroomTable[v] then
+        headroomVal = headroomTable[v]
+      else
+        headroomVal = headroomTable.AIRY or 32
+      end
+    end
   end
   if Ceiling and Ceiling.cutaway then
     local ok, v = pcall(function() return Ceiling.cutaway:get() end)
@@ -1814,50 +1819,51 @@ _G.__ds_ceiling_config = function()
   end
   
   -- Map horizonart choice to backdrop file
-  local horizonArt = getSetting(fpHorizonart, "VALLEY")
+  local horizonArt = getSetting(FpCeilingSettings.horizonart, "VALLEY")
   local backdropMap = { KANTO = "backdrop.png", FUJI = "backdrop2.png", VALLEY = "backdrop3.png", CITY = "backdrop4.png" }
   local backdropFile = backdropMap[horizonArt] or "backdrop.png"
   _G.__ds_backdrop_path = mod.path .. "/lib/" .. backdropFile
-  
+
   return {
     ceiling = ceilingOn,
     headroom = headroomVal,
     cutaway = cutawayOn,
-    shadows = getSetting(fpShadows, true) ~= false,
-    rails = getSetting(fpRails, true) ~= false,
-    spill = getSetting(fpSpill, true) ~= false,
-    fittings = getSetting(fpFittings, true) ~= false,
-    rock = getSetting(fpRock, true) ~= false,
-    backs = getSetting(fpBacks, true) ~= false,
-    pools = getSetting(fpPools, true) ~= false,
-    sconces = getSetting(fpSconces, true) ~= false,
-    bats = getSetting(fpBats, true) ~= false,
-    third = getSetting(fpThird, "CUTAWAY"),
-    backdrop = getSetting(fpBackdrop, true) ~= false,
+    shadows = getSetting(FpCeilingSettings.shadows, true) ~= false,
+    rails = getSetting(FpCeilingSettings.rails, true) ~= false,
+    spill = getSetting(FpCeilingSettings.spill, true) ~= false,
+    fittings = getSetting(FpCeilingSettings.fittings, true) ~= false,
+    rock = getSetting(FpCeilingSettings.rock, true) ~= false,
+    backs = getSetting(FpCeilingSettings.backs, true) ~= false,
+    pools = getSetting(FpCeilingSettings.pools, true) ~= false,
+    sconces = getSetting(FpCeilingSettings.sconces, true) ~= false,
+    bats = getSetting(FpCeilingSettings.bats, true) ~= false,
+    third = getSetting(FpCeilingSettings.third, "CUTAWAY"),
+    backdrop = getSetting(FpCeilingSettings.backdrop, true) ~= false,
     horizonart = horizonArt,
-    jump = getSetting(fpJump, "SUBTLE"),
+    jump = getSetting(FpCeilingSettings.jump, "SUBTLE"),
     -- Grass disabled by default as requested
-    grass = getSetting(fpGrass, "OFF"),
-    particles = getSetting(fpParticles, true) ~= false,
-    dark = getSetting(fpDark, true) ~= false,
-    rain = getSetting(fpRain, "SOMETIMES"),
-    umbrellas = getSetting(fpUmbrellas, true) ~= false,
-    puddles = getSetting(fpPuddles, true) ~= false,
-    lightning = getSetting(fpLightning, true) ~= false,
-    lights = getSetting(fpLights, true) ~= false,
-    shafts = getSetting(fpShafts, true) ~= false,
-    canopy = getSetting(fpCanopy, true) ~= false,
-    vines = getSetting(fpVines, true) ~= false,
-    fog = getSetting(fpFog, true) ~= false,
-    doorstep = getSetting(fpDoorstep, true) ~= false,
-    clouds = getSetting(fpClouds, true) ~= false,
-    stars = getSetting(fpStars, true) ~= false,
-    birds = getSetting(fpBirds, true) ~= false,
-    aircraft = getSetting(fpAircraft, true) ~= false,
-    rainbows = getSetting(fpRainbows, true) ~= false,
-    insects = getSetting(fpInsects, true) ~= false,
-    groundflock = getSetting(fpGroundflock, true) ~= false,
-    wind = getSetting(fpWind, "BREEZE"),
+    grass = getSetting(FpCeilingSettings.grass, "OFF"),
+    particles = getSetting(FpCeilingSettings.particles, true) ~= false,
+    dark = getSetting(FpCeilingSettings.dark, true) ~= false,
+    rain = getSetting(FpCeilingSettings.rain, "SOMETIMES"),
+    umbrellas = getSetting(FpCeilingSettings.umbrellas, true) ~= false,
+    puddles = getSetting(FpCeilingSettings.puddles, true) ~= false,
+    lightning = getSetting(FpCeilingSettings.lightning, true) ~= false,
+    overworldScenery = getSetting(overworldSceneryEnabled, true) ~= false,
+    lights = getSetting(FpCeilingSettings.lights, true) ~= false,
+    shafts = getSetting(FpCeilingSettings.shafts, true) ~= false,
+    canopy = getSetting(FpCeilingSettings.canopy, true) ~= false,
+    vines = getSetting(FpCeilingSettings.vines, true) ~= false,
+    fog = getSetting(FpCeilingSettings.fog, true) ~= false,
+    doorstep = getSetting(FpCeilingSettings.doorstep, true) ~= false,
+    clouds = getSetting(FpCeilingSettings.clouds, true) ~= false,
+    stars = getSetting(FpCeilingSettings.stars, true) ~= false,
+    birds = getSetting(FpCeilingSettings.birds, true) ~= false,
+    aircraft = getSetting(FpCeilingSettings.aircraft, true) ~= false,
+    rainbows = getSetting(FpCeilingSettings.rainbows, true) ~= false,
+    insects = getSetting(FpCeilingSettings.insects, true) ~= false,
+    groundflock = getSetting(FpCeilingSettings.groundflock, true) ~= false,
+    wind = getSetting(FpCeilingSettings.wind, "BREEZE"),
   }
 end
 _G.__ds_posters_dir = mod.path .. "/"
@@ -1965,7 +1971,7 @@ end
 
 -- Check if manual jump is enabled via the jump setting
 local function manualJumpEnabled()
-  local jumpSetting = getSettingValue(fpJump, "SUBTLE")
+  local jumpSetting = getSettingValue(FpCeilingSettings.jump, "SUBTLE")
   return jumpSetting ~= "OFF"
 end
 
@@ -2476,6 +2482,18 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
     table.insert(out, characterRow) 
   end
 
+  -- Character animation row (appears below character model when enabled)
+  local okAnimation, animationRow = pcall(function()
+    local ColosseumTrainer = V.require("ColosseumTrainer")
+    if ColosseumTrainer.available("red") then
+      return V.require("CharacterModelPick").animationRow()
+    end
+    return nil
+  end)
+  if okAnimation and animationRow and not rowExists(animationRow.id) then 
+    table.insert(out, animationRow) 
+  end
+
   local okWilds, wildsRow = pcall(function()
     local StadiumInstall = V.require("StadiumInstall")
     local Stadium2Install = V.require("Stadium2Install")
@@ -2560,13 +2578,21 @@ do
   local Map = require("src.world.Map")
   if not Map.dramaticShapeBlockHook then
     local setBlock = Map.setBlock
-    Map.setBlock = function(self, bx, by, block)
+    Map.setBlock = function(self, bx, by, ...)
       local before = self:blockAt(bx, by)
-      setBlock(self, bx, by, block)
+      local r1, r2, r3 = setBlock(self, bx, by, ...)
       if self.id and self:blockAt(bx, by) ~= before then
+        local okG, Gen3 = pcall(V.require, "Gen3")
+        if okG and Gen3 and type(Gen3.forgetMap) == "function" then
+          pcall(Gen3.forgetMap, self)
+        end
+        local okD, Disk = pcall(V.require, "VoxelDiskCache")
+        if okD and Disk and type(Disk.forget) == "function" then
+          pcall(Disk.forget, self)
+        end
         ChunkMesher.refresh(self.id)
-        GroundFX.invalidate()
       end
+      return r1, r2, r3
     end
     Map.dramaticShapeBlockHook = true
   end
@@ -2788,6 +2814,9 @@ QoL.install()
 Carry.install()
 -- Walk-on-ice when frozen, gated on Surf (Soul Badge + party knows SURF).
 if Water.installWalk then pcall(Water.installWalk) end
+-- Gen 3 byte-level water detection (excludes bridge reflection water)
+local Gen3 = V.require("Gen3")
+if Gen3.installIsWaterCell then pcall(Gen3.installIsWaterCell) end
 
 -- ------- Battle UI hiding system
 --
@@ -3140,6 +3169,17 @@ end)
 mod.events:on("save.created", function()
   DayNight.restore()
   pinEngineFx()
+end)
+
+-- Warm the destination map's mesh while a warp's own fade covers the
+-- screen (see WarpPrefetch). Registered unconditionally -- independent of
+-- Colosseum import status, unlike the "game.ready" handler further down
+-- that wires up battle-side systems -- since this is an ordinary overworld
+-- optimization, not a Colosseum Overhaul feature.
+mod.events:on("game.ready", function(payload)
+  local game = (type(payload) == "table" and payload.game)
+    or require("src.core.Game")
+  pcall(WarpPrefetch.install, game)
 end)
 
 -- The engine's own time-of-day seam. OverworldState:timeOfDay() is an
@@ -3685,6 +3725,8 @@ local function initializeColosseumIntegration()
 
     namespace = {
       mod = mod, FALLBACK = nil, engineRequire = require, OverworldBattle = OverworldBattle,
+      Voxel3D = Voxel3D,
+      voxelRequire = function(name) return V.require(name) end,
       PayloadPreserver = colosseumPackage("extract/PayloadPreserver.lua"), GeneratedCacheReset = GeneratedCacheReset,
     }
     local function loadColosseumModule(name, arg)
@@ -3722,8 +3764,12 @@ local function initializeColosseumIntegration()
     NativeTrainerSprites = loadColosseumModule("NativeTrainerSprites")
     MoveFXOwnership = loadColosseumModule("MoveFXOwnership")
     ArenaCatalog = loadColosseumModule("ArenaCatalog")
+    local ArenaOverworldSnapshot = loadColosseumModule("ArenaOverworldSnapshot")
+    if ArenaOverworldSnapshot then V.ArenaOverworldSnapshot = ArenaOverworldSnapshot end
     loadColosseumModule("ArenaAudienceProfile")
     loadColosseumModule("ArenaCacheIdentity")
+    namespace.Voxel3D = Voxel3D  -- give the Colosseum namespace what ArenaOverworldSnapshot needs
+local ArenaOverworldSnapshot = loadColosseumModule("ArenaOverworldSnapshot")
     BattleArtBridge = loadColosseumModule("BattleArtBridge")
     loadColosseumModule("ShinySupport")
     loadColosseumModule("ModelIdentity")
@@ -3788,6 +3834,9 @@ local function initializeColosseumIntegration()
     loadColosseumModule("RelicPresentation")
     loadColosseumModule("SummitNumerals")
     Arena = loadColosseumModule("Arena")
+    if ArenaOverworldSnapshot and type(ArenaOverworldSnapshot.install) == "function" then
+  pcall(ArenaOverworldSnapshot.install)
+end
     loadColosseumModule("CameraPacing")
     Camera = loadColosseumModule("Camera")
     Music = loadColosseumModule("Music")
@@ -3816,6 +3865,14 @@ local function initializeColosseumIntegration()
     else
       BattleSettings = loadColosseumModule("BattleSettings")
     end
+    namespace.BattleSettings = BattleSettings
+    mod.exports.BattleSettings = BattleSettings
+
+    loadColosseumModule("MoveTargeting")
+    local RealtimeBattle = loadColosseumModule("RealtimeBattle")
+    namespace.RealtimeBattle = RealtimeBattle
+    mod.exports.RealtimeBattle = RealtimeBattle
+    loadColosseumModule("RealtimeBattleBridge")
 
     loadColosseumModule("AbilityData")
     Abilities = loadColosseumModule("Abilities")
@@ -3827,6 +3884,8 @@ local function initializeColosseumIntegration()
     StandaloneHost = loadColosseumModule("StandaloneHost")
     StadiumBridge = loadColosseumModule("StadiumBridge")
     ResidentPrewarm = loadColosseumModule("ResidentPrewarm")
+    namespace.OverworldStadium = V.require("Stadium")
+    V.ColosseumMoveFX = loadColosseumModule("ColosseumMoveFX")
     BattleRuntime = loadColosseumModule("BattleRuntime")
     namespace.BattleRuntime = BattleRuntime
 
@@ -3971,6 +4030,9 @@ local function initializeColosseumIntegration()
     end
 
     if ArenaCatalog and ArenaCatalog.sync then pcall(ArenaCatalog.sync, mod.game) end
+    if namespace.ArenaOverworldSnapshot and type(namespace.ArenaOverworldSnapshot.install) == "function" then
+      pcall(namespace.ArenaOverworldSnapshot.install)
+    end
     if Transition and type(Transition.install) == "function" then pcall(Transition.install, mod) end
     if StandaloneHost and type(StandaloneHost.install) == "function" then pcall(StandaloneHost.install, force) end
     if BattleArtBridge and type(BattleArtBridge.install) == "function" then pcall(BattleArtBridge.install) end
@@ -4341,6 +4403,50 @@ mod.exports.keys = V.KEYS
 -- Mark this mod as providing Dramatic Shape compatibility for mod.find()
 -- This allows gen1_true_3d_characters and other mods to find us via mod.find("DRAMATIC_SHAPE")
 mod.exports._dramaticShapeCompat = true
+
+-- Export Voxel3D directly for POKEMON_XD_GEN1 compatibility
+if Voxel3D then
+  mod.exports.Voxel3D = Voxel3D
+end
+
+-- voxel_companion API compatibility for POKEMON_XD_GEN1 and similar mods
+-- This provides a minimal companion registration API that works with the existing Voxel3D pipeline
+local companionSpecs = {}
+local companionHandle = nil
+
+local function makeVoxelCompanion()
+  local api = { api = 1 }
+  
+  function api.register(spec)
+    if type(spec) ~= "table" then return nil, "invalid companion spec" end
+    companionSpecs[#companionSpecs + 1] = spec
+    table.sort(companionSpecs, function(a, b) 
+      return (tonumber(a.priority) or 0) < (tonumber(b.priority) or 0) 
+    end)
+    
+    if type(spec.attach) == "function" then
+      pcall(spec.attach, {})
+    end
+    
+    local handle = {}
+    function handle.dispose()
+      for i = #companionSpecs, 1, -1 do
+        if companionSpecs[i] == spec then
+          table.remove(companionSpecs, i)
+          break
+        end
+      end
+      if type(spec.dispose) == "function" then
+        pcall(spec.dispose)
+      end
+    end
+    return handle
+  end
+  
+  return api
+end
+
+mod.exports.voxel_companion = makeVoxelCompanion()
 
 -- Compatibility layer for gen1_true_3d_characters and other Dramatic Shape-dependent mods
 -- Ensure VoxelScene and related modules are properly exported for compatibility

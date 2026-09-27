@@ -644,13 +644,17 @@ function BattleArena.find(map, fromX, fromY, surfing)
         -- which camera rig this spot is framed for; nil is the default long
         -- lens, "close" the short one small rooms need (see BattleCam)
         arena.cam = pick.cam
+        arena.surfing = surfing and true or false
         return arena
       end
     end
   end
 
   local found = BattleArena.search(map, fromX, fromY, surfing)
-  if found then found.map = map end
+  if found then
+    found.map = map
+    found.surfing = surfing and true or false
+  end
   return found
 end
 

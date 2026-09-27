@@ -700,6 +700,142 @@ gTileset_Sootopolis = {
     gTileset_MeteorFalls = { rock_plateau = true, use_elevation = true },
     gTileset_Cave = { rock_plateau = true, use_elevation = true },
 
+    -- KANTO'S CAVES, which are the same thing and reach none of the rows
+    -- above.  FireRed's tileset names carry a `frlg_` prefix
+    -- (data/firered/gen3_maps.lua) because it reuses Emerald's names for
+    -- different metatile ids, so `gTileset_Cave` cannot match Mt Moon and
+    -- every one of these eight fell through to the BUILDING path.
+    --
+    -- MEASURED, Mt Moon 1F: the blocked rock promotes to `wall`, floods
+    -- into one region, and the run measurement finds a vertical PERIOD in
+    -- it -- a cave floor's hatch texture repeats every sixteen pixels -- so
+    -- the mass is read as a building's storeys and the mesher tiles the
+    -- run's first rows all the way up the face.  Rendered, that is a
+    -- ziggurat of the same rock tile stepping up every wall: exactly what
+    -- Granite Cave did before `g3-rock-64`, now on eight tilesets covering
+    -- 87 of FireRed's 425 maps.
+    --
+    -- `use_elevation` is deliberately NOT forced here, unlike Hoenn's two
+    -- rows above.  That flag is an override for a rule that now measures
+    -- the answer itself -- a real terrace is a connected REGION, sprite
+    -- priority is a scatter, and ELEV_REGION_MIN separates them (see
+    -- `elevationIsReal` in lib/Gen3.lua).  Seafoam's boulder floors and
+    -- Victory Road's tiers clear that bar on their own evidence; Diglett's
+    -- Cave and the Tanoby chambers are genuinely flat and pinning them
+    -- would stand steps in the middle of them.
+    --
+    -- Gated indoors either way: Structures.buildGen3RockPlateaus returns on
+    -- `S.outdoor`, and all eight of these measure outdoor=false.
+    frlg_gTileset_Cave           = { rock_plateau = true },
+    frlg_gTileset_RockTunnel     = { rock_plateau = true },
+    frlg_gTileset_CeruleanCave   = { rock_plateau = true },
+    frlg_gTileset_SeafoamIslands = { rock_plateau = true },
+    frlg_gTileset_DiglettsCave   = { rock_plateau = true },
+    frlg_gTileset_MtEmber        = { rock_plateau = true },
+    frlg_gTileset_NavelRock      = { rock_plateau = true },
+    frlg_gTileset_TanobyRuins    = { rock_plateau = true },
+
+    gTileset_General = {
+      roof_bands = { [72] = 6, [73] = 6, [74] = 6, [75] = 6 },
+    },
+    gTileset_Petalburg = {
+      roof_bands = { [642] = 6, [643] = 6 },
+    },
+
+    -- KANTO IS FLAT, AND ITS CARTRIDGE SAYS SO.
+    --
+    -- `frlg_gTileset_General` is the PRIMARY of all 76 outdoor FireRed maps,
+    -- so this is the region's outdoor profile and it reaches no Hoenn map at
+    -- all.
+    --
+    -- The drawn-terrace reconstruction chains contour bands in the ART into
+    -- walkable tiers.  That is right in Hoenn, which draws its relief; it is
+    -- not right in Kanto, which draws a mountain as impassable scenery and
+    -- keeps the floor you walk on flat.  MEASURED over 17 outdoor maps --
+    -- every one that reports it states TWO walkable levels (one 16px step),
+    -- and the reconstruction answered with up to seven:
+    --
+    --     map            cartridge   drawn terraces
+    --     Route4              2      z0 z16 z32 z96   <- 500 cells at 96px
+    --     Route5              -      z0 z16 z32 z48 z64 z80 z96
+    --     Route9              -      z0 z16 z32 z48 z64
+    --     CeladonCity         2      z0=36 z32=2200   <- a step through a
+    --                                                    flat city
+    --     FuchsiaCity         2      z0 z16 z32  (9 terraces)
+    --     Route19             2      z16 z32 z48      <- and no z0 at all
+    --
+    -- Celadon is the clearest: the cartridge has one walkable level, and the
+    -- reconstruction put the whole city on a tier at 32 while leaving a
+    -- 36-cell STRIP of street (x23..39, y18..21) at 0 -- a two-course cliff
+    -- down the middle of a town that is drawn flat, and the reason its
+    -- ornamental pool renders as a pit: the pool borders that strip, so the
+    -- water takes the strip as its shore and sits 36px below the garden it
+    -- is set into.
+    --
+    -- So take the height from the cartridge and stop reading it off the
+    -- drawing -- the same pair, for the same reason, that
+    -- `gTileset_EverGrande`, `MtPyre_Exterior/Summit` and `Route119` already
+    -- carry above.  What is NOT affected: the ledges you hop (stated by
+    -- behaviour), and the mountains themselves, which are blocked scenery
+    -- built by `climbGen3Masses` and never were terraces.
+    frlg_gTileset_General = {
+      elevation_height = true,
+      drawn_terraces = false,
+      role_terraces = false,
+      roof_bands = { [72] = 4, [73] = 4, [74] = 4, [75] = 4 },
+    },
+
+    -- KANTO'S INTERIOR STAIRCASE, which is one box wearing a picture of
+    -- steps.  Reported: "the stairs should look more like 3d stairs instead
+    -- of a large box with the textures".
+    --
+    -- Same treatment, and the same reasoning, as the Pokemon Centre flight
+    -- below: `flights` does not build a hull, it RE-GROUNDS the region so
+    -- each 8px tile column is flat ground at its own height, and the
+    -- mesher's ordinary side-band fold then cuts the risers out of each
+    -- column's own drawn art.  Nothing is invented and the treads keep the
+    -- exact pixels the 2D paints on them.
+    --
+    -- THE DRAWING GIVES THE DIRECTION.  Read off metatile 23 as a
+    -- silhouette: it is solid from row 7 down across every column, and above
+    -- that the mass reaches further EAST the higher you go -- columns 12..15
+    -- are solid from row 1, 8..15 from row 3, 4..15 from row 5.  Rows are
+    -- height in this view, so the treads rise eastward.  31 is the lower
+    -- half of the same flight seen from the other side (mass on the west,
+    -- receding east as it descends).
+    --
+    -- Scoped by METATILE, so only the four ids below are touched; every
+    -- other cell of the 234 maps on this primary is untouched.
+    frlg_gTileset_Building = {
+      flights = {
+        { dir = "e", tiles = { 22, 23, 30, 31 } },
+      },
+      joinery = {
+        [75] = { parts = { { 0, 0, 4, 13, 16 } } },
+        [78] = { parts = { { 11, 0, 15, 13, 16 } } },
+      },
+    },
+    frlg_gTileset_DepartmentStore = {
+      joinery = {
+        [786] = { parts = { { 11, 0, 15, 15 } } },
+        [790] = { parts = { { 0, 0, 4, 15 } } },
+        [794] = { parts = { { 11, 0, 15, 13 } } },
+        [798] = { parts = { { 0, 0, 4, 13 } } },
+        [802] = { parts = false }, [806] = { parts = false },
+      },
+    },
+    gTileset_GenericBuilding = {
+      joinery = {
+        [651] = { height = 8, layer2 = true, parts = { { 0, 0, 15, 2, 16 }, { 0, 3, 2, 11, 12 } } },
+        [666] = { height = 8, layer2 = true, parts = { { 0, 0, 15, 2, 16 }, { 0, 3, 2, 11, 12 } } },
+        [860] = { height = 8, layer2 = true, parts = { { 0, 0, 15, 2, 16 }, { 0, 3, 2, 11, 12 } } },
+        [831] = { height = 8, layer2 = true, parts = { { 0, 0, 15, 2, 16 } } },
+        [652] = { height = 8, layer2 = true, parts = { { 0, 0, 15, 2, 16 }, { 13, 3, 15, 11, 12 } } },
+        [667] = { height = 8, layer2 = true, parts = { { 0, 0, 15, 2, 16 }, { 13, 3, 15, 11, 12 } } },
+        [861] = { height = 8, layer2 = true, parts = { { 0, 0, 15, 2, 16 }, { 13, 3, 15, 11, 12 } } },
+      },
+    },
+
     -- PACIFIDLOG: a town of rafts.  263 of its 800 cells are
     -- MB_MOUNTAIN_TOP -- the rocky islets the houses stand on -- and 294 are
     -- open ocean.  The logs themselves are already their own class; what
@@ -714,7 +850,134 @@ gTileset_Sootopolis = {
     -- walkway INSIDE the canopy it is supposed to cross, so the step is two.
     -- Route 119 and Route 120 share this tileset and are ordinary ground, so
     -- the override is on the CITY (see `maps` below), not here.
-    gTileset_Fortree = {},
+    gTileset_Fortree = {
+      -- ------------------------------------------------------------------
+      -- A TREE HUT IS A BUILDING, AND IT IS FIVE CELLS WIDE.
+      --
+      -- MOTIVATED BY FORTREE CITY (MAP_G00_N04) AND ITS SIX TREE HUTS:
+      -- House1 (8..12, 1..3), House2 (15..19, 1..3), House3 (23..27, 1..3),
+      -- House4 (29..34, 0..2), House5 (10..14, 11..13) and the Decoration
+      -- Shop (34..39, 11..13).  Reported as huts three cells wide, one
+      -- course tall, with their roofs meshed as separate treetops.
+      --
+      -- Emerald draws each hut as THREE cell rows of one bespoke 5x3 block:
+      --
+      --     198  548 549 550  198     the green frond roof, three cells
+      --     555  556 557 558  559     upper course: bamboo bay | wall | bay
+      --     563  564 565 566  567     lower course: bay | wall DOOR wall | bay
+      --
+      -- over a 5-cell plank veranda (571/572/573/574/575) and its posts.
+      -- Every one of the ten ids above is laid SIX times -- once per hut --
+      -- and NOWHERE ELSE IN HOENN (measured over all 518 maps: 548/549/550,
+      -- 555/559 six each, 563/567 nine each -- House4 and House5 draw a
+      -- second veranda row out of 563/567 -- and every occurrence is on
+      -- MAP_G00_N04.  The other three maps that pair with this tileset,
+      -- Route119, Route120 and FarawayIsland_Interior, place none of them).
+      --
+      -- WHY THE GENERIC READERS CANNOT SEE IT, and why this table has to.
+      -- data/gen3_metatiles.lua reads the four END BAYS and the roof as
+      --
+      --     [548] [549] [550]          surface green cap 16 face 0 motif F
+      --     [555] [559] [563] [567]    surface green cap 16 face 0 motif T
+      --
+      -- character for character the reading of gTileset_General's own tree,
+      -- 198/199 -- leafy texture, drawn green, solid, no drawn face.  That
+      -- test is RIGHT everywhere else in Hoenn and is not touched: the
+      -- bamboo slats of a hut's end wall really are painted the same yellow-
+      -- green as the canopy behind them, and no reading of the sixteen pixel
+      -- rows separates them.  Only the cartridge's own layout does -- these
+      -- ten ids, in this tileset, always drawn as one block around a warp --
+      -- and this file is where the cartridge's own layout is written down.
+      --
+      -- Gen3.lua's `foliageCell` says the opposite in its own comment ("Its
+      -- corner pieces 555/559/563/567 and the forest around them are
+      -- `surface / GREEN / cap 16 / face 0`, the same reading as the General
+      -- tileset's own tree") and REFUSES these four columns for that reason.
+      -- That comment is right about the ART and it stays; what it could not
+      -- know is which metatiles are the hut's own.  The rule it states --
+      -- "a flank column every row of which is drawn as foliage is not the
+      -- building" -- keeps every cell of its blast radius (Route 104's
+      -- Petalburg Woods entrance, Route 118's tunnel mouth, Lavaridge's
+      -- east column): this list is SEVEN IDS IN ONE TILESET and overrides
+      -- it only on them.
+      --
+      -- NOT A `metatiles` CLASS PIN, deliberately.  A pin names a class and
+      -- marks the cell AUTHORED, and an authored cell leaves the structural
+      -- flood (see the METATILE PINS header below) -- so pinning the bays
+      -- `wall` would give each of them its own 16px box and the five-cell
+      -- facade this exists to build would come apart again.  What is needed
+      -- is narrower: not "this cell is a wall" but "this cell is not
+      -- FOLIAGE, it is part of the building beside it", which leaves the
+      -- flood, the run and the height model to decide the rest.
+      --
+      -- "roof" vs "wall" is the row the id draws, and `foundGen3Buildings`
+      -- uses the count of roof rows to split a facade from the pitch on top
+      -- of it.  PRESENTATIONAL ONLY: nothing here is read by collision,
+      -- warps, elevation flags, scripts or encounters.
+      --
+      -- Keyed on the SECONDARY tileset, which is the only slot Emerald ever
+      -- gives gTileset_Fortree (all four of its maps pair it under
+      -- gTileset_General), so ids 548..567 are in the 512..1023 secondary
+      -- bank on every one of them.
+      building_art = {
+        [548] = "roof", [549] = "roof", [550] = "roof",
+        [555] = "wall", [559] = "wall", [563] = "wall", [567] = "wall",
+
+        -- THE WEATHER INSTITUTE, Route119 (1..11, 26..32), and the rows it
+        -- is actually drawn in.
+        --
+        -- REPORTED from play: "the weather building needs to be remade to
+        -- the correct heights based on the actual building art".
+        --
+        -- MEASURED off the 2D.  The building is SEVEN cell rows tall and
+        -- the split between what is seen from above and what is seen
+        -- face-on falls between rows 28 and 29:
+        --
+        --   26  the roof's crenellated parapet and the tops of the two
+        --       white radar domes
+        --   27  the ribbed roof panel; the domes' middles
+        --   28  the ribbed panel again; the domes' lower halves and the
+        --       small spheres beside them
+        --   ------------------------------------------------ the cornice
+        --   29  the entablature band, and where the curved blue glass
+        --       starts down both flanks
+        --   30  wall: pilasters, windows, the flank glass
+        --   31  wall: the lower windows and the door head
+        --   32  wall: the plinth course and the doorway itself, which is
+        --       the cell the warp stands on
+        --
+        -- So THREE rows of roof over FOUR of wall.  Unstated, this file
+        -- read four rows as roof and two as wall, and the difference is
+        -- the whole shape of the thing: a nine-cell-wide plan lidded with
+        -- the roof drawing stretched across all of it, a facade two rows
+        -- high, and the radar domes smeared flat over the top -- which is
+        -- what the screenshot shows.
+        --
+        -- SAFE TO STATE HERE.  MEASURED over all 518 maps: every one of
+        -- these forty-nine ids appears on ROUTE 119 AND NOWHERE ELSE --
+        -- 64 cells, which is the Institute -- even though three other maps
+        -- (FortreeCity, Route120, FarawayIsland_Interior) carry this same
+        -- secondary tileset.  None of them places one.
+        --
+        -- PRESENTATIONAL ONLY, like every other row in this block: it says
+        -- which row of the drawing an id belongs to, and nothing else.
+        [729] = "roof", [730] = "roof", [672] = "roof", [673] = "roof",
+        [674] = "roof", [676] = "roof", [677] = "roof",
+        [737] = "roof", [738] = "roof", [739] = "roof", [680] = "roof",
+        [683] = "roof", [684] = "roof", [685] = "roof",
+        [745] = "roof", [746] = "roof", [747] = "roof", [691] = "roof",
+        [692] = "roof", [693] = "roof",
+
+        [753] = "wall", [754] = "wall", [688] = "wall", [689] = "wall",
+        [690] = "wall", [700] = "wall", [701] = "wall",
+        [761] = "wall", [762] = "wall", [696] = "wall", [697] = "wall",
+        [698] = "wall", [708] = "wall", [709] = "wall",
+        [768] = "wall", [769] = "wall", [770] = "wall", [704] = "wall",
+        [705] = "wall", [706] = "wall", [716] = "wall", [717] = "wall",
+        [777] = "wall", [778] = "wall", [712] = "wall", [713] = "wall",
+        [714] = "wall", [724] = "wall", [725] = "wall",
+      },
+    },
 
     -- UNDERWATER: the seabed.  Every cell of it is under the sea, so the
     -- water class must not fire -- MB_NORMAL down here is the floor you swim
@@ -761,7 +1024,329 @@ gTileset_Sootopolis = {
   -- Classes: chair / tabletop (drawn from above, art on the top face);
   -- worktop / sink / appliance / cabinet / tv (drawn face-on, art folds up
   -- the south face); bed (from above, low).
+  --
+  -- 3. A PIN NAMES A CLASS, AND A CLASS IS ONE HEIGHT FOR ONE WHOLE CELL.
+  --    That is the limit of this table, and it is worth stating here because
+  --    the next thing someone will want to pin is an object whose edge is a
+  --    CURVE cutting across cells.  RUSTBORO CITY'S WATER FOUNTAIN --
+  --    RustboroCity (27..29, 38..40) -- is exactly that: a grey stone
+  --    OCTAGONAL basin inscribed in a 3x3 block, so its corner cells are part
+  --    fountain and part street and no single height describes either of
+  --    them.  No row below can say it, and a row that tried would raise the
+  --    street with it.  It is authored as a SHAPE instead -- a plan polygon
+  --    and three drawn profiles -- in data/gen3_palings.lua under `basins`,
+  --    which is the file this mod keeps for authored shapes matched per
+  --    tileset, and it is built by Structures.buildGen3Basins.
+  --    (g3-basin-311.)
+  -- ---------------------------------------------------------------------
+  -- POST RUNS -- a drawing spread down a COLUMN of cells that is ONE post
+  -- ---------------------------------------------------------------------
+  --
+  -- Keyed `tileset name -> FOOT metatile -> { posts = P, rows = R }`, the
+  -- foot being the blocked cell the FRONT post stands on.  `rows` is how
+  -- many cell rows ONE post is drawn over; `posts` is how many of them
+  -- stand in the line, receding north.  A bare number is shorthand for one
+  -- post that many rows tall.
+  --
+  -- Read by Structures.buildCylinders, which carves one round hull 16 wide
+  -- by 16 * rows tall from the R rows ending at the foot, then stamps it P
+  -- times one cell of depth apart; every cell of the run is vacated and
+  -- repainted with the floor around it.
+  --
+  -- Both numbers are STATED -- counted off the 2D art -- not measured off
+  -- anything in the ROM.  Presentational only: collision, elevation, warps
+  -- and scripts are untouched, and a metatile absent from here is not a
+  -- post.
+  --
+  -- MAUVILLE GYM'S INSULATOR POSTS.  IN-GAME LOCATION: MauvilleCity_Gym,
+  -- the porcelain insulators the electric beams are strung between.
+  -- REPORTED from play: "the posts the electric fences come from should be
+  -- 3d and cylindrical", and of the three by the gym leader: "each one
+  -- behind the front one should be its own pillar/post rather than stacked,
+  -- they should be one behind the other".
+  --
+  -- ONE post is TWO rows -- a porcelain disc over a ribbed stem and a
+  -- flared foot.  That is the whole drawing, and the six posts standing
+  -- alone show it: (0, 10..11), (3, 10..11), (6, 10..11), (9, 10..11),
+  -- (3, 13..14) and (6, 13..14), feet 536 on five and 579 on (3, 11).
+  --
+  -- THE TWO BY THE GYM LEADER ARE LINES OF THREE, (3, 5..8) and (6, 5..8),
+  -- feet 590 and 576.  Four cell rows for three two-row posts, because a
+  -- post is taller than the sixteen pixels between it and the next: each
+  -- one's stem and foot are hidden behind the disc of the one in front, so
+  -- only the nearest is drawn whole.  This is the PLAN reading that
+  -- data/gen3_palings.lua's header sets out for a north-south fence arm,
+  -- and it is the same drawing habit.
+  --
+  -- The discs at the head of each line (566 / 567) are walkable
+  -- above-player art -- you pass behind them -- and the one at (6, 10) is
+  -- blocked only because a beam crosses it.  Neither fact is a post: the
+  -- run is keyed on the foot alone.
+  --
+  -- Every blocked piece censuses the same way -- `art = surface, cap = 1`,
+  -- one pixel row of top over fifteen of body -- so nothing in the role row
+  -- tells a disc from a foot, and only the drawing says how the line is
+  -- built.  That is what is stated here.
+  -- HOENN'S BIG ROCK IS ONE ROUND DRAWING OVER A 2x2 BLOCK OF CELLS.
+  --
+  -- IN-GAME LOCATION: ROUTE 115, the shelf outside the METEOR FALLS
+  -- entrance -- the boulders at (29,40) and (28,43), either side of the cave
+  -- mouth at (27,37) -- and the same rock three more times on ROUTE 114.
+  --
+  -- REPORTED from play: "the rocks are supposed to be 2x2 per pixel cylinder
+  -- rocks but theyre not looking right ... the big rocks i mean".
+  --
+  -- MEASURED, all 518 maps: metatiles 595/596 over 603/604 are laid as a 2x2
+  -- block eight times, and only on ROUTE 114 and ROUTE 115 -- the two maps
+  -- that pair gTileset_General with gTileset_Fallarbor.  Unpinned the block
+  -- resolves from the terrain flood around it and lands differently every
+  -- time: FOUR of Route 115's five read `cliff` on all four cells (a chunk of
+  -- rock WALL standing in open ground), the fifth reads cliff over `cylinder`
+  -- (a lumpy double hump), and Route 114's two read cliff, cliff, cliff,
+  -- cylinder.  None of the three is a boulder.
+  --
+  -- WHY THIS IS A BLOCK PIN AND NOT A CLASS PIN.  The obvious answer is the
+  -- one HOENN'S TREE carries -- anchor `canopy`, partners `cylinder`, which
+  -- `buildCylinders` already carves as ONE 32px hull -- and it renders
+  -- correctly.  It also breaks ROUTE 114: metatile 596 appears FOUR more
+  -- times there ON ITS OWN, at (6,53), (9,54), (11,55) and (13,56), as an
+  -- ordinary cliff edge, and a class pin would lathe each of those into a
+  -- blob.  A pin that names the whole block cannot: the branch matches only
+  -- where m, m+1, m+8 and m+9 are all four in place.
+  --
+  -- ...AND NOT A HEURISTIC EITHER.  DERIVED region-wide, "a 2x2 block of
+  -- m, m+1, m+8, m+9" also finds 1,344 WALL blocks and 1,030 GROUND blocks:
+  -- consecutive ids tile naturally, so the shape of the block says nothing on
+  -- its own.  The key is the tileset the cartridge names plus the metatile it
+  -- lays, the same idiom as every other pin in this file.  Nothing here reads
+  -- map.id, and Gen 1, Gen 2 and Prism never reach this table.
+  --
+  -- The value is the anchor's metatile; the other three are m+1, m+8, m+9,
+  -- which is how Emerald lays a 2x2 drawing in a 8-wide metatile sheet.
+  rock_blocks = {
+    gTileset_Fallarbor = {
+      [595] = true,   -- Routes 114 and 115, the big rock
+    },
+  },
+
+  post_runs = {
+    gTileset_MauvilleGym = {
+      [590] = { posts = 3, rows = 2 },   -- (3, 5..8), by the gym leader
+      [576] = { posts = 3, rows = 2 },   -- (6, 5..8), the same line east
+      [536] = { posts = 1, rows = 2 },   -- the five single posts
+      [579] = { posts = 1, rows = 2 },   -- (3, 11)
+    },
+  },
+
   metatiles = {
+
+    -- FIRERED'S MART (LAYOUT_MART over gTileset_Building).  The till runs
+    -- north-south down column 3 -- 661/669/677/685, blocked, with 677 the
+    -- MB_COUNTER cell the clerk speaks across -- and unpinned it flooded into
+    -- one region and stood as a wall-high pale column.  `frlg_` names are
+    -- FireRed's own (data/firered/gen3_maps.lua) and cannot meet Emerald's.
+    frlg_gTileset_Mart = {
+      [661] = "counter", [669] = "counter", [677] = "counter", [685] = "counter",
+    },
+
+    -- KANTO'S POTTED PLANTS.
+    --
+    -- IN-GAME: the pair either side of the player's house living room
+    -- (PalletTown_PlayersHouse_1F), and the same plant in the houses that
+    -- share this primary.  `frlg_gTileset_Building` is the primary of 234 of
+    -- FireRed's 425 maps and its ids run below 640 (FireRed's
+    -- `metatilesInPrimary`, not Emerald's 512), so these four are the same
+    -- drawing in every one of them.
+    --
+    -- ONE PLANT, TWO CELLS, AND ONLY THE LOWER ONE IS PINNED -- the same
+    -- reading, and the same restraint, as the Hoenn pots below.  Read off the
+    -- engine's own bake (tools/gen3_metatile_pixels.py):
+    --
+    --     71  above-player px=138   the LEAVES, over a grey floor
+    --     79  above-player px=0     the POT,    over a grey floor
+    --     87  above-player px=138   the LEAVES, over the wood floor
+    --     95  above-player px=0     the POT,    over the wood floor
+    --
+    -- so the leaves are drawn on the ABOVE-PLAYER layer of the cell NORTH of
+    -- the pot, exactly as Hoenn draws them.  The pot's own silhouette closes
+    -- to a taper over rows 10..15 -- a round body narrowing to a foot --
+    -- which is what `cylinder` lathes.  Unpinned, a pot takes whatever the
+    -- run it happens to stand in resolves to, which is the dark box the
+    -- plant was sitting on.
+    --
+    -- The crown is not a second cylinder. The primary figures in
+    -- data/firered/gen3_palings.lua attach it to the pot and restore the
+    -- original floor underneath, without changing its walkability.
+    frlg_gTileset_Building = {
+      [79] = "cylinder", [95] = "cylinder",
+      [75] = "chair", [78] = "chair",
+      [76] = "tabletop", [77] = "tabletop",
+      [84] = "tabletop", [85] = "tabletop",
+
+      -- ---- THE SHARED INTERIOR FURNITURE -------------------------------
+      -- These ids are below 640 and so are the SAME DRAWING in all 234 maps
+      -- built on this primary -- Kanto's houses, labs, gyms, marts and
+      -- facilities alike.  Read off the engine's bake, none of them carrying
+      -- any above-player art:
+      --
+      --   115/116  a BOOKCASE, two bays of coloured spines on four shelves,
+      --            drawn face-on and filling its cell top to bottom.  It is
+      --            what the report calls "bookshelves": unpinned it floods
+      --            into the wall band behind it and comes out as part of the
+      --            wall.  `bookcase` is the class for height rather than
+      --            depth and is what Hoenn's shelves already take.
+      --   117      a COMPUTER: a monitor and its keyboard drawn face-on.
+      --            `console` is the per-pixel standee the class exists for,
+      --            so the screen appears ONCE facing out instead of being
+      --            printed again on the machine's lid.
+      --   118      the cabinet beside it -- a grey carcass with drawn doors,
+      --            so it folds its front up rather than lying on its lid
+      --            (`appliance`, the g3-upright-319 treatment).
+      [115] = "bookcase", [116] = "bookcase",
+      [117] = "console",
+      [118] = "appliance",
+
+      -- 98 is the PC every Pokemon Centre and half the houses in Kanto put
+      -- against a wall: a monitor over a keyboard, drawn face-on. Same
+      -- reason as 117 -- a box lids itself by repeating its north row, so a
+      -- terminal meshed as one wears its own screen twice, once facing you
+      -- and once lying flat on top of the machine.
+      [98] = "console",
+
+      -- ---- THE HOUSE'S OWN FITTINGS ------------------------------------
+      -- Reported from PalletTown_PlayersHouse_1F: "the desk below the tv is
+      -- flat on the ground instead of standing up below the tv, same with
+      -- the cabinet with the glass doors and the sink".  All of these are
+      -- the FRONT row -- the carcass the room's wall band (40/41/42 and
+      -- 45/46/47) sits above -- so pinning them takes them out of the wall's
+      -- flood without breaking the wall, which is the rule the Hoenn block
+      -- below states first and loudest.  None carries above-player art.
+      --
+      --   49  the SINK, its basin and tap drawn into the worktop
+      --   50  the hob beside it, the same worktop carrying rings
+      --   53  the tall grey appliance at the end of the run
+      --   54/55  THE GLASS-DOORED CABINET: a yellow frame over blue panes,
+      --          drawn face-on with the counter below it
+      --   57  the plain wooden unit
+      --   62  the drawered unit
+      --   63  THE DESK UNDER THE TELEVISION -- the machine is drawn sitting
+      --       on a wooden top, so the cell is desk AND set together and the
+      --       whole of it has to stand
+      [49] = "sink",
+      [50] = "worktop",
+      [53] = "appliance",
+      [54] = "cabinet", [55] = "cabinet",
+      [57] = "cabinet",
+      [62] = "cabinet", [63] = "cabinet",
+    },
+
+    -- PROFESSOR OAK'S LAB, and every room that shares `frlg_gTileset_Lab`.
+    -- Ids at 640 and above are the SECONDARY -- and note FireRed's split is
+    -- 640, not Emerald's 512 (`metatilesInPrimary`), so a Hoenn id in this
+    -- range is an unrelated drawing and cannot be reached from here.
+    frlg_gTileset_Lab = {
+      -- THE CORNER PLANTS.  Same two-cell reading as the houses' pots:
+      -- 659 and 660 carry 138 px of ABOVE-PLAYER art -- the leaves, on the
+      -- cell north -- while 667 and 668 carry none and are the pots.  Pin
+      -- the pot; gen3_palings.lua attaches its crown separately.
+      [667] = "cylinder", [668] = "cylinder",
+
+      -- THE WORKBENCHES.  644 is the one the lab repeats (7 cells): a bench
+      -- drawn FACE-ON, its front panel and legs below the top, so it folds
+      -- up the south face instead of lying flat on a lid.
+      [644] = "worktop",
+
+      -- THE PAPERS ON THE BENCH -- the report's "piles of books".  Drawn
+      -- from ABOVE, a white sheet ruled with lines lying on the bench top,
+      -- so it is a top surface and takes `tabletop` rather than a standee.
+      [661] = "tabletop",
+    },
+
+    -- EVERY POKEMON CENTRE (38 maps share this secondary).  None of these
+    -- carry above-player art, so each is a whole object in one cell and the
+    -- two-cell plant reading does not apply here.
+    frlg_gTileset_PokemonCenter = {
+      [757] = "chair", [765] = "chair",
+      [668] = "tabletop", [669] = "tabletop",
+      [676] = "tabletop", [677] = "tabletop",
+      -- THE PLANTS: 653 is the potted tree beside the door and 689/693 are
+      -- the flowering pots along the wall.  All three are round bodies on a
+      -- pot foot, which is what `cylinder` lathes; unpinned they take the
+      -- run they stand in and come out as part of the wall behind them.
+      [653] = "cylinder", [689] = "cylinder", [693] = "cylinder",
+
+      -- THE HEALING MACHINE, drawn face-on with its lamps and ball slots on
+      -- the front, so it folds its front up rather than printing it on a
+      -- lid.
+      [682] = "appliance", [683] = "appliance",
+    },
+
+    -- SILPH CO AND THE ROCKET HIDEOUT (20 maps share this secondary) -- the
+    -- most machine-dense interiors in Kanto.
+    frlg_gTileset_SilphCo = {
+      -- THE OFFICE PLANTS.  Same two-cell reading again, and the tool says
+      -- which half is which: 768 and 769 carry 122 px of ABOVE-PLAYER art
+      -- (the fronds, on the cell north) and 776/777 carry none and are the
+      -- planters.  Pin the planter.
+      [776] = "cylinder", [777] = "cylinder",
+
+      -- THE TERMINALS.  707/708 are a monitor over a keyboard and 650/651 a
+      -- console with a lit readout, all drawn face-on.  `console` is the
+      -- per-pixel standee, so a screen is drawn once facing out instead of
+      -- being repeated across the machine's lid.
+      [650] = "console", [651] = "console",
+      [707] = "console", [708] = "console",
+    },
+
+    -- CELADON'S DEPARTMENT STORE (6 floors share this secondary).
+    -- The planters flanking the shop floor: 702/703 carry 138 px of
+    -- ABOVE-PLAYER art -- the fronds, on the cell north -- and 710/711 carry
+    -- none and are the tubs.  Unpinned they took the run they stood in and
+    -- rendered as dark blobs on black boxes.
+    frlg_gTileset_DepartmentStore = {
+      [710] = "cylinder", [711] = "cylinder",
+      [786] = "chair", [790] = "chair",
+      [794] = "chair", [798] = "chair",
+      [802] = "chair", [806] = "chair",
+    },
+    -- THE WATER UNDER ROUTE 119'S PLANK WALKWAYS IS STILL WATER.
+    --
+    -- MOTIVATED BY ROUTE 119'S UPPER RIVER, (10..17, 8) AND (11..15, 11) --
+    -- the two rows of pier cells that cross the basin above the waterfall,
+    -- part of the same report as the 518/519 pin on gTileset_Fortree below:
+    -- "all water at the top of the waterfall should be the same level as the
+    -- top of the waterfall".
+    --
+    -- 245 IS OPEN WATER WITH TWO POSTS STANDING IN IT.  The cell draws the
+    -- pale underside of a plank deck across its top rows and two dark piles
+    -- dropping from it into darker water; every other pixel is the river's
+    -- own animated ripple, and all four of its bottom quadrants sit in one of
+    -- the pair's animation runs.  Its NEIGHBOURS along the same walkway --
+    -- 237, 241, 242, 251, 252, 253 -- are the same drawing with a rail
+    -- behaviour on them (MB_*_RAIL, 0xD3..0xD6) and already resolve `bridge`.
+    -- 245 is the one Emerald leaves at MB_NORMAL and BLOCKS, because it is
+    -- the gap under the deck rather than the deck, so it fell through to the
+    -- structural rule: blocked + MB_NORMAL is a wall, and a wall outdoors is
+    -- landscape rock.
+    --
+    -- MEASURED, before this pin and with 518/519 already water: the 17 cells
+    -- of 245 in the basin stood at 0 and 16 while the water either side of
+    -- them lay at 12 and 32 -- two rows of rock stubs damming one lake into
+    -- three, which is the thing the report is about.  `standGen3Water` floods
+    -- by CLASS, so a row of cliff across a body of water is a wall in it.
+    --
+    -- NOT 250, WHICH IS THE SAME DECK LANDING ON ROCK: half that cell is the
+    -- bank's brown stone and `cliff` is what it is.  4 cells, left alone.
+    --
+    -- DERIVED over all 518 maps: metatile 245 of this primary is laid on 22
+    -- cells in the whole of Hoenn and every one is on Route 119 -- the pier
+    -- art is in the shared primary but only this route draws it.  (236, 250
+    -- and 252 measure 1, 4 and 4 cells, also Route 119 only.)  Nothing
+    -- outside Route 119 can move.
+    gTileset_General = {
+      [7] = "relief",
+      [245] = "water",
+    },
 
     -- LITTLEROOT TOWN's secondary tileset, which is where Professor Birch's
     -- lab lives (LAYOUT_LITTLEROOT_TOWN is gTileset_General over this one).
@@ -781,6 +1366,7 @@ gTileset_Sootopolis = {
       -- the structural flood -- which is the lab's own roof, and it would
       -- have come away with a two-cell hole where the chimney stands.
       [578] = "chimney", [579] = "chimney",
+      [581] = "relief",
     },
 
     -- BRENDAN'S AND MAY'S HOUSE (4 maps: both children's houses, both floors).
@@ -1465,12 +2051,9 @@ gTileset_Sootopolis = {
       -- draws it and the seat comes forward onto the floor.  Same compromise
       -- the 530/531 and 613/599 cells already ship, for the same reason.
       --
-      -- `counter` and SIXTEEN.  SIXTEEN is `counter`'s own number, DERIVED
-      -- there off the stated 32px walker as 32/2, waist, and shipped on 563
-      -- cells; here it is the height of the couch BODY, whose 22 drawn rows
-      -- are a cell and a bit, with the seat drawn on its lid.  `counter` is
-      -- also this file's own word for the object -- lib/TileShape.lua calls
-      -- it "half-cell furniture: a service counter, A LOW COUCH".
+      -- The GenericBuilding joinery profile overrides the counter default:
+      -- cushions at 8px, backs at 16px and end arms at 12px. Its layer-2 mask
+      -- keeps the pale cushion intact instead of carving it as floor.
       --
       -- NOT `chair` (8), and this is measured rather than argued.  8 = 32/4
       -- is the right height for a seat, but `chair` alone reads its
@@ -1481,7 +2064,7 @@ gTileset_Sootopolis = {
       -- -- 860 and 861 carve to 76 + 72 pixels and 831 to 112 + 48, with
       -- rows 8..10 eaten open from edge to edge.  Pinned `chair` the front
       -- rail is discarded and a three-cell couch comes out as a 7px-deep
-      -- bar.  `counter` reads the plain carve and keeps all 148..162 pixels.
+      -- bar. The counter class with the authored layer-2 mask keeps it whole.
       --
       -- AND NOT `bed`, which is the other low class that reads the plain
       -- carve: `bed` is the one class the joinery pass GROWS across cells,
@@ -1719,6 +2302,58 @@ gTileset_Sootopolis = {
       -- as wall they measured a four-tile run and stood 48px: eight stone
       -- slabs where the map draws eight little posts.
       [640] = "post",
+    },
+
+    -- ROUTE 119'S UPPER RIVER IS WATER, AND IT WAS MESHING AS A CLIFF.
+    --
+    -- MOTIVATED BY ROUTE 119, THE BASIN ABOVE THE WATERFALL AT (17..19, 25)
+    -- -- the wide reach the plank walkways cross on their piers -- reported
+    -- as "all water at the top of the waterfall should be the same level as
+    -- the top of the waterfall".
+    --
+    -- 518 AND 519 ARE DRAWN AS OPEN WATER.  Both are this secondary's river
+    -- surface: 518 is bare ripple, 519 the same ripple with a reed clump
+    -- standing in it.  Both animate on LAYER 1 -- all four bottom quadrants
+    -- of each cell sit inside one of the pair's six animation runs, which is
+    -- Emerald drawing a moving SURFACE rather than something standing on one
+    -- (`Gen3.flowerMetatiles`, reading 1, in reverse).  `Gen3.metaRole` calls
+    -- both `surface`; the shore rock beside them in the same tileset --
+    -- 378, 380, 386, 388 -- it calls `face`.
+    --
+    -- WHAT THE CARTRIDGE SAYS, AND WHY IT WAS NOT ENOUGH.  Emerald puts
+    -- these cells at ELEVATION 1, the surf datum, and BLOCKS them: this is
+    -- the reach you cannot surf into, because the walkways are the way
+    -- across it.  `Gen3.classAt`'s elevation-1 rule is gated on `not
+    -- blocked`, and it has to be: DERIVED over all 518 maps, 2,810 blocked
+    -- surf cells resolve `cliff` today and almost all of them are real rock
+    -- -- the sea stacks of Routes 124, 127, 126, 125, 129 and 128 (562, 420,
+    -- 257, 190, 144 and 129 cells), every one of which `metaRole` calls
+    -- `face`.  So a blocked water cell falls past that rule to the behaviour
+    -- byte, which is MB_NORMAL here; MB_NORMAL plus blocked is a wall, and a
+    -- wall outdoors is landscape rock.
+    --
+    -- WHAT THAT LOOKED LIKE.  MEASURED on Route 119 before this pin: the 124
+    -- basin cells of 518 carry FIVE different heights -- 16, 32, 48, 64 and
+    -- 80 -- because the rock passes chain courses up them, while the 19
+    -- surfable cells of the same river just below (metatile 368,
+    -- MB_OCEAN_WATER) lie flat at 44 and the fall's own lip stands at 48.
+    -- One body of standing water drawn as a five-course stair of blue slabs,
+    -- with the plank walkways sunk between them.
+    --
+    -- PINNED RATHER THAN RULED, because no reading separates these two from
+    -- the sea stacks without taking those as well: elevation 1 + blocked +
+    -- `surface` is 423 cells region-wide, and 292 of them are Mossdeep's and
+    -- the sea routes' half-sunk rocks (336/337/344/345) -- rock in water, and
+    -- right as they stand.  DERIVED: metatiles 518 and 519 of this pair are
+    -- laid on 176 cells in the whole of Hoenn and every one is on Route 119.
+    -- Nothing else in the region can move.
+    --
+    -- `water` is flat and recessed, and `Structures.standGen3Water` floods a
+    -- water body and sets the whole of it to ONE surface at the lowest shore
+    -- you can stand on.  That single level is what the report asks for.
+    gTileset_Fortree = {
+      [518] = "water",
+      [519] = "water",
     },
 
   },

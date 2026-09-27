@@ -628,6 +628,11 @@ function P:update(ctx,dt)
   end
 end
 function P:finish() stopCaptureSuccessAudio();battleKey=nil;age=0;activeNow=false;actionKind=nil;actionAge=0;actionStrength=0;initialThrowQueued=false;initialOpeningQueued=false;lastSendingOut=false;resultSeen=nil;pendingFrustration=nil;pendingReaction=nil;capture=nil;currentMotion=nil;performanceState=TrainerPerformance and TrainerPerformance.resetState(performanceState,"red") or nil end
+local function fieldLift(ctx)
+  local a=ctx and ctx.arena
+  if a and a.liveField then return tonumber(a.groundY) or 0 end
+  return 0
+end
 local function entryPose()
   local p=smooth((age-0.06)/1.05)
   -- Start just outside whichever arena back-line is active and settle inward.
@@ -802,12 +807,15 @@ local function setShader(vp,model,pose,unlit,tint,opacity,motion)
 end
 function P:drawShadow(ctx,vp,pose)
   if not activeNow then return end;local s=loadScene(ctx);if not s then return end;local p=entryPose();if p.progress<.05 then return end
-  local motion=idleMotion();local model=Mat4.translate(p.x+motion.sway,0,p.z);love.graphics.setDepthMode("lequal",false);love.graphics.setBlendMode("alpha","alphamultiply");if love.graphics.setMeshCullMode then love.graphics.setMeshCullMode("none") end;love.graphics.setColor(1,1,1,1)
+  local lift=fieldLift(ctx)
+  local motion=idleMotion();local model=Mat4.translate(p.x+motion.sway,lift,p.z);love.graphics.setDepthMode("lequal",false);love.graphics.setBlendMode("alpha","alphamultiply");if love.graphics.setMeshCullMode then love.graphics.setMeshCullMode("none") end;love.graphics.setColor(1,1,1,1)
   setShader(vp,model,pose,1,{0,0,0,.58},smooth(p.progress/.50));love.graphics.draw(shadowMesh);love.graphics.setShader()
 end
 function P:draw(ctx,vp,pose)
   if not activeNow then return end;drawFrames=drawFrames+1;local s=loadScene(ctx);if not s then return end;local p=entryPose();if p.progress<.03 then return end
   local motion=idleMotion();local model=animatedModel(p,motion)
+  local lift=fieldLift(ctx)
+  if lift~=0 then model=Mat4.mul(Mat4.translate(0,lift,0),model) end
   TrainerMorph.bindPair(s.groups,motion)
   love.graphics.setDepthMode("lequal",true);love.graphics.setBlendMode("alpha","alphamultiply");if love.graphics.setMeshCullMode then love.graphics.setMeshCullMode("none") end;love.graphics.setColor(1,1,1,1)
   setShader(vp,model,pose,0,{1,1,1,1},smooth(p.progress/.38),motion)

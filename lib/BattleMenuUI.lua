@@ -7,6 +7,15 @@ local function topState(game)
   local states=game and game.stack and game.stack.states
   return type(states)=="table" and states[#states] or nil
 end
+local function realtimeBattleOwnsScreen(state)
+  local game=state and state.game
+  if not game then return false end
+  local settings=V and V.BattleSettings
+  if not (settings and type(settings.realtimeEnabled)=="function") then return false end
+  local ok,enabled=pcall(settings.realtimeEnabled,game)
+  if not ok or enabled~=true then return false end
+  return topState(game)==state and state.isBattle==true
+end
 local function scaleForWindow()
   local w,h=love.graphics.getDimensions();return clamp(math.min(w/1280,h/720),.78,1.72)
 end
@@ -91,6 +100,93 @@ function U.mark(menu,title,rows,maxVisible,subtitle)
   end
   return menu
 end
+
+local function enclosingRealtimeBattle(state)
+  local game=state and state.game
+  local states=game and game.stack and game.stack.states
+  if type(states)~="table" then return nil end
+  local settings=V and V.BattleSettings
+  if not (settings and type(settings.realtimeEnabled)=="function") then return nil end
+  local ok,enabled=pcall(settings.realtimeEnabled,game)
+  if not ok or enabled~=true then return nil end
+  local found=false
+  for i=#states,1,-1 do
+    local candidate=states[i]
+    if candidate==state then found=true
+    elseif found and candidate and candidate.isBattle==true then return candidate end
+  end
+  return nil
+end
+
+local function normalizedChoiceLabel(v)
+  if type(v)=="table" then v=v.label or v.text or v.name or v.value end
+  local s=tostring(v or ""):upper()
+  s=s:gsub("[^A-Z]","")
+  return s
+end
+
+local function yesNoLabels(state)
+  if type(state)~="table" then return nil end
+  local labels=state.labels or state.choices or state.items
+  if type(labels)~="table" or #labels~=2 then return nil end
+  local a,b=normalizedChoiceLabel(labels[1]),normalizedChoiceLabel(labels[2])
+  if (a=="YES" and b=="NO") or (a=="NO" and b=="YES") then return labels end
+  return nil
+end
+
+local function isChoiceBoxState(state)
+  if type(state)~="table" then return false end
+  local req=(V and V.engineRequire) or require
+  local ok,ChoiceBox=pcall(req,"src.ui.ChoiceBox")
+  if ok and type(ChoiceBox)=="table" and getmetatable(state)==ChoiceBox then return true end
+
+  -- Newer engine builds may push a registered/facade ChoiceBox whose runtime
+  -- metatable is not literally the table returned by require(). Recognize only
+  -- the authoritative two-option YES/NO overlay above a realtime BattleState;
+  -- do not guess at arbitrary menus or PartyMenu states.
+  local battle=enclosingRealtimeBattle(state)
+  if not battle or not yesNoLabels(state) then return false end
+  if type(state.onChoose)=="function" or type(state.onDone)=="function"
+      or type(state.callback)=="function" or type(state.choose)=="function" then
+    return true
+  end
+  local cur=battle.current
+  if battle.waitingUI==true and type(cur)=="table" and type(cur.choice)=="function" then
+    return true
+  end
+  return false
+end
+
+local function drawRealtimeChoice(state)
+  local battle=enclosingRealtimeBattle(state)
+  if not battle or not (love and love.graphics) then return false end
+  local g=love.graphics;local sw,sh=g.getDimensions();local u=scaleForWindow()
+  local w=math.min(430*u,sw*.52);local h=172*u
+  local x=(sw-w)*.5;local y=math.max(36*u,sh*.18)
+  g.push("all")
+  g.setColor(0,0,0,.32);g.rectangle("fill",0,0,sw,sh)
+  plate(x,y,w,h,u)
+  local title=(battle.kind=="trainer") and "SWITCH POKEMON?" or "CHOOSE"
+  text(title,x+24*u,y+18*u,16*u,{.98,.94,.76,1})
+  if battle.kind=="trainer" then
+    text("Enemy trainer is sending out another Pokemon.",x+24*u,y+49*u,10*u,{.72,.77,.72,1})
+  end
+  local labels=yesNoLabels(state) or {"YES","NO"}
+  local by=y+88*u;local bw=(w-60*u)/2
+  for i=1,2 do
+    local bx=x+20*u+(i-1)*(bw+20*u)
+    local sel=(tonumber(state.index) or 1)==i
+    g.setColor(sel and .34 or .12,sel and .36 or .14,sel and .31 or .13,sel and .98 or .90)
+    g.rectangle("fill",bx,by,bw,44*u,8*u,8*u)
+    if sel then g.setColor(.96,.53,.23,1);g.setLineWidth(math.max(2,2*u));g.rectangle("line",bx,by,bw,44*u,8*u,8*u) end
+    local lv=labels[i]
+    if type(lv)=="table" then lv=lv.label or lv.text or lv.name or lv.value end
+    text(lv or (i==1 and "YES" or "NO"),bx,by+12*u,13*u,{.96,.96,.91,1},"center",bw)
+  end
+  text("UP/DOWN: SELECT     ENTER: CONFIRM",x+24*u,y+h-25*u,9*u,{.55,.61,.56,1})
+  g.pop();return true
+end
+
 function U.install()
   if U.installed then return true end
   if not (mod and mod.hooks and type(mod.hooks.wrap)=="function") then return false end
@@ -101,9 +197,35 @@ function U.install()
   mod.hooks:wrap("render.hud",function(next,game,viewport)
     local out=next(game,viewport);local state=topState(game)
     if state and state.__cbeBattleMenu then pcall(drawState,game,state) end
+    if state and isChoiceBoxState(state) and enclosingRealtimeBattle(state) then
+      pcall(drawRealtimeChoice,state)
+    end
     return out
   end,21500)
+
+  -- Realtime 3D battles own their presentation completely. Hide the classic
+  -- status/name/HP blocks and the bottom FIGHT/PKMN/ITEM/RUN text box only
+  -- while the BattleState itself is the top state. Native Item/Party screens
+  -- pushed above it therefore remain visible and usable.
+  mod.hooks:wrap("battle.status_hud_visible",function(next,state)
+    if realtimeBattleOwnsScreen(state) then return false end
+    return next(state)
+  end,32000)
+  mod.hooks:wrap("battle.bottom_ui_visible",function(next,state)
+    if realtimeBattleOwnsScreen(state) then return false end
+    return next(state)
+  end,32000)
+
+  -- The custom side menu polls the real desktop mouse directly. Consume the
+  -- engine pointer seam while realtime owns the top BattleState so no hidden
+  -- vanilla/third-party battle hitbox can still react underneath it.
+  mod.hooks:wrap("input.pointer",function(next,game,event)
+    local state=topState(game)
+    if realtimeBattleOwnsScreen(state) then return true end
+    return next(game,event)
+  end,32000)
+
   U.installed=true;return true
 end
-function U.status() return {installed=U.installed,style="colosseum-beveled-glass"} end
+function U.status() return {installed=U.installed,style="realtime-minimal-hud-side-menu",nativeBattleHudSuppressed=true} end
 return U

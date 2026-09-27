@@ -65,16 +65,6 @@ local quickstartSetting = ModSetting.new("free_fly_quickstart", "QUICK START",
 local ALTS = { low = 32, med = 56, high = 80 }
 local SPEEDS = { normal = 8, fast = 6, turbo = 4 }
 
-local function cruiseAlt()
-  local alt = altitudeSetting:get()
-  return ALTS[alt] or 56
-end
-
-local function flyFrames()
-  local speed = speedSetting:get()
-  return SPEEDS[speed] or 8
-end
-
 local GIFT_SPECIES = "PIDGEOT"
 local GIFT_LEVEL = 10
 local GIFT_TAKEN = "MOD_FREE_FLY_PIDGEY_TAKEN"
@@ -94,6 +84,7 @@ local state = {
   riseGlide = 0,
   glide = 0,
   landRequest = nil,
+  wantLand = nil,
   approachPath = nil,
   fpRef = nil,
   v3dRef = nil,
@@ -111,8 +102,45 @@ local state = {
   qsHeld = nil,
   previousPokemonPlayerDex = nil,  -- Store previous Pokemon Player setting
   previousPokemonPlayerMarker = nil,  -- Store previous marker file content
-  pokemonPlayerStateSaved = false  -- Track if we saved the state (needed for OFF detection)
+  pokemonPlayerStateSaved = false,  -- Track if we saved the state (needed for OFF detection)
+  -- FULL FLY: armed the instant the fly-mode Town Map is pushed, holds
+  -- the mon that will do the flying, cleared either by the map handing
+  -- back a destination (see the takeWarp intercept) or by the map
+  -- closing on its own with nothing picked
+  fullFlyArmed = nil,
+  -- FULL FLY: a destination just caught by the takeWarp intercept,
+  -- waiting for the next tick to actually unwind the screen stack and
+  -- take off (see __freeFlyTick) -- deliberately NOT done inside the
+  -- takeWarp override itself, since that runs mid-call from inside
+  -- the Town Map's own confirm handler and this mod has no way to
+  -- know what that handler still does with the stack immediately
+  -- afterward; one tick later, the stack is settled either way and
+  -- the same "pop up to the overworld" used by FREEFLY is unconditionally safe
+  pendingAutopilot = nil,
+  -- FULL FLY: the in-flight autopilot, nil once idle or once the
+  -- player takes the stick back. { mapId, x, y } is the chosen
+  -- destination; ox/oy/rootedOn are the cached bearing to it in the
+  -- CURRENT map's own pixel space, refreshed on every crossing
+  autopilot = nil,
 }
+
+local function cruiseAlt()
+  -- FULL FLY always uses highest altitude
+  if state.autopilot then
+    return ALTS.high
+  end
+  local alt = altitudeSetting:get()
+  return ALTS[alt] or 56
+end
+
+local function flyFrames()
+  -- FULL FLY always uses fastest speed (turbo = 4 frames)
+  if state.autopilot then
+    return SPEEDS.turbo
+  end
+  local speed = speedSetting:get()
+  return SPEEDS[speed] or 8
+end
 
 local function flying()
   return state.phase ~= "idle"
@@ -253,6 +281,7 @@ local function startFlight(game, mon)
     return
   end
   state.phase, state.alt, state.bob = "rising", 0, 0
+  state.wantLand = nil
   -- wild flyers climb on a diagonal; so does the mount
   state.riseGlide = 2
   
@@ -474,10 +503,237 @@ V.mod.hooks:wrap("save.write", function(next, game)
   return next(game)
 end)
 
-V.mod.hooks:wrap("ui.party.submenu", function(next, game, items, mon, ctx)
-  local out = next(game, items, mon, ctx)
-  if type(out) ~= "table" then return out end
-  local ow = ctx and ctx.overworld
+-- ------- FULL FLY: pick a place on the map, fly there for real
+--
+-- FREEFLY (above) takes off with no destination in mind. FULL FLY is
+-- the same flight with a target: it opens the same Town Map the
+-- vanilla FLY field move and the MAPA key item both use, and when a
+-- place is picked, instead of the vanilla instant warp the flyer
+-- takes off from wherever they are standing and is steered toward it
+-- automatically, arriving and landing the way a manual flight does
+-- (see the "flying" phase of __freeFlyTick further down for the
+-- steering itself; this section is the entry point and the bearing
+-- math it steers by).
+
+-- how far the destination search is allowed to walk the connection
+-- graph. WorldAtlas.lua caps its own search at 6 hops because that is
+-- as far as the renderer's skyline ever needs to reach; a flight has
+-- to reach all the way across the region on the very first tick, so
+-- this asks the same underlying walk for a lot more room. Still a
+-- bounded search, not the whole graph -- real outdoor connection
+-- graphs are nowhere near this deep.
+local FULL_FLY_HOPS = 200
+
+-- where mapId `destMapId` sits relative to mapId `rootMapId`, in world
+-- pixels, by walking src.world.OverworldController's own connection
+-- graph (the exact walk WorldAtlas.lua rides for the skyline, and the
+-- one the engine's own neighbour rendering is built from -- see that
+-- file's header for why that agreement matters). Returns nil when the
+-- two aren't connected within FULL_FLY_HOPS.
+local function computeOffsetTo(rootMapId, destMapId)
+  if not (rootMapId and destMapId) then return nil end
+  if rootMapId == destMapId then return 0, 0 end
+  local ok, OverworldController = pcall(require, "src.world.OverworldController")
+  if not (ok and OverworldController and OverworldController.computeNeighbors) then
+    return nil
+  end
+  local okG, GameMod = pcall(require, "src.core.Game")
+  local maps = okG and GameMod and GameMod.data and GameMod.data.maps
+  if not maps then return nil end
+  local okN, raw = pcall(OverworldController.computeNeighbors, maps,
+                         rootMapId, FULL_FLY_HOPS)
+  if not (okN and type(raw) == "table") then return nil end
+  for _, n in ipairs(raw) do
+    if n.id == destMapId then return n.ox, n.oy end
+  end
+  return nil
+end
+
+-- recomputes the cached bearing to state.autopilot's destination when
+-- the flyer has crossed onto a different map since the last tick;
+-- free the rest of the time
+local function autopilotRefresh(ow)
+  local ap = state.autopilot
+  if not (ap and ow.map) then return end
+  if ap.rootedOn == ow.map.id then return end
+  if ap.mapId == ow.map.id then
+    ap.ox, ap.oy, ap.rootedOn = 0, 0, ow.map.id
+    return
+  end
+  local ox, oy = computeOffsetTo(ow.map.id, ap.mapId)
+  ap.ox, ap.oy, ap.rootedOn = ox, oy, ow.map.id
+  if not ox then
+    V.mod.log:info("FULL FLY: %s not reachable from %s within %d hops yet",
+                 tostring(ap.mapId), tostring(ow.map.id), FULL_FLY_HOPS)
+  end
+end
+
+-- standing still, player px/py is the cell's TOP-LEFT, so a pixel test
+-- against the cell CENTER (x*16+8) is always 8px away on the dest tile
+-- itself -- `< 8` never fires and the flyer oscillates north/south of
+-- the fly spot forever. Arrive by cell instead: on the fly tile, or
+-- the 8-neighborhood if that tile is a wall we cannot stand on.
+local AUTOPILOT_ARRIVE_CELLS = 1
+
+-- tryMove never crosses a map seam: Collision.canMove refuses
+-- out-of-bounds cells, and the engine's checkEdgeExit lives on the
+-- d-pad path (held direction, facing already matching). Autopilot
+-- holds no pad, so a step off this map has to ask for that seam the
+-- same way a held press would -- otherwise FULL FLY bonks the border
+-- forever while FREEFLY (player steering) walks through to neighbors.
+local function tryFlyMove(ow, p, dir)
+  if not (ow and p and dir) then return nil end
+  local Collision = require("src.world.Collision")
+  local tx, ty = Collision.target(p.cellX, p.cellY, dir)
+  if ow.map and ow.map.inBounds and not ow.map:inBounds(tx, ty) then
+    if ow.checkEdgeExit and ow:checkEdgeExit(dir) then
+      return "moved"
+    end
+    return "blocked"
+  end
+  return p:tryMove(dir, ow.map, ow.entities)
+end
+
+-- one tick of autopilot steering. Returns false once it is time to
+-- hand off to landing (arrived, close enough, not mid-step), true
+-- otherwise -- including while the destination is momentarily out of
+-- the bearing search's reach, where it holds position rather than
+-- guessing a heading.
+local function autopilotStep(ow, p)
+  local ap = state.autopilot
+  if not ap then return false end
+  autopilotRefresh(ow)
+  if not ap.ox then
+    -- Fallback: when offset computation fails, try to move in a direction
+    -- that might lead toward the destination. This is a simple heuristic
+    -- that at least allows progress instead of getting stuck.
+    if p.moving then return true end
+    -- Try each direction until one works - this allows exploring to find
+    -- the destination map through natural map transitions
+    local dirs = {"up", "down", "left", "right"}
+    for _, dir in ipairs(dirs) do
+      local result = tryFlyMove(ow, p, dir)
+      if result == "moved" then
+        V.mod.log:info("FULL FLY: autopilot exploring direction %s", dir)
+        return true
+      end
+    end
+    V.mod.log:info("FULL FLY: autopilot all directions blocked, holding position")
+    return true -- hold position if all directions blocked
+  end
+  local targetPx = ap.ox + ap.x * 16 + 8
+  local targetPy = ap.oy + ap.y * 16 + 8
+  local dx, dy = targetPx - p.px, targetPy - p.py
+  local cellDist = math.max(math.abs((p.cellX or 0) - (ap.x or 0)),
+                            math.abs((p.cellY or 0) - (ap.y or 0)))
+  if ow.map.id == ap.mapId and not p.moving
+     and cellDist <= AUTOPILOT_ARRIVE_CELLS then
+    -- one last step onto the fly tile when it is free; otherwise land
+    -- on this neighboring cell instead of circling the facade
+    if cellDist > 0 then
+      local toX, toY = (ap.x or 0) - p.cellX, (ap.y or 0) - p.cellY
+      local lastDir
+      if math.abs(toX) > math.abs(toY) then
+        lastDir = toX > 0 and "right" or "left"
+      elseif toY ~= 0 then
+        lastDir = toY > 0 and "down" or "up"
+      end
+      if lastDir and tryFlyMove(ow, p, lastDir) == "moved" then
+        return true
+      end
+    end
+    V.mod.log:info("FULL FLY: autopilot arrived at destination (cell dx=%d, dy=%d)",
+                 (p.cellX or 0) - (ap.x or 0), (p.cellY or 0) - (ap.y or 0))
+    return false
+  end
+  if p.moving then return true end
+  local dir
+  if math.abs(dx) > math.abs(dy) then
+    dir = dx > 0 and "right" or "left"
+  else
+    dir = dy > 0 and "down" or "up"
+  end
+  V.mod.log:info("FULL FLY: autopilot moving %s toward target (dx=%d, dy=%d)", dir, dx, dy)
+  local result = tryFlyMove(ow, p, dir)
+  if result == "blocked" then
+    -- go around: a landmark facade or the edge of the connection graph
+    -- across the primary axis shouldn't stall the whole approach when
+    -- the other axis is clear
+    local altDir
+    if math.abs(dx) > math.abs(dy) then
+      altDir = dy > 0 and "down" or "up"
+    else
+      altDir = dx > 0 and "right" or "left"
+    end
+    V.mod.log:info("FULL FLY: autopilot blocked, trying alternative direction %s", altDir)
+    local alt = tryFlyMove(ow, p, altDir)
+    -- parked against the fly-spot building: stop steering and land
+    if alt ~= "moved" and ow.map.id == ap.mapId
+       and cellDist <= AUTOPILOT_ARRIVE_CELLS + 2 then
+      V.mod.log:info("FULL FLY: autopilot blocked near destination, landing")
+      return false
+    end
+  end
+  return true
+end
+
+-- takes off exactly like FREEFLY, then arms the autopilot that the
+-- "flying" phase of __freeFlyTick steers by until it reaches
+-- (destMap, destX, destY) and lands. destX/destY default to the
+-- map's origin corner when the warp this was read off didn't carry
+-- them; a bad landing point just means the assisted-landing glide
+-- (findLandingPath, the same one a manual over-the-rooftops B press
+-- already uses) picks the nearest walkable cell once the flyer gets
+-- there instead of the exact spot.
+local function beginAutopilot(game, mon, destMap, destX, destY)
+  if not destMap then return end
+  startFlight(game, mon)
+  state.autopilot = {
+    mapId = destMap,
+    x = tonumber(destX) or 0,
+    y = tonumber(destY) or 0,
+    ox = nil, oy = nil, rootedOn = nil,
+  }
+  V.mod.log:info("FULL FLY: autopilot armed for %s (%s,%s)",
+               tostring(destMap), tostring(destX), tostring(destY))
+end
+
+-- opens the fly-mode Town Map -- the same screen the MAPA key item
+-- opens (StartMenuMap.lua probed TownMap.new(game): the game and
+-- nothing else) and, going by GoldCompat.drawStrictTownMap's own
+-- "A: FLY" / "D-PAD: MOVE" split on a `tm.fly` field, almost
+-- certainly the same field its input handling keys off to decide a
+-- selection warps rather than just moving the cursor. `__fullFlyMap`
+-- is this mod's own marker (not the engine's), used only so the tick
+-- above can tell whether this exact screen is still on top of the
+-- stack without knowing anything else about its shape.
+local function openFullFlyMap(game, mon)
+  local ok, TownMap = pcall(require, "src.ui.TownMap")
+  if not (ok and TownMap and TownMap.new) then
+    V.mod.log:warn("FULL FLY: src.ui.TownMap unavailable")
+    return false
+  end
+  local made, screen = pcall(TownMap.new, game, { fly = true, onFly = function(mapId)
+    local ow = game.overworld
+    if ow then ow:flyTo(mapId) end
+  end })
+  if not (made and screen) then
+    V.mod.log:warn("FULL FLY: TownMap.new failed: %s", tostring(screen))
+    return false
+  end
+  screen.__fullFlyMap = true
+  state.fullFlyArmed = { mon = mon }
+  local pushed = pcall(function() game.stack:push(screen) end)
+  if not pushed then
+    state.fullFlyArmed = nil
+    V.mod.log:warn("FULL FLY: could not push the Town Map")
+  end
+  return pushed
+end
+
+-- Adds FULL FLY and FREEFLY options to the party submenu
+-- Hook is registered once in FreeFly.init() to avoid duplication
+local function addFlyOptions(out, game, ow, mon)
   V.mod.log:info("FREEFLY HOOK: ow=%s, map=%s, flying=%s",
                tostring(ow ~= nil),
                ow and ow.map and ow.map.id or "nil",
@@ -504,15 +760,24 @@ V.mod.hooks:wrap("ui.party.submenu", function(next, game, items, mon, ctx)
     V.mod.log:info("FREEFLY: not sky above")
     return out
   end
-  V.mod.log:info("FREEFLY: adding FREEFLY option")
-  table.insert(out, 1, { label = "FREEFLY", onSelect = function(m, g)
+  V.mod.log:info("FREEFLY: adding FULL FLY and FREEFLY options")
+  -- FULL FLY on top -- pick a place and it takes you there, which is
+  -- what most people reach for; FREEFLY under it for taking off with
+  -- no destination in mind
+  table.insert(out, 1, { label = "FULL FLY", onSelect = function(m, g)
+    V.mod.log:info("FULL FLY selected for %s", tostring(m and m.species))
+    openFullFlyMap(g, m)
+  end })
+  table.insert(out, 2, { label = "FREEFLY", onSelect = function(m, g)
     -- unwind party menu / start menu back to the overworld, then lift off
     local stack = g.stack
     while stack:top() and not stack:top().isOverworld do stack:pop() end
     startFlight(g, m)
   end })
   return out
-end)
+end
+
+-- Hook registration moved to FreeFly.init() to avoid duplication
 
 -- ------- the Pallet Town Pidgeot: a quick way to get a FLY user
 
@@ -800,7 +1065,7 @@ V.mod.events:on("map.entered", function(ev)
     if ow and ow.map and ow.map.def then
       local game = require("src.core.Game")
       if not skyAbove(game, ow.map.def) then
-        state.phase, state.alt = "idle", 0
+        state.phase, state.alt, state.autopilot = "idle", 0, nil
         V.mod.log:info("indoors; flight over")
         
         -- Restore the previous Pokemon Player setting
@@ -928,7 +1193,7 @@ end)
 -- phase could otherwise follow the player into a fresh save
 V.mod.events:on("save.loaded", function()
   local wasFlying = flying()
-  state.phase, state.alt = "idle", 0
+  state.phase, state.alt, state.autopilot = "idle", 0, nil
   if wasFlying then 
     -- Restore the previous Pokemon Player setting
     if state.previousPokemonPlayerMarker or state.previousPokemonPlayerDex then
@@ -999,7 +1264,7 @@ end)
 
 V.mod.events:on("world.blacked_out", function()
   if flying() then
-    state.phase, state.alt = "idle", 0
+    state.phase, state.alt, state.autopilot = "idle", 0, nil
     V.mod.log:info("blacked out; flight over")
     
     -- Restore the previous Pokemon Player setting
@@ -1205,10 +1470,11 @@ end
 local APPROACH_RANGE = 12
 local APPROACH_DIRS = { { 0, 1 }, { 1, 0 }, { -1, 0 }, { 0, -1 } }
 
-local function findLandingPath(ow, p)
+local function findLandingPath(ow, p, maxRange)
   local map = ow.map
   local lm = state.landmark
   local w = map.widthCells
+  maxRange = maxRange or APPROACH_RANGE
   local function facade(cx, cy)
     return lm and lm.mapId == map.id and lm.cells[cy * lm.w + cx]
   end
@@ -1237,7 +1503,7 @@ local function findLandingPath(ow, p)
       if kind == "ground" then return pathTo(cy * w + cx) end
       if kind == "water" and not waterKey then waterKey = cy * w + cx end
     end
-    if depth < APPROACH_RANGE then
+    if depth < maxRange then
       for _, d in ipairs(APPROACH_DIRS) do
         local nx, ny = cx + d[1], cy + d[2]
         local key = ny * w + nx
@@ -1251,6 +1517,27 @@ local function findLandingPath(ow, p)
     end
   end
   return waterKey and pathTo(waterKey) or nil
+end
+
+-- FULL FLY: once the bird is over the chosen town, keep trying to set
+-- down until a walkable cell is reached or the player takes the stick.
+local function beginAutoLand(ow, p, canLand)
+  if canLand then
+    state.phase, state.glide, state.wantLand = "landing", 0, nil
+    V.mod.log:info("FULL FLY: landing on current cell")
+    return true
+  end
+  local path = findLandingPath(ow, p, 24) or findLandingPath(ow, p, 48)
+  if path then
+    state.phase = "approach"
+    state.approachPath = path
+    state.wantLand = true
+    V.mod.log:info("FULL FLY: gliding to a landing spot (%d steps)", #path)
+    return true
+  end
+  state.wantLand = true
+  V.mod.log:info("FULL FLY: no landing spot yet, searching")
+  return false
 end
 
 -- Public API
@@ -1535,6 +1822,34 @@ function FreeFly.init()
     OC.__freeFlyTick = function(ow, dt)
       local p = ow.player
       if not p then return end
+      -- FULL FLY: the map closed on its own (B pressed, or something
+      -- else took the stack) without a destination ever reaching the
+      -- takeWarp intercept below -- disarm so a later, unrelated warp
+      -- is never mistaken for one
+      if state.fullFlyArmed then
+        local top = Game.stack and Game.stack:top()
+        if not (top and top.__fullFlyMap) then
+          state.fullFlyArmed = nil
+        end
+      end
+      -- FULL FLY: a destination the takeWarp intercept caught last
+      -- tick. Unwinding the stack here, a tick removed from the Town
+      -- Map's own confirm handler, means whatever that handler still
+      -- did with the stack right after calling takeWarp has already
+      -- happened by now -- this just needs to get from wherever that
+      -- left things back down to the overworld, the same unconditional
+      -- "pop until isOverworld" FREEFLY already uses.
+      if state.pendingAutopilot then
+        local pending = state.pendingAutopilot
+        state.pendingAutopilot = nil
+        local stack = Game.stack
+        if stack then
+          while stack:top() and not stack:top().isOverworld do
+            stack:pop()
+          end
+        end
+        beginAutopilot(Game, pending.mon, pending.mapId, pending.x, pending.y)
+      end
       if ow.map and (not state.landmark
                      or state.landmark.mapId ~= ow.map.id) then
         local ok, lm = pcall(landmarkCellsFor, ow)
@@ -1728,7 +2043,32 @@ function FreeFly.init()
         -- an ALTITUDE option change applies mid-flight
         state.alt = state.alt + (cruiseAlt() - state.alt) * math.min(1, dt * 2)
 
+        -- FULL FLY autopilot: steers toward state.autopilot's target
+        -- every tick it's armed. Any steering input is the way out,
+        -- same rule the assisted landing glide (the "approach" phase
+        -- below) already follows; a B press this same tick skips
+        -- straight to the landing branch just below instead of
+        -- stepping once more first.
+        if state.autopilot then
+          local steering = Game.input:isDown("up") or Game.input:isDown("down")
+            or Game.input:isDown("left") or Game.input:isDown("right")
+          if steering then
+            state.autopilot, state.wantLand = nil, nil
+            V.mod.log:info("FULL FLY: autopilot handed back to the player due to steering")
+          elseif not (Game.input:wasPressed("b") or state.landRequest) then
+            local continue = autopilotStep(ow, p)
+            if not continue then
+              V.mod.log:info("FULL FLY: autopilot arrived at destination")
+              state.autopilot = nil
+              beginAutoLand(ow, p, canLand)
+            end
+          end
+        elseif state.wantLand then
+          beginAutoLand(ow, p, canLand)
+        end
+
         if Game.input:wasPressed("b") or state.landRequest then
+          state.autopilot, state.wantLand = nil, nil
           state.landRequest = nil
           if canLand then
             state.phase, state.glide = "landing", 0
@@ -1790,15 +2130,32 @@ function FreeFly.init()
         local cancel = steering or Game.input:wasPressed("b")
           or state.landRequest
         state.landRequest = nil
-        if cancel or not state.approachPath then
-          state.phase, state.approachPath = "flying", nil
+        if cancel then
+          state.phase, state.approachPath, state.wantLand = "flying", nil, nil
+        elseif not state.approachPath then
+          if state.wantLand then
+            beginAutoLand(ow, p, canLand)
+            if state.phase == "approach" and not state.approachPath then
+              state.phase = "flying"
+            end
+          else
+            state.phase = "flying"
+          end
         elseif not p.moving then
           local nextCell = state.approachPath[1]
           if not nextCell then
             state.approachPath = nil
             -- recheck on arrival: an NPC may have wandered onto the spot
-            state.phase = canLand and "landing" or "flying"
-            state.glide = 0
+            if canLand then
+              state.phase, state.glide, state.wantLand = "landing", 0, nil
+            elseif state.wantLand then
+              beginAutoLand(ow, p, canLand)
+              if state.phase == "approach" and not state.approachPath then
+                state.phase = "flying"
+              end
+            else
+              state.phase = "flying"
+            end
           else
             local dir
             if nextCell[1] > p.cellX then dir = "right"
@@ -1812,7 +2169,15 @@ function FreeFly.init()
               if result == "moved" then
                 table.remove(state.approachPath, 1)
               elseif result == "blocked" then
-                state.phase, state.approachPath = "flying", nil
+                state.approachPath = nil
+                if state.wantLand then
+                  beginAutoLand(ow, p, canLand)
+                  if state.phase == "approach" and not state.approachPath then
+                    state.phase = "flying"
+                  end
+                else
+                  state.phase = "flying"
+                end
               end
             end
           end
@@ -1978,9 +2343,71 @@ function FreeFly.init()
 
       -- doors and edge warps must not swallow a bird passing over them
       local origTakeWarp = OC.takeWarp
-      OC.takeWarp = function(self, ...)
+      OC.takeWarp = function(self, warp, ...)
         if self.player and self.player.freeFlying then return end
-        return origTakeWarp(self, ...)
+        -- FULL FLY: the fly-mode Town Map is modal (nothing else can
+        -- reach a warp while it owns the stack), so the very next
+        -- warp while armed is unambiguously the destination the
+        -- player just picked. Swallow the vanilla instant warp and
+        -- record it instead; __freeFlyTick picks pendingAutopilot up
+        -- on the very next tick and does the actual takeoff there,
+        -- deliberately not here (see the state table's comment on
+        -- pendingAutopilot for why). warp is expected to carry the
+        -- same shape as an ordinary door warp (map.def.warps entries:
+        -- see landmarkCellsFor above) -- destMap/x/y, with a couple of
+        -- likely alternate field names covered defensively since this
+        -- particular call site has never needed to be read before. If
+        -- the shape doesn't match, this just falls through to the
+        -- vanilla warp untouched rather than silently breaking Fly.
+        local armed = state.fullFlyArmed
+        if armed and type(warp) == "table" then
+          local destMap = warp.destMap or warp.map or warp.mapId or warp.id
+          local destX = warp.x or warp.destX or warp.toX
+          local destY = warp.y or warp.destY or warp.toY
+          if destMap then
+            state.fullFlyArmed = nil
+            state.pendingAutopilot = { mon = armed.mon, mapId = destMap,
+                                       x = destX, y = destY }
+            V.mod.log:info("FULL FLY: intercepted warp to %s (%s,%s)",
+                         tostring(destMap), tostring(destX), tostring(destY))
+            return
+          else
+            V.mod.log:warn("FULL FLY: warp shape not recognised (%s); "
+                         .. "falling back to a normal warp -- check the "
+                         .. "field names this build actually uses",
+                         tostring(warp))
+          end
+        end
+        return origTakeWarp(self, warp, ...)
+      end
+
+      -- FULL FLY: intercept flyTo to convert it into autopilot
+      local origFlyTo = OC.flyTo
+      OC.flyTo = function(self, mapId, mon, ...)
+        local armed = state.fullFlyArmed
+        if armed then
+          -- Get the fly warp destination
+          local flyWarps = (require("src.core.Game").data.field or {}).flyWarps or {}
+          local spot = flyWarps[mapId]
+          if spot then
+            state.fullFlyArmed = nil
+            state.pendingAutopilot = { mon = armed.mon, mapId = mapId,
+                                       x = spot.x, y = spot.y }
+            V.mod.log:info("FULL FLY: intercepted flyTo to %s (%s,%s)",
+                         tostring(mapId), tostring(spot.x), tostring(spot.y))
+            -- Do the necessary cleanup that flyTo normally does
+            require("src.core.Sound").play(require("src.core.Game").data, "Fly")
+            require("src.core.Game").save.onBike = false
+            self:clearBikeFlags()
+            self.player.surfing = false
+            self:syncSurfingPikachu()
+            self:closeToMap()
+            return
+          else
+            V.mod.log:warn("FULL FLY: no fly warp found for %s", tostring(mapId))
+          end
+        end
+        return origFlyTo(self, mapId, mon, ...)
       end
 
       -- trainers don't spot what flies over their head (unless the
@@ -2379,44 +2806,12 @@ function FreeFly.init()
   
   local ok, err = pcall(function()
     -- Set up the hooks that should be registered outside game.ready
-    -- Hook into party submenu to add FREEFLY option
+    -- Hook into party submenu to add FULL FLY and FREEFLY options
     V.mod.hooks:wrap("ui.party.submenu", function(next, game, items, mon, ctx)
       local out = next(game, items, mon, ctx)
       if type(out) ~= "table" then return out end
       local ow = ctx and ctx.overworld
-      V.mod.log:info("FREEFLY HOOK: ow=%s, map=%s, flying=%s",
-                   tostring(ow ~= nil),
-                   ow and ow.map and ow.map.id or "nil",
-                   tostring(flying()))
-      if not (ow and ow.map and ow.map.def) or flying() then
-        V.mod.log:info("FREEFLY: early return - no overworld or flying")
-        return out
-      end
-      local eligible = eligibleFlyer(game, ow, mon)
-      V.mod.log:info("FREEFLY: eligibleFlyer=%s", tostring(eligible))
-      local badge = badgeOk(game, mon)
-      V.mod.log:info("FREEFLY: badgeOk=%s", tostring(badge))
-      if not (eligible and badge) then
-        V.mod.log:info("FREEFLY: failed eligibility or badge check")
-        return out
-      end
-      if ow.player and ow.player.onBike then
-        V.mod.log:info("FREEFLY: on bike")
-        return out
-      end
-      local sky = skyAbove(game, ow.map.def)
-      V.mod.log:info("FREEFLY: skyAbove=%s", tostring(sky))
-      if not sky then
-        V.mod.log:info("FREEFLY: not sky above")
-        return out
-      end
-      V.mod.log:info("FREEFLY: adding FREEFLY option")
-      table.insert(out, 1, { label = "FREEFLY", onSelect = function(m, g)
-        V.mod.log:info("FREEFLY selected for %s", tostring(m and m.species))
-        local stack = g.stack
-        while stack:top() and not stack:top().isOverworld do stack:pop() end
-        startFlight(g, m)
-      end })
+      addFlyOptions(out, game, ow, mon)
       return out
     end)
 
@@ -2429,7 +2824,7 @@ function FreeFly.init()
         if ow and ow.map and ow.map.def then
           local game = require("src.core.Game")
           if not skyAbove(game, ow.map.def) then
-            state.phase, state.alt = "idle", 0
+            state.phase, state.alt, state.autopilot = "idle", 0, nil
             V.mod.log:info("indoors; flight over")
             emitLanded("indoors", ow.player)
           end
@@ -2439,63 +2834,21 @@ function FreeFly.init()
 
     V.mod.events:on("save.loaded", function()
       local wasFlying = flying()
-      state.phase, state.alt = "idle", 0
+      state.phase, state.alt, state.autopilot = "idle", 0, nil
       if wasFlying then emitLanded("save_loaded", nil) end
       spawnGift()
     end)
 
     V.mod.events:on("world.blacked_out", function()
       if flying() then
-        state.phase, state.alt = "idle", 0
+        state.phase, state.alt, state.autopilot = "idle", 0, nil
         V.mod.log:info("blacked out; flight over")
         emitLanded("blackout", nil)
       end
     end)
 
-    -- Hook into movement speed for flying
-    V.mod.hooks:wrap("movement.speed", function(next, frames, ctx)
-      if flying() then return math.min(frames, flyFrames()) end
-      return next(frames, ctx)
-    end)
-
-    -- Hook into collision to allow free movement while flying
-    V.mod.hooks:wrap("movement.collision", function(next, allowed, ctx)
-      if flying() and ctx.mover and ctx.mover.freeFlying then
-        -- very tall buildings stay walls even to a flyer, sealed rooftop
-        -- plazas included: you ride up to the facade and bump
-        local lm = state.landmark
-        if lm and lm.cells and ctx.map and lm.mapId == ctx.map.id
-           and lm.cells[ctx.toY * lm.w + ctx.toX] then
-          ctx.reason = "tile"
-          return false
-        end
-        if ctx.reason == "tile" or ctx.reason == "entity" then
-          ctx.reason = nil
-          return true
-        end
-      end
-      return next(allowed, ctx)
-    end)
-
-    -- airborne you can only flush other flyers: the vanilla roll stands,
-    -- but a non-FLYING result becomes no encounter at all
-    V.mod.hooks:wrap("encounter.roll", function(next, encDef, ctx)
-      local enc = next(encDef, ctx)
-      if not (enc and flying()) then return enc end
-      if not encountersSetting:get() then return nil end
-      local game = require("src.core.Game")
-      if Sky.hasType(game.data, enc.species, "FLYING") then return enc end
-      return nil
-    end)
-
-    -- Hook into save.write to prevent saving mid-flight
-    V.mod.hooks:wrap("save.write", function(next, game)
-      if flying() then
-        V.mod.log:warn("can't save mid-flight; land first (press B)")
-        return false
-      end
-      return next(game)
-    end)
+    -- Other hooks (encounter.roll, save.write, movement.collision, movement.speed) 
+    -- are already registered at module load to avoid duplication
   end)
   if not ok then
     V.mod.log:error("Free Fly initialization failed: " .. tostring(err))

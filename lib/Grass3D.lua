@@ -479,7 +479,21 @@ function Grass3D.groundMeshFromInstances(instances)
 end
 
 -- One instance record for a grass TILE at (tx, ty) in tile coords.
-function Grass3D.instanceForTile(tx, ty)
+--
+-- `gz` is the WORLD height this tile's ground actually stands at -- the same
+-- number `ChunkMesher.heightAt` and the flat Gen3 mat (`Structures.
+-- buildGen3Grass`) read off `S.runs[k].h` / `S.shapeAt[k].h`. It is carried
+-- on the instance but never baked into a stamped vertex: the wind shader
+-- reads a tuft's raw model-space Y as "height above ITS OWN root" (see the
+-- comment on `position()` in Voxel3D.lua), so a template stamped at
+-- `y = 0 + elevation` would hand the bend curve a tuft that starts already
+-- partway up. `gz` is read back by ChunkMesher instead, which groups
+-- instances into one small mesh per distinct height and draws each one
+-- translated up to its own terrace -- a tuft's OWN geometry never changes,
+-- only where the whole clump of them sits. Optional and defaulted to 0 so
+-- every existing caller that has no height handy (decorative filler, the
+-- road/ground/water surface swaps) keeps behaving exactly as before.
+function Grass3D.instanceForTile(tx, ty, gz)
   local yaw = unit(tx, ty, 1) * math.pi * 2
   local scale = 0.82 + unit(tx, ty, 2) * 0.36
   return {
@@ -487,6 +501,7 @@ function Grass3D.instanceForTile(tx, ty)
     wz = ty * 8,
     yaw = yaw,
     scale = scale,
+    gz = gz or 0,
   }
 end
 

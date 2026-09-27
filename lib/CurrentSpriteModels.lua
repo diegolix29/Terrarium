@@ -27,6 +27,7 @@ local P={
   mode="sprites",modeId="builtin:resolved-sprites",externalProvider=nil,
   externalBegun=false,externalError=nil,presentationFallback=nil,
   moveFxActive={},moveFxImages={},moveFxShader=nil,moveFxError=nil,
+  overworldContext=nil,overworldMoveStarted=false,
 }
 local OWNER=(V.mod and V.mod.id) or "DRAMATIC_SHAPE"
 local ModLookup=V.ModLookup
@@ -373,6 +374,7 @@ local function arenasEnabled(context)
 end
 
 local function ourArena(context)
+  if context and context.services and context.services.colosseumOverworld then return true end
   local arena=context and context.arena
   local id=arena and tostring(arena.id or "") or ""
   return id:find("^DRAMATIC_SHAPE:")~=nil
@@ -570,6 +572,10 @@ end
 
 local function stadiumActor(context,side)
   if P.mode~="stadium" then return nil end
+  if P.overworldContext then
+    local record=P.stadiumActors[side]
+    return record and record.actor
+  end
   local api=P.actorApi or stadiumService()
   if not api then return nil end
   local battler=liveBattler(context,side)
@@ -2332,8 +2338,91 @@ local function drawStadiumActors(context)
     if actor and type(cell)=="table" and type(other)=="table"
         and type(actor.matrix)=="function" and type(actor.draw)=="function" then
       driveSpawn(context,side,actor)
-      local ok,matrix=pcall(actor.matrix,actor,cell[1],context.groundY or 0,cell[2],
-        (other[1] or 0)-(cell[1] or 0),(other[2] or 0)-(cell[2] or 0))
+      local faceX=(other[1] or 0)-(cell[1] or 0)
+      local faceZ=(other[2] or 0)-(cell[2] or 0)
+      local rt=context.services and context.services.realtimeBattle
+      if rt and rt.active and side=="player" then
+        if type(rt.playerFacing)=="table" then
+          faceX=tonumber(rt.playerFacing[1]) or faceX
+          faceZ=tonumber(rt.playerFacing[2]) or faceZ
+        end
+        local serial=tonumber(rt.attackSerial) or 0
+        if rt.playerStatus=="SLP" then
+          actor._realtimeAttackSerial=math.max(tonumber(actor._realtimeAttackSerial) or 0,serial)
+          if type(actor.sleep)=="function" then pcall(actor.sleep,actor)
+          elseif type(actor.idle)=="function" then pcall(actor.idle,actor) end
+        elseif rt.playerStatus=="FRZ" then
+          actor._realtimeAttackSerial=math.max(tonumber(actor._realtimeAttackSerial) or 0,serial)
+          if type(actor.idle)=="function" then pcall(actor.idle,actor) end
+        else
+          if actor.state=="sleep" and type(actor.idle)=="function" then pcall(actor.idle,actor) end
+          if serial>(tonumber(actor._realtimeAttackSerial) or 0) then
+            actor._realtimeAttackSerial=serial
+            if type(actor.attack)=="function" then
+              local moveId=rt.attackMoveId or rt.selectedMoveId or 33
+              local move=type(rt.attackMoveDef)=="table" and rt.attackMoveDef or {category="physical",name=tostring(moveId)}
+              pcall(actor.attack,actor,moveId,move)
+            end
+          elseif type(actor.locomotion)=="function" then
+            pcall(actor.locomotion,actor,rt.moving==true,rt.flightState,rt.flightMode==true)
+          end
+        end
+        if actor.raw then
+          rt.playerAnim=actor.raw.requestedAnim or actor.raw.animName
+          rt.playerAnimTime=tonumber(actor.raw.time) or 0
+          rt.playerXDSlot=actor.lastXDSlot
+          rt.playerXDFamily=actor.lastXDFamily
+          rt.playerXDMoveType=actor.lastXDMoveType
+          rt.playerXDVariant=actor.lastXDVariant
+        end
+      elseif rt and rt.active and side=="enemy" then
+        if type(rt.enemyFacing)=="table" then
+          faceX=tonumber(rt.enemyFacing[1]) or faceX
+          faceZ=tonumber(rt.enemyFacing[2]) or faceZ
+        end
+        local serial=tonumber(rt.enemyAttackSerial) or 0
+        if rt.enemyStatus=="SLP" then
+          actor._realtimeEnemyAttackSerial=math.max(tonumber(actor._realtimeEnemyAttackSerial) or 0,serial)
+          if type(actor.sleep)=="function" then pcall(actor.sleep,actor)
+          elseif type(actor.idle)=="function" then pcall(actor.idle,actor) end
+        elseif rt.enemyStatus=="FRZ" then
+          actor._realtimeEnemyAttackSerial=math.max(tonumber(actor._realtimeEnemyAttackSerial) or 0,serial)
+          if type(actor.idle)=="function" then pcall(actor.idle,actor) end
+        else
+          if actor.state=="sleep" and type(actor.idle)=="function" then pcall(actor.idle,actor) end
+          if serial>(tonumber(actor._realtimeEnemyAttackSerial) or 0) then
+            actor._realtimeEnemyAttackSerial=serial
+            if type(actor.attack)=="function" then
+              local moveId=rt.enemyAttackMoveId or 33
+              local move=type(rt.enemyAttackMoveDef)=="table" and rt.enemyAttackMoveDef or {category="physical",name=tostring(moveId)}
+              pcall(actor.attack,actor,moveId,move)
+            end
+          elseif type(actor.locomotion)=="function" then
+            pcall(actor.locomotion,actor,rt.enemyMoving==true,"grounded",false)
+          end
+        end
+        if actor.raw then
+          rt.enemyAnim=actor.raw.requestedAnim or actor.raw.animName
+          rt.enemyAnimTime=tonumber(actor.raw.time) or 0
+        end
+      end
+      local actorGroundY=context.groundY or 0
+      if rt and rt.active and side=="player" and type(rt.player)=="table" then
+        local lift=(tonumber(rt.player.y) or 0)+(tonumber(rt.rollVisualLift) or 0)
+        local k=math.max(.001,tonumber(arena.figureScale) or 1)
+        if api and api.worldUnits==true then actorGroundY=actorGroundY+lift
+        else actorGroundY=actorGroundY+lift/k end
+      end
+      local Mat4=V.Mat4
+      local ok,matrix=pcall(actor.matrix,actor,cell[1],actorGroundY,cell[2],faceX,faceZ)
+      if ok and matrix and rt and rt.active and side=="player"
+          and Mat4 and type(Mat4.mul)=="function" and type(Mat4.rotateX)=="function" then
+        if rt.rolling==true then
+          matrix=Mat4.mul(matrix,Mat4.rotateX(tonumber(rt.rollAngle) or 0))
+        elseif rt.airDashing==true then
+          matrix=Mat4.mul(matrix,Mat4.rotateX(-0.26))
+        end
+      end
       if ok and matrix then jobs[#jobs+1]={side=side,actor=actor,matrix=matrix} else fault(matrix or "Colosseum matrix unavailable") end
     end
   end
@@ -2378,6 +2467,7 @@ function P:available(context)
 end
 
 function P:begin(context)
+  if self.overworldContext then self:finish(self.overworldContext,"host-changed") end
   self.drawn.player=false;self.drawn.enemy=false
   self.presented.player=false;self.presented.enemy=false
   self.moveFxActive={};self.moveFxError=nil;self.moveFxRenderFaults=0
@@ -2396,7 +2486,24 @@ function P:begin(context)
   return available
 end
 
+function P:bindOverworld(context,records)
+  if self.overworldContext~=context then
+    self:finish(context,"overworld-begin")
+    self.overworldContext=context
+    self.moveFxError=nil
+    installWazaHandlers()
+    self.mode="stadium";self.modeId="cbe:overworld-pokemon"
+  end
+  self.stadiumActors=records
+end
+
 local function actorDelta(context,dt)
+  -- In REALTIME battles the underlying turn battle can sit in a menu/wait state
+  -- with dt==0 even though wall-clock movement is running. Prefer realtime dt.
+  local rt=context and context.services and context.services.realtimeBattle
+  if rt and rt.active and tonumber(rt.dt) then
+    return math.max(0,math.min(0.05,tonumber(rt.dt)))
+  end
   local TP=V and V.TrainerPerformance
   if TP and type(TP.realDt)=="function" then return TP.realDt(context,dt) end
   return math.max(0,tonumber(dt) or 0)
@@ -2430,6 +2537,12 @@ local function beginPendingFaintReturn(context,side,record)
 end
 
 function P:update(context,dt)
+  if self.overworldContext then
+    if self.overworldContext~=context then return end
+    directedMoveFx(context)
+    updateMoveFx(context,dt)
+    return
+  end
   if V.DoublesRuntime and (V.DoublesRuntime.presentation or V.DoublesRuntime.combat)(context and context.battle) then return end
   -- Keep both side references synchronized even if the switch event is emitted
   -- before/after another mod's listener. The next update/draw always observes
@@ -2586,6 +2699,12 @@ end
 function P:cameraLocked() return false end
 
 function P:drawWorld(context)
+  if self.overworldContext then
+    if self.overworldContext~=context then return false end
+    local wh=V.WazaHandlers
+    local drew=wh and wh.drawWorld(context) or false
+    return drawMoveFx(context) or drew
+  end
   local doubles=V.DoublesRuntime and (V.DoublesRuntime.presentation or V.DoublesRuntime.combat)(context and context.battle)
   if doubles then return V.DoublesPresenter.draw(doubles,context) end
   local g=love and love.graphics
@@ -2712,7 +2831,72 @@ end
 function P:screenCenter(context,side) return self:center(context,side) end
 function P:showing(context,side) return self.drawn[side]==true end
 function P:footprint() return 18 end
+
+-- Realtime movement locking only needs the portable actor's coarse lifecycle.
+function P:realtimeActorState(side)
+  local rec=P.stadiumActors and P.stadiumActors[side]
+  local actor=rec and rec.actor
+  if not actor then return nil end
+  local raw=actor.raw
+  local duration
+  if type(actor.stateDuration)=="function" then
+    local ok,d=pcall(actor.stateDuration,actor,actor.state or "attack")
+    if ok then duration=tonumber(d) end
+  end
+  return {
+    state=actor.state,
+    stateAge=tonumber(actor.stateAge) or 0,
+    duration=duration,
+    rawAnimation=raw and (raw.requestedAnim or raw.animName) or nil,
+  }
+end
+
+-- Realtime collision footprint derived from the live portable actor.
+function P:realtimeActorMetrics(side,context)
+  local rec=P.stadiumActors and P.stadiumActors[side]
+  local actor=rec and rec.actor
+  if not actor then return nil end
+  local raw=actor.raw
+  local model=raw and raw.model
+  local sourceHeight=tonumber(model and model.height)
+  if not sourceHeight or sourceHeight<=0 then return nil end
+
+  local sourceFootprint=tonumber(model._cbeRealtimeFootprint)
+  if not sourceFootprint then
+    local maxR=0
+    for _,g in ipairs((model.replacement and model.replacement.groups) or {}) do
+      for _,v in ipairs(g.vertices or {}) do
+        local p=v.p or v.position or v
+        local x=tonumber(p and p[1]) or 0
+        local z=tonumber(p and p[3]) or 0
+        local rr=math.sqrt(x*x+z*z)
+        if rr>maxR then maxR=rr end
+      end
+    end
+    sourceFootprint=(maxR>0 and maxR or sourceHeight*.42)
+    model._cbeRealtimeFootprint=sourceFootprint
+  end
+
+  local presentation=tonumber(raw and raw._presentationScale) or 1
+  local arena=(context and context.arena) or nil
+  local figureScale=tonumber(arena and arena.figureScale) or .38
+  local actorScale=.6*presentation*figureScale
+  local worldHeight=sourceHeight*actorScale
+  local worldFootprint=sourceFootprint*actorScale
+  local radius=math.max(.68,math.min(5.5,worldFootprint*.78))
+  return {
+    radius=radius,height=worldHeight,footprint=worldFootprint,
+    sourceHeight=sourceHeight,sourceFootprint=sourceFootprint,
+    presentationScale=presentation,figureScale=figureScale,dex=actor.dex,
+  }
+end
+
 function P:event(context,name,payload)
+  if self.overworldContext then
+    if self.overworldContext~=context then return end
+    if name~="battle.move_used" and name~="battle.presentation_move"
+        and name~="battle.damage_dealt" and name~="battle.presentation_damage" then return end
+  end
   -- BattleRuntime guarantees delivery when CBE actors are hosted outside the
   -- standalone compositor. A host that also forwards the same payload must not
   -- restart a one-shot animation, so table payloads are deduplicated by identity.
@@ -2828,6 +3012,17 @@ function P:event(context,name,payload)
         end
       elseif resolvedId~=nil then
         startMoveFx(context,side,resolvedId,move,"attack")
+      end
+      if P.overworldContext==context then
+        P.overworldMoveStarted=(directorSeq and directorSeq.wazaAttackSerial~=nil)
+          or #P.moveFxActive>0
+        if WazaSequence then
+          for _,inst in ipairs(WazaSequence.active) do
+            if inst.side==side and inst.role=="attack" and not inst.done then
+              P.overworldMoveStarted=true
+            end
+          end
+        end
       end
       return true
     end
@@ -2972,6 +3167,9 @@ function P:event(context,name,payload)
   end
 end
 function P:finish(context,reason)
+  -- Stadium owns the borrowed actors' updates, drawing and release.
+  if self.overworldContext then self.stadiumActors={} end
+  self.overworldContext=nil;self.overworldMoveStarted=false
   self.drawn.player=false;self.drawn.enemy=false
   self.moveFxActive={}
   local RP=V and V.ReleasePresentation

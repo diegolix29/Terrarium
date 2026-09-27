@@ -567,6 +567,19 @@ function U.draw(game,battle)
   U.activeBattleId=s.battleId
   local u=state(s)
   if T.displayCompat then s=T.displayCompat.enrich(game,battle,s,u.page) end
+  
+
+  local targetBattle = battle or s
+  if targetBattle then
+    rawset(targetBattle, "__doublesBattleToken", true)
+    if targetBattle.battle then
+      rawset(targetBattle.battle, "__doublesBattleToken", true)
+    end
+    if targetBattle.screen then
+      rawset(targetBattle.screen, "__doublesBattleToken", true)
+    end
+  end
+  
   local g=love.graphics;local w,h=g.getDimensions()
   -- Check if this is a Gen 3 battle with a 240x160 surface
   local isGen3 = game and game.data and game.data.audio and tonumber(game.data.audio.generation)==3

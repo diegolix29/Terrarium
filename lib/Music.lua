@@ -121,7 +121,7 @@ local function pokemonCenterRequest(song,ctx,game)
 end
 local function settings(game)
   if not (game and game.save) then return {music="normal"} end
-  local s=game.save.colosseumBattle;if type(s)~="table" then s={};game.save.colosseumBattle=s end
+  local s=game.save.terrariumBattle;if type(s)~="table" then s={};game.save.terrariumBattle=s end
   -- migrate the v14-v16 selector: the old generic Colosseum choice was Normal Battle;
   -- old Kanto-forcing choices are intentionally retired rather than kept hidden.
   if s.music=="colosseum" or s.music=="wild" or s.music=="trainer" or s.music=="gym" then s.music="normal" end

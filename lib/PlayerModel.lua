@@ -48,10 +48,13 @@ local currentColosseumDex = nil
 -- A Colosseum trainer/character model standing in for the player sprite
 -- (see PlayerModel.loadColosseumCharacter / lib/ColosseumTrainer.lua).
 -- Standing still, the figure plays the character's own extracted Colosseum
--- idle clip (cache/trainers/<id>/native_v1, see lib/CharacterNativeAnim.lua).
--- Moving or hopping, the procedural CharacterWalkCycle takes over (the source
--- game authored no walk clip for these battle actors). If a character has no
--- native_v1 cache it simply stays in its authored rest pose.
+-- idle clip (cache/trainers/<id>/native_v1, see lib/CharacterNativeAnim.lua);
+-- Wes defaults to victory, which sits better as an overworld idle. Moving or
+-- hopping, CharacterWalkCycle swings legs/arms on top of that SAME live clip
+-- rather than the rest pose, so the idle body language stays while walking.
+-- Native walk tracks are not used: extracting them dropped feet and corrupted
+-- other clips' lower body. If a character has no native_v1 cache it walks
+-- from the authored rest pose.
 local usingCharacter = false
 local characterWalkTime = 0  -- Track walking animation time
 local characterNative = nil  -- CharacterNativeAnim handle for the current character, or nil
@@ -68,6 +71,7 @@ local characterCache = {}      -- id -> {groups=, scale=, walkRig=}, kept separa
 local characterWalkRig = nil
 local characterWalkBlend = 0
 local characterWalkVertexBuffers = {}
+local characterNativePose = {}  -- live idle xyz per group, reused while walking
 
 -- Target overworld world-unit height for a standing human figure. Matches
 -- FirstPerson.EYE_HEIGHT (13, near the top of the head on the default 16px
@@ -428,6 +432,7 @@ function PlayerModel.loadColosseumCharacter(id)
     characterNative = cached.native
     if characterNative then CharacterNativeAnim.reset(characterNative) end
     characterWalkVertexBuffers = {}
+    characterNativePose = {}
     currentCharacterId = id
     currentFilename = "colosseum_character_" .. id
     usingCharacter = true
@@ -521,12 +526,21 @@ function PlayerModel.loadColosseumCharacter(id)
   local walkRigOk, walkRig = pcall(CharacterWalkCycle.build, id, groups, b)
   if not walkRigOk then walkRig = nil end
 
-  -- Native idle clip from the extracted cache. Optional: a character with
-  -- no native_v1 cache (or a topology mismatch) just keeps its rest pose.
-  local nativeOk, native, nativeErr = pcall(CharacterNativeAnim.load, id, groups, { "idle" })
+  -- Native idle (or Wes victory) clip from the extracted cache. Optional: a
+  -- character with no native_v1 cache (or a topology mismatch) just keeps
+  -- its rest pose. Walk overlays this clip at runtime; do not load a native
+  -- "walk" role -- those tracks were extracted without feet and broke other
+  -- clips' lower body.
+  local CharacterModelPick = V.require("CharacterModelPick")
+  local selectedAnimation = CharacterModelPick.getCurrentAnimation()
+  local animationsToLoad = { selectedAnimation }
+  if selectedAnimation ~= "idle" then animationsToLoad[#animationsToLoad + 1] = "idle" end
+  if selectedAnimation ~= "victory" then animationsToLoad[#animationsToLoad + 1] = "victory" end
+
+  local nativeOk, native, nativeErr = pcall(CharacterNativeAnim.load, id, groups, animationsToLoad)
   if not nativeOk then native, nativeErr = nil, native end
   if not native then
-    print("[PlayerModel] no native idle animation for '" .. tostring(id) .. "': " .. tostring(nativeErr))
+    print("[PlayerModel] no native animations for '" .. tostring(id) .. "': " .. tostring(nativeErr))
   end
 
   characterCache[id] = { groups = groups, scale = scale, walkRig = walkRig, native = native }
@@ -534,6 +548,7 @@ function PlayerModel.loadColosseumCharacter(id)
   characterWalkRig = walkRig
   characterNative = native
   characterWalkVertexBuffers = {}
+  characterNativePose = {}
   currentCharacterId = id
   currentFilename = "colosseum_character_" .. id
   usingCharacter = true
@@ -551,6 +566,47 @@ end
 function PlayerModel.getCharacterId()
   if usingCharacter then return currentCharacterId end
   return nil
+end
+
+-- Get the current character groups (for animation reloading)
+function PlayerModel.getCharacterGroups()
+  return characterGroups
+end
+
+-- Get the character cache (for animation reloading)
+function PlayerModel.getCharacterCache()
+  return characterCache
+end
+
+-- Reload the character animation with the current selection
+function PlayerModel.reloadCharacterAnimation()
+  if not usingCharacter or not currentCharacterId or not characterGroups then
+    return
+  end
+  
+  -- Release old animation
+  if characterNative then
+    CharacterNativeAnim.release(characterNative)
+  end
+  
+  -- Load new animation with current selection, plus idle/victory fallbacks
+  -- so walking can overlay whichever clip resolveRole picks.
+  local CharacterModelPick = V.require("CharacterModelPick")
+  local selectedAnimation = CharacterModelPick.getCurrentAnimation()
+  local animationsToLoad = { selectedAnimation }
+  if selectedAnimation ~= "idle" then animationsToLoad[#animationsToLoad + 1] = "idle" end
+  if selectedAnimation ~= "victory" then animationsToLoad[#animationsToLoad + 1] = "victory" end
+  local nativeOk, native, nativeErr = pcall(CharacterNativeAnim.load, currentCharacterId, characterGroups, animationsToLoad)
+
+  if nativeOk and native then
+    characterNative = native
+  else
+    print("[PlayerModel] failed to reload animation " .. selectedAnimation .. " for '" .. tostring(currentCharacterId) .. "': " .. tostring(nativeErr))
+    characterNative = nil
+  end
+  if characterCache[currentCharacterId] then
+    characterCache[currentCharacterId].native = characterNative
+  end
 end
 
 -- Get the current character model ID from settings (delegates to CharacterModelPick)
@@ -618,6 +674,7 @@ function PlayerModel.clear()
   characterWalkBlend = 0
   characterWalkRig = nil
   characterWalkVertexBuffers = {}
+  characterNativePose = {}
 end
 
 -- Check if a model is currently loaded.
@@ -896,16 +953,33 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- See lib/CharacterWalkCycle.lua.
     characterWalkBlend = CharacterWalkCycle.updateBlend(characterWalkBlend, isMoving, 0.016, 10, 6)
 
-    -- Procedural leg/arm swing (see lib/CharacterWalkCycle.lua's header for
-    -- why this is a per-vertex heuristic rather than real bone animation
-    -- like red_3d_player's humanoids: these Colosseum battle-actor models
-    -- carry no skin weights, only baked idle morph targets). Runs whenever
-    -- there's any swing left to show, not just while isMoving is literally
-    -- true this frame, so characterWalkBlend's stop-easing above actually
-    -- has motion to ease out of.
-    if characterWalkRig and (jumpProgress or characterWalkBlend > 0.001) then
+    -- Keep the selected idle clip (victory for Wes) running even while
+    -- walking, then swing the procedural gait on those posed vertices.
+    -- Native walk tracks are skipped: extraction dropped feet and broke
+    -- other clips. See lib/CharacterWalkCycle.lua.
+    local overlayWalk = characterWalkRig and (jumpProgress or characterWalkBlend > 0.001)
+    local posedGroups = nil
+    if characterNative then
+      local CharacterModelPick = V.require("CharacterModelPick")
+      local roleName = CharacterNativeAnim.resolveRole(characterNative, CharacterModelPick.getCurrentAnimation())
+      if roleName then
+        local sampled = CharacterNativeAnim.sample(characterNative, roleName)
+        if overlayWalk then
+          characterNativePose = CharacterNativeAnim.copyPositions(characterNative, roleName, characterNativePose)
+          posedGroups = characterNativePose
+          -- Walk wrote over the mesh; idle stages stay valid for the stop.
+          characterNative.dirty = true
+        elseif sampled or characterNative.dirty then
+          CharacterNativeAnim.upload(characterNative, roleName)
+          characterNative.dirty = false
+        end
+      end
+    end
+
+    if overlayWalk then
       for gi, group in ipairs(characterGroups) do
         if group.mesh and group.baseVertices then
+          local posed = posedGroups and posedGroups[gi] or nil
           local buf
           if jumpProgress then
             -- A hop has no gait to loop -- one clean up/down arc, not a
@@ -913,30 +987,18 @@ function PlayerModel.draw(px, py, y, facing, mirror)
             -- instead of another position on the walk cycle's phase wheel.
             buf = CharacterWalkCycle.applyJump(
               characterWalkRig, gi, group, jumpProgress,
-              characterWalkVertexBuffers[gi]
+              characterWalkVertexBuffers[gi], posed
             )
           else
             buf = CharacterWalkCycle.apply(
               characterWalkRig, gi, group,
               characterWalkTime, characterWalkBlend,
-              characterWalkVertexBuffers[gi]
+              characterWalkVertexBuffers[gi], posed
             )
           end
           characterWalkVertexBuffers[gi] = buf
           group.mesh:setVertices(buf)
         end
-      end
-    end
-
-    -- Native idle clip. Held off until the walk swing has eased all the way
-    -- back out (not merely "not isMoving") so the two systems never fight
-    -- over the same frame's vertices. While walking or hopping the clip is
-    -- rewound, so it always restarts from frame 0 when the player stops.
-    if characterNative then
-      if isMoving or jumpProgress or characterWalkBlend > 0.001 then
-        CharacterNativeAnim.reset(characterNative)
-      else
-        CharacterNativeAnim.tick(characterNative, "idle")
       end
     end
 
@@ -1105,6 +1167,7 @@ function PlayerModel.clearCache()
   characterWalkBlend = 0
   characterWalkRig = nil
   characterWalkVertexBuffers = {}
+  characterNativePose = {}
   -- ColosseumMon's actor cache is shared with StadiumFollower/StadiumWilds/
   -- RoamerStadium3D, so this is a full teardown (ROM change, mod unload),
   -- same as StadiumFollower.clearCache -- not something to call per-swap.

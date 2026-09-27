@@ -49,6 +49,8 @@ local Voxel3D = V.require("Voxel3D")
 local ChunkMesher = V.require("ChunkMesher")
 -- Battle UI hiding system
 local BattleBoxXY = V.require("BattleBoxXY")
+-- Battle canvas backgrounds
+local okBC, BattleCanvas = pcall(V.require, "BattleCanvas")
 
 local OverworldBattle = {}
 
@@ -582,11 +584,25 @@ function OverworldBattle.stageFor(state)
   return (okFind and arena) or nil
 end
 
+-- Select appropriate battle background based on map/arena characteristics
+function OverworldBattle.selectBattleBackground(map, arena)
+  if okBC and BattleCanvas.selectBattleBackground then
+    return BattleCanvas.selectBattleBackground(map, arena)
+  end
+  return nil
+end
+
 -- Stage a battle triggered from `state`, if this mode can. Returns true when
 -- a session started -- which is also the only case where anything visible
 -- changes, so a map with no room for an arena plays exactly the vanilla
 -- battle it always did, cast and all.
 function OverworldBattle.begin(state, battle)
+  -- Last-frame voxel blit for CBE's OVERWORLD arena. Outer pushBattle hook
+  -- (ArenaOverworldSnapshot.install) is the preferred seam; this also fires
+  -- if that hook was not installed yet, still before Stadium.begin.
+  if V.ArenaOverworldSnapshot and type(V.ArenaOverworldSnapshot.capture) == "function" then
+    pcall(V.ArenaOverworldSnapshot.capture, battle, state)
+  end
   OverworldBattle.finish()
   if not OverworldBattle.enabled() then return false end
   if not (state and state.map and state.player) then return false end
@@ -594,6 +610,13 @@ function OverworldBattle.begin(state, battle)
 
   local arena = OverworldBattle.stageFor(state)
   if not arena then return false end
+
+  local bt = battle and tostring(battle.battleType or ""):lower() or ""
+  local fishing = bt == "fish" or bt == "fishing"
+  if fishing or (state.player and state.player.surfing) then
+    arena.surfing = true
+    arena.water = true
+  end
 
   -- the fight is staged from here on, so the layout it is composed for is not
   -- optional any more (see forceOG)
@@ -603,9 +626,30 @@ function OverworldBattle.begin(state, battle)
               armed = false, token = 0 }
   cullCast(state)
   BattleCam.reset()
+  
+  -- Load battle canvas background if enabled
+  if okBC and BattleCanvas.getSettings then
+    local settings = BattleCanvas.getSettings()
+    if settings.enabled and settings.style ~= "off" then
+      local bgName = (BattleCanvas.selectBattleBackground
+                      and BattleCanvas.selectBattleBackground(state.map, arena))
+                     or OverworldBattle.selectBattleBackground(state.map, arena)
+      if bgName then
+        session.battleBackground = BattleCanvas.loadBattleBackground(bgName)
+        V.mod.log:info("[OverworldBattle] Loaded battle background: %s (surf=%s)",
+                       tostring(bgName),
+                       tostring(arena.surfing == true))
+      end
+      if BattleCanvas.selectSceneryForMap then
+        local sceneryName = BattleCanvas.selectSceneryForMap(state.map, arena)
+        session.battleScenery = sceneryName and BattleCanvas.loadScenery(sceneryName)
+      end
+    end
+  end
+  
   local mode = OverworldBattle.setting:get()
   V.mod.log:info("[OverworldBattle] Calling Stadium.begin, mode=%s", tostring(mode))
-  pcall(function() V.require("Stadium").begin(arena) end)
+  pcall(function() V.require("Stadium").begin(arena, battle) end)
   
   -- Activate BattleBoxXY to hide the original fight box UI
   if battle and BattleBoxXY and BattleBoxXY.claim then
@@ -1116,16 +1160,33 @@ function OverworldBattle.texturingSide()
 end
 
 local texCanvas = {}
+-- Whether a placement helper actually pinned this side while texturing, and
+-- where the pic was observed to land if it did not. Gen 3 no longer calls
+-- frontPlacement/backPlacement (it uses Gen3Battle.picPlacement on the
+-- 240x160 field), so hanging from TEX_AX/TEX_AY while the pic sits at the
+-- GBA platform (enemy x=176) is the "widescreen sprites on a square screen"
+-- layout.
+local placed = {}
+local drawnAt = {}
 local innerPics = nil                   -- captured by install()
 local innerHUDs = nil                   -- likewise, for the snapped HUD layer
 -- (innerAnim, their sibling, is declared up beside animTexture, which
 -- sits earlier in the chunk than this group and must see the local)
 
+-- Billboard canvas follows the battle SURFACE (240x160 on Gen 3, 160x144
+-- on Gen 1/2). A Gen 3 pic drawn at the cartridge platform past column 160
+-- was being cut off a 160-wide canvas and then hung as if it were centred.
 local function texCanvasFor(side)
+  local sw, sh = BattleScene.surface()
+  if sw < BattleScene.GB_W then sw = BattleScene.GB_W end
+  if sh < BattleScene.GB_H then sh = BattleScene.GB_H end
   local c = texCanvas[side]
-  if c then return c end
-  local ok, made = pcall(love.graphics.newCanvas, BattleScene.GB_W,
-                         BattleScene.GB_H, { dpiscale = 1 })
+  if c and c.getWidth and c:getWidth() == sw and c:getHeight() == sh then
+    return c
+  end
+  if c and c.release then pcall(c.release, c) end
+  texCanvas[side] = nil
+  local ok, made = pcall(love.graphics.newCanvas, sw, sh, { dpiscale = 1 })
   if not ok then return nil end
   made:setFilter("nearest", "nearest")
   texCanvas[side] = made
@@ -1194,8 +1255,47 @@ function OverworldBattle.sideTexture(battle, side)
   g.intersectScissor = function() end
   g.getScissor = function() return nil end
 
+  -- Record where the pic actually landed. Gen 3 places battlers itself, so
+  -- the card must hang from the observed bottom-centre rather than from the
+  -- Game Boy pin the placement wrappers never got to apply.
+  local realDraw = g.draw
+  g.draw = function(drawable, ...)
+    local a1, a2, a3, a4, a5, a6 = ...
+    local q, ax1, ay1, rot, asx, asy, aox, aoy
+    if type(a1) == "userdata" and a1.getViewport then
+      q, ax1, ay1, rot, asx, asy = a1, a2, a3, a4, a5, a6
+    else
+      ax1, ay1, rot, asx, asy = a1, a2, a3, a4, a5
+      aox, aoy = select(6, ...), select(7, ...)
+    end
+    if type(ax1) == "number" and type(ay1) == "number"
+       and type(drawable) == "userdata" and drawable.getDimensions then
+      rot = tonumber(rot) or 0
+      local sx = tonumber(asx) or 1
+      local sy = tonumber(asy) or sx
+      local okD, dw, dh = pcall(drawable.getDimensions, drawable)
+      if q then
+        local okQ, _, _, qw, qh = pcall(q.getViewport, q)
+        if okQ and qw and qh then dw, dh = qw, qh else okD = false end
+      end
+      if okD and dw and dh and dw > 0 and dh > 0 and sx ~= 0 and sy ~= 0 then
+        local ox = tonumber(aox) or 0
+        local oy = tonumber(aoy) or 0
+        local dx, dy = (dw / 2 - ox) * sx, (dh - oy) * sy
+        local c, s = math.cos(rot), math.sin(rot)
+        local bcx = ax1 + dx * c - dy * s
+        local bcy = ay1 + dx * s + dy * c
+        local w, h = math.abs(dw * sx), math.abs(dh * sy)
+        drawnAt[side] = { bcx - w / 2, bcy - h, w, h, math.abs(sy) }
+      end
+    end
+    return realDraw(drawable, ...)
+  end
+
   local saved = {}
   for k, v in pairs(OFF[side]) do saved[k] = battle[k]; battle[k] = v end
+  placed[side] = nil
+  drawnAt[side] = nil
   texturing = side
 
   -- ------- no shiny tint here any more
@@ -1211,10 +1311,14 @@ function OverworldBattle.sideTexture(battle, side)
     g.clear(0, 0, 0, 0)
     g.setBlendMode("alpha")
     g.setColor(1, 1, 1, 1)
-    innerPics(battle, 0, 0, 0)
+    -- onlySide is the fifth argument (colon method: self, slide, sx, sy,
+    -- onlySide). Passing the side name in sy used to crash Gen 3; passing 0
+    -- for onlySide let both doubles flanks into both textures.
+    innerPics(battle, 0, 0, 0, side)
   end)
 
   texturing = nil
+  g.draw = realDraw
   for k in pairs(OFF[side]) do battle[k] = saved[k] end
   g.setScissor, g.intersectScissor, g.getScissor =
     setScissor, intersectScissor, getScissor
@@ -1224,14 +1328,34 @@ function OverworldBattle.sideTexture(battle, side)
 
   local ax, ay = getTexCoords()
   local trainer = false
-  -- The intro trainer pic draws itself straight into its own 7x7 slot rather
-  -- than through the placement helpers, so it is hung from that slot instead.
   if side == "enemy" and battle.showEnemyTrainer and battle.trainerPic then
     ax, ay, trainer = TRAINER_AX, TRAINER_AY, true
   elseif side == "player" and battle.showPlayerBack and battle.playerBackPic then
     trainer = true
   end
-  return { canvas = canvas, ax = ax, ay = ay, trainer = trainer }
+  local pad = 0
+  if not trainer then
+    local pic = battle[side] and battle[side].sprite
+    local okPad, p = pcall(BattlePics.footPad, pic)
+    if okPad and type(p) == "number" and p > 0 then pad = p end
+  end
+  local pin = placed[side]
+  local d = drawnAt[side]
+  if pin then
+    -- Helpers (or the Gen 3 picPlacement wrap) pinned the pic: hang from
+    -- that bottom-centre, not from the GBA platform it would have used.
+    ax, ay = pin[1] + pin[3] / 2, pin[2] + pin[4]
+    if not trainer and pad > 0 then ay = ay - pad end
+  elseif d then
+    ax = d[1] + d[3] / 2
+    ay = d[2] + d[4]
+    if not trainer then ay = ay - pad * (d[5] or 1) end
+  elseif side == "enemy" and not trainer and pad > 0 then
+    ay = ay - pad
+  end
+  local cw, ch = canvas:getDimensions()
+  return { canvas = canvas, ax = ax, ay = ay, trainer = trainer,
+           cw = cw, ch = ch }
 end
 
 -- Whether the hit flash is showing this frame.
@@ -1353,7 +1477,9 @@ function OverworldBattle.install()
     local x, y, s = innerBack(w, h, pad, padL, scale)
     if not texturing then return x, y, s end
     local tex_ax, tex_ay = getTexCoords()
-    return tex_ax - w * scale / 2, tex_ay - (h - pad) * scale, s
+    local bx, by = tex_ax - w * scale / 2, tex_ay - (h - pad) * scale
+    placed[texturing] = { bx, by, w * scale, h * scale }
+    return bx, by, s
   end
 
   local innerFront = BattleState.frontPlacement
@@ -1361,8 +1487,33 @@ function OverworldBattle.install()
     local x, y, s = innerFront(ex, ey, w, h, scale)
     if not texturing then return x, y, s end
     local tex_ax, tex_ay = getTexCoords()
-    return tex_ax - w * scale / 2, tex_ay - h * scale, s
+    local fx, fy = tex_ax - w * scale / 2, tex_ay - h * scale
+    placed[texturing] = { fx, fy, w * scale, h * scale }
+    return fx, fy, s
   end
+
+  -- Gen 3 never reaches the two helpers above. Pin picPlacement the same
+  -- way during a billboard bake so the 240-wide GBA platforms (enemy at
+  -- 176, player at 64) are not baked as if the canvas were widescreen.
+  pcall(function()
+    local Gen3Battle = require("src.battle.Gen3Battle")
+    if not (Gen3Battle and type(Gen3Battle.picPlacement) == "function") then
+      return
+    end
+    if Gen3Battle.__cbeTexPlacementHook then return end
+    local innerPlace = Gen3Battle.picPlacement
+    function Gen3Battle.picPlacement(battle, battler, img, path, scale)
+      local x, y = innerPlace(battle, battler, img, path, scale)
+      if not texturing or not img then return x, y end
+      scale = scale or 1
+      local w, h = img:getWidth(), img:getHeight()
+      local tex_ax, tex_ay = getTexCoords()
+      local px, py = tex_ax - w * scale / 2, tex_ay - h * scale
+      placed[texturing] = { px, py, w * scale, h * scale }
+      return px, py
+    end
+    Gen3Battle.__cbeTexPlacementHook = true
+  end)
 
   -- ------- the shiny arrival sparkle, on every rung this file draws
   --

@@ -16,6 +16,7 @@ local MoveFXOwnership=V.MoveFXOwnership
 local BattleSides=V.BattleSides
 local PlayerTrainer=V.PlayerTrainer
 local Trainer=V.Trainer
+local RealtimeBattle=V.RealtimeBattle
 local H={session=nil,installed=false,drawWrapper=nil,wideWrapper=nil,picsWrapper=nil,queueWrapper=nil,updateQueueWrapper=nil,textWrapper=nil,bottomWrapper=nil,statusWrapper=nil,panelWrapper=nil,
   drawEpoch=0,wideEpoch=0,picsEpoch=0,queueEpoch=0,updateQueueEpoch=0,textEpoch=0,bottomEpoch=0,statusEpoch=0,panelEpoch=0,
   lastError=nil,lastUpdateError=nil,frames=0,externalFrames=0,presentationMoveEvents=0,presentationDamageEvents=0,presentationFaintEvents=0,
@@ -98,7 +99,19 @@ local function baseCamera(arena)
 end
 
 local function cameraPose(s)
+  local Snap=V.ArenaOverworldSnapshot
+  if Snap and type(Snap.cameraPose)=="function" then
+    local okField,fieldPose=pcall(Snap.cameraPose)
+    if okField and fieldPose and fieldPose.eye and fieldPose.focus and fieldPose.fov then
+      local adjusted=V.FreeLookCamera and V.FreeLookCamera.pose(s.context,fieldPose)
+      return adjusted or fieldPose
+    end
+  end
   local base=baseCamera(s.context.arena)
+  if RealtimeBattle and type(RealtimeBattle.cameraPose)=="function" then
+    local ok,pose=pcall(RealtimeBattle.cameraPose,RealtimeBattle,s.context,s.context.arena)
+    if ok and pose and pose.eye and pose.focus and pose.fov then return pose end
+  end
   if s and s.battle and s.battle.__mtbHub==true then
     -- Dedicated Mt. Battle setup composition: Wes is the centered hero and the
     -- UI lives on the two outer rails. Do not hand this non-combat beat to the
@@ -165,6 +178,9 @@ local function beginProviders(s)
   s.cameraActive=false
   syncCameraOwnership(s)
   if CurrentSprites then pcall(CurrentSprites.begin,CurrentSprites,s.context) end
+  if RealtimeBattle and type(RealtimeBattle.begin)=="function" then
+    pcall(RealtimeBattle.begin,RealtimeBattle,s.context,arena)
+  end
   return true
 end
 
@@ -217,7 +233,9 @@ function H.update(dt)
   -- its actual faint slide has begun, so CBE cannot collapse/remove the model
   -- while the HP bar is still draining (especially obvious at 4x).
   if releaseGen1PresentationFaints then releaseGen1PresentationFaints(s) end
-  if syncCameraOwnership(s) then pcall(Camera.update,Camera,s.context,dt) end
+  local realtimeOn=RealtimeBattle and type(RealtimeBattle.enabled)=="function"
+    and RealtimeBattle.enabled(s.context.game)
+  if not realtimeOn and syncCameraOwnership(s) then pcall(Camera.update,Camera,s.context,dt) end
   if Arena then
     local ok,err=pcall(Arena.update,Arena,s.context,dt,s.context.arena)
     if ok then
@@ -230,6 +248,9 @@ function H.update(dt)
         log("error","standalone arena update failed: %s",msg)
       end
     end
+  end
+  if RealtimeBattle and type(RealtimeBattle.update)=="function" then
+    pcall(RealtimeBattle.update,RealtimeBattle,s.context,dt,s.context.arena)
   end
   if CurrentSprites then pcall(CurrentSprites.update,CurrentSprites,s.context,dt) end
 end
@@ -851,12 +872,25 @@ function H.install(force)
   -- Hide the stock Gen-1 message panel while CBE owns capture choreography.
   -- This removes the lingering "used GREAT BALL" box seen in the reference
   -- recording without suppressing the later catch/miss/nickname dialogue.
+  local function realtimeUiOwned(battle)
+    local session=H.session
+    if not (session and battle and RealtimeBattle and type(RealtimeBattle.enabled)=="function") then return false end
+    local live=Compat and Compat.prepare(battle) or battle
+    local owns=(Compat and Compat.matches and Compat.matches(session.battle,live))
+      or session.battle==live or session.battle==battle
+    if not owns then return false end
+    local game=(live and live.game) or (session.context and session.context.game)
+    local ok,v=pcall(RealtimeBattle.enabled,game)
+    return ok and v==true
+  end
+
   if type(BattleState.drawTextArea)=="function" and BattleState.drawTextArea~=H.textWrapper then
     local inner=BattleState.drawTextArea
     H.textEpoch=(H.textEpoch or 0)+1;local epoch=H.textEpoch
     H.textWrapper=function(self,...)
       if epoch~=H.textEpoch then return inner(self,...) end
       local s=H.session
+      if realtimeUiOwned(self) then return end
       if captureUiOwned(s,self) then H.captureUiSuppressed=(H.captureUiSuppressed or 0)+1;return end
       return inner(self,...)
     end
@@ -873,6 +907,7 @@ function H.install(force)
     H.bottomWrapper=function(self,...)
       if epoch~=H.bottomEpoch then return inner(self,...) end
       local s=H.session
+      if realtimeUiOwned(self) then return false end
       if captureUiOwned(s,self) then return false end
       return inner(self,...)
     end
@@ -1066,6 +1101,7 @@ function H.finish(reason)
   local s=H.session
   if not s then return end
   if CurrentSprites then pcall(CurrentSprites.finish,CurrentSprites,s.context,reason) end
+  if RealtimeBattle and type(RealtimeBattle.finish)=="function" then pcall(RealtimeBattle.finish,RealtimeBattle,s.context,reason) end
   if Camera and s.cameraActive then pcall(Camera.finish,Camera,s.context,reason) end
   if Arena then pcall(Arena.finish,Arena,s.context,reason) end
   if s.battle then s.battle.__cbePresentationQueueSync=nil end
@@ -1078,9 +1114,10 @@ function H.status()
   local s=H.session
   local ps=s and s.context and s.context.sides and s.context.sides.player and s.context.sides.player.battler
   local es=s and s.context and s.context.sides and s.context.sides.enemy and s.context.sides.enemy.battler
+  local realtimeActive=RealtimeBattle and RealtimeBattle.status and select(1,pcall(function() return RealtimeBattle:status().active end))
   return {installed=H.installed,active=s~=nil,started=s and s.started==true,presented=s and s.presented==true,failOpen=s and s.failOpen==true,ownershipOnly=s and s.ownershipOnly==true,generation=(s and s.battle and s.battle.__cbeGeneration) or 1,arena=s and s.context.arena and s.context.arena.id or nil,
     actor="current-sprites",playerSpecies=ps and ps.mon and ps.mon.species or nil,enemySpecies=es and es.mon and es.mon.species or nil,
-    cameraActive=s and s.cameraActive==true,cameraMode=not s and "inactive" or (s.cameraActive and "cinematic" or "neutral-static"),frames=H.frames,
+    cameraActive=s and s.cameraActive==true,cameraMode=(realtimeActive and "realtime-third-person") or (not s and "inactive" or (s.cameraActive and "cinematic" or "neutral-static")),frames=H.frames,
     externalPresentation=s and s.externalPresentation or nil,externalFrames=H.externalFrames,presentationMoveEvents=H.presentationMoveEvents,presentationDamageEvents=H.presentationDamageEvents,presentationFaintEvents=H.presentationFaintEvents,gen1PresentationFaintEvents=H.gen1PresentationFaintEvents or 0,
     captureQueueHolds=H.captureQueueHolds or 0,captureRowsStripped=H.captureRowsStripped or 0,captureUiSuppressed=H.captureUiSuppressed or 0,
     captureFlow=s and s.captureHold and "cbe-wall-clock-hold" or nil,gen1FrameResets=H.gen1FrameResets or 0,gen1ViewportRescales=H.gen1ViewportRescales or 0,gen1ViewportLast=H.gen1ViewportLast,

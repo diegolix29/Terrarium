@@ -1439,6 +1439,7 @@ local function sourceAnchors(shot)
 end
 
 function M.drawSourceOverlay(viewport, game)
+  if V.ColosseumMoveFX and V.ColosseumMoveFX.ownsMove(activeGoldBattle) then return false end
   local mode = M.overlayMode()
   if mode == "off" or not screenPulse.spec then return false end
   if not (love and love.graphics) then return false end

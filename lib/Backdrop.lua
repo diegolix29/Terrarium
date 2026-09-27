@@ -23,6 +23,7 @@ local V = ...
 local Voxel3D = V.require("Voxel3D")
 local Mat4 = V.require("Mat4")
 local okDN, DayNight = pcall(V.require, "DayNight")
+local okBC, BattleCanvas = pcall(V.require, "BattleCanvas")
 
 local Backdrop = {}
 
@@ -33,6 +34,7 @@ local Y_TOP = 300         -- headroom above it
 local DRIFT = 1 / 24000   -- texture drift per world pixel walked
 
 local mesh, image, failed = nil, nil, false
+local sceneryMesh, sceneryImage = nil, nil
 
 local function status(s) _G.__ds_backdrop_status = s end
 status("loaded; awaiting the first outdoor frame")
@@ -173,11 +175,131 @@ function Backdrop.draw(state)
     love.graphics.setDepthMode("lequal", false)
     Voxel3D.draw(mesh, tex, Mat4.translate(px, 0, pz))
   end)
+
   if drew then
     status(("drawn at r=%d, drift %.3f"):format(RADIUS, (px * DRIFT) % 1))
   else
     status("draw failed")
   end
+  
+  -- Draw overworld scenery in front of backdrop
+  Backdrop.drawOverworldScenery(state, px, pz)
+end
+
+-- Draw overworld scenery in front of backdrop (3D world, separate from battles)
+function Backdrop.drawOverworldScenery(state, px, pz)
+  -- Check if overworld scenery is enabled via settings
+  local cfg = {}
+  local pub = rawget(_G, "__ds_ceiling_config")
+  if type(pub) == "function" then
+    local okCfg, c = pcall(pub)
+    if okCfg and type(c) == "table" then cfg = c end
+  end
+  if cfg.overworldScenery == false then
+    return  -- Overworld scenery disabled
+  end
+  
+  if not (okBC and BattleCanvas) then return end
+  
+  local map = state and state.map
+  if not map then return end
+  
+  -- Only draw scenery for outdoor maps
+  if not isOutdoor(map) then return end
+  
+  -- Select scenery based on map (using BattleCanvas's selection logic)
+  local sceneryName = Backdrop.selectSceneryForMap(map)
+  if not sceneryName then return end
+  
+  -- Load scenery using BattleCanvas's loader
+  local scenery = BattleCanvas.loadScenery and BattleCanvas.loadScenery(sceneryName)
+  if not scenery then return end
+  
+  -- Draw scenery as a horizon prop in the 3D world
+  -- This positions it in front of the backdrop but behind the terrain
+  local g = love.graphics
+  if not (g and g.draw) then return end
+  
+  guarded(function()
+    -- Draw scenery at horizon position in 3D space
+    -- Position it at a far distance, following the player
+    local sceneryRadius = RADIUS * 0.95  -- Slightly inside the backdrop
+    local sceneryY = 0  -- Ground level
+    
+    -- Create a simple plane mesh for scenery if needed
+    if not sceneryMesh then
+      sceneryMesh = buildSceneryPlane()
+    end
+    
+    if sceneryMesh then
+      love.graphics.setDepthMode("lequal", false)
+      -- Position scenery around the player like the backdrop
+      Voxel3D.draw(sceneryMesh, scenery, Mat4.translate(px, sceneryY, pz))
+    end
+  end)
+end
+
+-- Build a simple plane for scenery display
+local function buildSceneryPlane()
+  local verts, indexMap, quads = {}, {}, 0
+  local w = 200  -- Width of scenery display
+  local h = 100  -- Height of scenery display
+  
+  -- Simple quad facing the player
+  verts[#verts + 1] = { -w/2, h, 0, 0, 0, 1 }
+  verts[#verts + 1] = { w/2, h, 0, 1, 0, 1 }
+  verts[#verts + 1] = { w/2, 0, 0, 1, 1, 1 }
+  verts[#verts + 1] = { -w/2, 0, 0, 0, 1, 1 }
+  Voxel3D.pushQuad(indexMap, quads)
+  quads = quads + 1
+  
+  return Voxel3D.newMesh(verts, indexMap)
+end
+
+-- Draw scenery foreground elements (battle PNG overlay; screen-space)
+function Backdrop.drawScenery(state, px, pz)
+  if not (okBC and BattleCanvas and BattleCanvas.drawPaintedStage) then return end
+  local arena = nil
+  if state and state.player and state.player.surfing then
+    arena = { surfing = true, water = true }
+  end
+  BattleCanvas.drawPaintedStage(state and state.map, arena)
+end
+
+-- Select appropriate scenery based on map characteristics
+function Backdrop.selectSceneryForMap(map)
+  local def = map and map.def
+  if not def then return nil end
+  
+  local tid = def.tileset or (map.tileset and map.tileset.id)
+  
+  -- Map tilesets to appropriate scenery
+  local sceneryMap = {
+    OVERWORLD = "kanto_panorama",
+    FOREST = "forest_edge_a",
+    PLATEAU = "route8_horizon",
+    SHIP_PORT = "harbor_edge",
+    -- Add more mappings as needed
+  }
+  
+  -- Fallback to general scenery based on map name/connections
+  if tid and sceneryMap[tid] then
+    return sceneryMap[tid]
+  end
+  
+  -- Check for specific location names in map ID
+  local mapId = map.id or ""
+  if mapId:find("viridian") then return "viridian_town" end
+  if mapId:find("pallet") then return "rural_edge" end
+  if mapId:find("pewter") then return "route8_midground" end
+  if mapId:find("cerulean") then return "coastal_landmarks_v3" end
+  if mapId:find("lavender") then return "pokemon_tower_wall" end
+  if mapId:find("celadon") then return "metropolis" end
+  if mapId:find("fuchsia") then return "mini_trees" end
+  if mapId:find("saffron") then return "cinnabar_story_landmarks" end
+  
+  -- Default fallback
+  return "kanto_panorama"
 end
 
 function Backdrop.invalidate()

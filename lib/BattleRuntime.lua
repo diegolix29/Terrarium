@@ -24,6 +24,14 @@ local WazaHandlers=V.WazaHandlers
 local MoveFXExtractor=V.MoveFXExtractor
 local ResidentPrewarm=V.ResidentPrewarm
 local FrameWork=V.FrameWork
+local RealtimeBridge=nil
+if type(V.RealtimeBattleBridge)=="table" then
+  if type(V.RealtimeBattleBridge.attach)=="function" then
+    RealtimeBridge=V.RealtimeBattleBridge.attach(R)
+  else
+    RealtimeBridge=V.RealtimeBattleBridge
+  end
+end
 
 local function platformOS()
   if love and love.system and type(love.system.getOS)=="function" then
@@ -77,6 +85,9 @@ local SEMANTIC_EVENTS={
 
 local function contextFor(battle)
   battle=Compat and Compat.prepare(battle) or battle
+  local fx=V.ColosseumMoveFX
+  local context=fx and fx.contextFor(battle)
+  if context then return context end
   return {battle=battle,game=(battle and battle.game) or mod.game}
 end
 
@@ -198,6 +209,9 @@ local function dispatch(name,payload)
 
   if PlayerTrainer and type(PlayerTrainer.event)=="function" then PlayerTrainer:event(ctx,name,payload) end
   if Trainer and type(Trainer.event)=="function" then Trainer:event(ctx,name,payload) end
+  if RealtimeBridge and type(RealtimeBridge.onDispatch)=="function" then
+    pcall(RealtimeBridge.onDispatch,ctx,name,payload)
+  end
 end
 
 local function beginBattle(payload)
@@ -546,10 +560,15 @@ function R.closeWithoutResult(battle,reason)
 end
 
 function R.install()
-  if R.installed then installGen2FinishBoundary();installCaptureSoundBridge();return true end
+  if R.installed then
+    installGen2FinishBoundary();installCaptureSoundBridge()
+    if RealtimeBridge and type(RealtimeBridge.install)=="function" then pcall(RealtimeBridge.install) end
+    return true
+  end
 
   installGen2FinishBoundary()
   installCaptureSoundBridge()
+  if RealtimeBridge and type(RealtimeBridge.install)=="function" then pcall(RealtimeBridge.install) end
 
   if mod.hooks and type(mod.hooks.wrap)=="function" then
     mod.hooks:wrap("input.step",function(next,game,dt)
@@ -559,7 +578,15 @@ function R.install()
       -- the hidden source of the 5-10 second "encounter happened, wipe has not
       -- appeared yet" pause on slower Android storage/GPUs.
       local topBefore=stackTop(game)
-      local result=next(game,dt)
+      local result
+      if RealtimeBridge and type(RealtimeBridge.wrapEngineStep)=="function" then
+        result=RealtimeBridge.wrapEngineStep(next,game,dt)
+      else
+        result=next(game,dt)
+      end
+      if RealtimeBridge and type(RealtimeBridge.afterEngineStep)=="function" then
+        pcall(RealtimeBridge.afterEngineStep,game)
+      end
       local topAfter=stackTop(game)
       local stateChanged=topBefore~=topAfter
 
@@ -586,6 +613,8 @@ function R.install()
       if BattleDirector and R.activeBattle and type(BattleDirector.update)=="function" then
         pcall(BattleDirector.update,BattleDirector,contextFor(R.activeBattle),dt)
       end
+      if V.ColosseumMoveFX then V.ColosseumMoveFX.update(dt) end
+
       -- Legacy hosts/tests without Game.update retain the old paced fallback.
       -- On native Gen I/II, preparation drains once AFTER the real update.
       if not (FrameWork and FrameWork.active(game)) then
@@ -618,7 +647,7 @@ function R.install()
 end
 
 function R.status()
-  return {installed=R.installed,active=R.activeBattle~=nil,pendingEnd=R.pendingEnd~=nil,
+  local status={installed=R.installed,active=R.activeBattle~=nil,pendingEnd=R.pendingEnd~=nil,
     endBoundary=(Compat and Compat.current and Compat.current()==2) and "gen2.screen.finished" or "gen1.stack-exited",
     exitPresentationLatch=R.pendingEnd~=nil and (R.pendingEndReason or "pending") or "idle",
     captureSoundBridge=R.captureSoundBridge==true,nativeCaughtSuppressed=R.nativeCaughtSuppressed or 0,
@@ -626,6 +655,11 @@ function R.status()
     modelPrewarm=R.modelPrewarm,entryTiming=R.entryTiming,exitTiming=R.exitTiming,
     captureSuccessAudio="ISO me_snatch owns success; native Caught_Mon suppressed only when source cue is available",
     moveAudio="Waza type-5 GameSound owns native battle-animation SFX only when the complete generated snd_se_battle WAV set is present"}
+  if RealtimeBridge and type(RealtimeBridge.statusExtras)=="function" then
+    local ok,extra=pcall(RealtimeBridge.statusExtras)
+    if ok and type(extra)=="table" then for k,v in pairs(extra) do status[k]=v end end
+  end
+  return status
 end
 
 return R

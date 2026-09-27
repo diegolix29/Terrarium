@@ -185,6 +185,8 @@ function O:event(ctx,name,payload)
 end
 
 function O:ownsNativeAudio(battle)
+  local fx=V.ColosseumMoveFX
+  if fx and fx.active(battle) and not fx.ownsMove(battle) then return false end
   if not self.active then return false end
   local b=prepare(battle)
   if self.active.battle and b and not matches(self.active.battle,b) then return false end
@@ -196,6 +198,8 @@ function O:ownsNativeAudio(battle)
 end
 
 function O:suppresses(battle)
+  local fx=V.ColosseumMoveFX
+  if fx and fx.active(battle) and not fx.ownsMove(battle) then return false end
   if not self.active then return false end
   local b=prepare(battle)
   if self.active.battle and b and not matches(self.active.battle,b) then return false end

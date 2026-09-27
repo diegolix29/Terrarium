@@ -190,6 +190,17 @@ function Stadium.active()
   return session ~= nil
 end
 
+
+-- Return the current session if in colosseum mode, nil otherwise
+function Stadium.colosseumSession(battle)
+  if not session then return nil end
+  local mode = Stadium.mode()
+  if mode == "COLOSSEUM_A" or mode == "COLOSSEUM_B" then
+    return session
+  end
+  return nil
+end
+
 -- ------- which species each side is showing
 
 -- The National Dex number for a battler, which is the number the Stadium

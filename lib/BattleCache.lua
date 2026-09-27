@@ -98,7 +98,7 @@ local function persistReusePreference(refreshRegistry,deferRegistry)
 end
 function C.enabled(game,save)
   save=save or (game and game.save)
-  local p=save and save.colosseumBattle
+  local p=save and save.terrariumBattle
   return not (p and p.pokemonModelsEnabled==false)
 end
 function C.plan()

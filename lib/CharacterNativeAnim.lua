@@ -178,6 +178,17 @@ function M.hasRole(anim, roleName)
   return anim ~= nil and anim.roles[roleName] ~= nil
 end
 
+-- Pick the clip PlayerModel should overlay / idle on: the requested role if
+-- it loaded, otherwise idle, otherwise victory, otherwise whatever is there.
+function M.resolveRole(anim, preferred)
+  if M.hasRole(anim, preferred) then return preferred end
+  if M.hasRole(anim, "idle") then return "idle" end
+  if M.hasRole(anim, "victory") then return "victory" end
+  if not anim or type(anim.roles) ~= "table" then return nil end
+  for name in pairs(anim.roles) do return name end
+  return nil
+end
+
 -- ------- playback
 
 -- Forget the playhead. Call whenever something else (the walk cycle, a hop)
@@ -195,9 +206,12 @@ local function nowSeconds()
   return os.clock()
 end
 
--- Advance the clip by real elapsed time and upload the resulting pose.
--- Returns true if the meshes were rewritten this call.
-function M.tick(anim, roleName)
+-- Advance the clip clock and interpolate into the FFI stage buffers.
+-- Does not upload to the mesh -- callers that also apply CharacterWalkCycle
+-- on top of this pose (overworld walking) need the xyz first.
+-- Returns true if the stage buffers were rewritten this call.
+-- `anim.dirty` is the caller's "mesh is stale" flag and is not cleared here.
+function M.sample(anim, roleName)
   local role = anim and anim.roles[roleName or "idle"]
   if not role then return false end
 
@@ -209,11 +223,10 @@ function M.tick(anim, roleName)
 
   local frame, a, b, u = frameFor(role, anim.time, anim.fps)
   local last = role.lastFrame
-  if not anim.dirty and last and math.abs(frame - last) < MIN_STEP then
+  if last and math.abs(frame - last) < MIN_STEP then
     return false
   end
   role.lastFrame = frame
-  anim.dirty = false
 
   local aOff, bOff = a * SRC_FLOATS, b * SRC_FLOATS
   for gi = 1, #role.groups do
@@ -228,9 +241,53 @@ function M.tick(anim, roleName)
       out[o + 1] = ay + (pb[s + 1] - ay) * u
       out[o + 2] = az + (pb[s + 2] - az) * u
     end
-    g.mesh:setVertices(g.stage, 1)
   end
   return true
+end
+
+function M.upload(anim, roleName)
+  local role = anim and anim.roles[roleName or "idle"]
+  if not role then return false end
+  for gi = 1, #role.groups do
+    local g = role.groups[gi]
+    if g.mesh and g.stage then g.mesh:setVertices(g.stage, 1) end
+  end
+  return true
+end
+
+-- Copy the current sampled xyz into dest[groupIndex][vertexIndex] = {x,y,z},
+-- reusing tables already in dest. Group order matches the groups array passed
+-- to M.load (PlayerModel's characterGroups).
+function M.copyPositions(anim, roleName, dest)
+  dest = dest or {}
+  local role = anim and anim.roles[roleName or "idle"]
+  if not role then return dest end
+  for gi = 1, #role.groups do
+    local g = role.groups[gi]
+    local n, out = g.n, g.out
+    local verts = dest[gi]
+    if not verts then verts = {}; dest[gi] = verts end
+    for i = 0, n - 1 do
+      local o = i * DST_FLOATS
+      local slot = verts[i + 1]
+      if slot then
+        slot[1], slot[2], slot[3] = out[o], out[o + 1], out[o + 2]
+      else
+        verts[i + 1] = { out[o], out[o + 1], out[o + 2] }
+      end
+    end
+  end
+  return dest
+end
+
+-- Advance the clip by real elapsed time and upload the resulting pose.
+-- Returns true if the meshes were rewritten this call.
+function M.tick(anim, roleName)
+  local sampled = M.sample(anim, roleName)
+  if not sampled and not (anim and anim.dirty) then return false end
+  local uploaded = M.upload(anim, roleName)
+  if uploaded then anim.dirty = false end
+  return uploaded
 end
 
 -- ------- teardown

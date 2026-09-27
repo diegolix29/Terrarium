@@ -1,6 +1,10 @@
 local C={}
 local BattleSettings=nil
 
+-- Global scaling multiplier for actors (trainers and Pokémon)
+-- Default to 1.0 (normal size), can be overridden by user preference
+local ACTOR_SCALE_MULTIPLIER = 1.0
+
 -- Arena selection stays centralized in this module. The
 -- StadiumBattleFX provider is acquired once per battle; the selected id is
 -- resolved here before any cache is loaded and is then stamped onto the arena
@@ -150,20 +154,42 @@ local DEFINITIONS={
     -- battle-radius clipping can punch holes in its deck and is not permitted.
     preserveSourceShell=true,
   },
+  overworld={
+    id="overworld",label="OVERWORLD",ready=true,
+    -- Not a baked GC6E01 stage: there is no cache here on purpose. CBE stays
+    -- the owner of this fight end to end -- camera rig, actors, crowd, move
+    -- FX ownership, all of it exactly as for any other entry above. Only the
+    -- Only the world itself is different: instead of loading extracted HSD geometry,
+    -- Arena.lua draws the live voxel field pocket cached at battle start (see
+    -- ArenaOverworldSnapshot) as this arena's stage. Spatial numbers below are
+    -- overwritten at acquire time from BattleArena.find / BattleCam -- EXCEPT
+    -- figureScale/trainerScale, which are not touched by that path and are the
+    -- actual model scale used. Bumped 20% over the outdoor_wild baseline
+    -- (0.365/0.425/0.205): the fixed-frame CBE camera here sits farther back
+    -- than the stage arenas were tuned for, so actors otherwise read small.
+    liveOverworld=true,
+    stageScale=0.25,stageYaw=0,sceneRadiusRaw=620,maxGroupSpanRaw=1350,vertexRadiusRaw=610,
+    pokemon={player={-4.5,18.0},enemy={4.5,-18.0}},figureScale=1,trainers={player={14.0,29.5},enemy={-14.0,-29.5}},trainerScale={player=0.51,enemy=0.246},
+    camera={side=59,back=18,height=29,lookX=0,lookY=6.0,frameH=51,safe={minRadius=29,maxRadius=87,minY=7.0,maxY=43,maxPitch=33,minPitch=-10,minFov=31,maxFov=54}},
+    backdrop={top={0.08,0.31,0.65},bottom={0.68,0.84,0.76}},profile="overworld",crowd="none",
+  },
 }
 
-local ORDER={"auto","random","open_water","water","orre_colosseum","relic_chamber","relic_cave","outskirts","pyrite_colosseum","deep_colosseum","realgam_colosseum","outdoor_wild","mt_battle_summit","cipher_lab_underground"}
-local VALID={auto=true,random=true,open_water=true,water=true,orre_colosseum=true,relic_chamber=true,relic_cave=true,outskirts=true,pyrite_colosseum=true,deep_colosseum=true,realgam_colosseum=true,outdoor_wild=true,mt_battle_summit=true,cipher_lab_underground=true}
+local ORDER={"auto","random","open_water","water","orre_colosseum","relic_chamber","relic_cave","outskirts","pyrite_colosseum","deep_colosseum","realgam_colosseum","outdoor_wild","mt_battle_summit","cipher_lab_underground","overworld"}
+local VALID={auto=true,random=true,open_water=true,water=true,orre_colosseum=true,relic_chamber=true,relic_cave=true,outskirts=true,pyrite_colosseum=true,deep_colosseum=true,realgam_colosseum=true,outdoor_wild=true,mt_battle_summit=true,cipher_lab_underground=true,overworld=true}
 
 local function randomDefinition()
   local pool={}
   for _,id in ipairs(ORDER) do
-    if id~="auto" and id~="random" then
-      local def=DEFINITIONS[id]
+    -- The live-overworld pick is deliberately excluded from blind rotation:
+    -- it changes which subsystem stages the fight (see H.begin's handoff),
+    -- not just which backdrop loads, so it stays an explicit choice.
+    if id~="auto" and id~="random" and id~="overworld" then
+      local def=C.definition(id)
       if def and def.ready then pool[#pool+1]=def end
     end
   end
-  if #pool==0 then return DEFINITIONS.water end
+  if #pool==0 then return C.definition("water") end
   if #pool==1 then return pool[1] end
   local candidates={}
   for _,def in ipairs(pool) do
@@ -177,7 +203,7 @@ end
 
 local function saved(game)
   local save=game and game.save
-  local p=save and save.colosseumBattle
+  local p=save and save.terrariumBattle
   local id=p and p.arena or "auto"
   if not VALID[id] then id="auto" end
   return id
@@ -185,8 +211,8 @@ end
 
 local function ensurePrefs(game)
   if not (game and game.save) then return nil end
-  local p=game.save.colosseumBattle
-  if type(p)~="table" then p={};game.save.colosseumBattle=p end
+  local p=game.save.terrariumBattle
+  if type(p)~="table" then p={};game.save.terrariumBattle=p end
   return p
 end
 
@@ -203,7 +229,7 @@ end
 
 function C.enabled(game)
   local save=game and game.save
-  local p=save and save.colosseumBattle
+  local p=save and save.terrariumBattle
   if not p then return true end
   if p.arenasEnabled==nil then p.arenasEnabled=true end
   return p.arenasEnabled and true or false
@@ -215,7 +241,58 @@ function C.setEnabled(game,value)
   return value and true or false
 end
 
-function C.definition(id) return DEFINITIONS[id] end
+function C.definition(id)
+  local def = DEFINITIONS[id]
+  if not def then return nil end
+
+  -- Apply global scaling multiplier to actors
+  local scaledDef = {}
+  for k, v in pairs(def) do
+    scaledDef[k] = v
+  end
+
+  -- Scale Pokémon figure size
+  if scaledDef.figureScale then
+    scaledDef.figureScale = scaledDef.figureScale * ACTOR_SCALE_MULTIPLIER
+  end
+
+  -- Scale trainer sizes
+  if scaledDef.trainerScale then
+    scaledDef.trainerScale = {}
+    if scaledDef.trainerScale.player then
+      scaledDef.trainerScale.player = scaledDef.trainerScale.player * ACTOR_SCALE_MULTIPLIER
+    end
+    if scaledDef.trainerScale.enemy then
+      scaledDef.trainerScale.enemy = scaledDef.trainerScale.enemy * ACTOR_SCALE_MULTIPLIER
+    end
+  end
+
+  return scaledDef
+end
+
+-- Allow users to adjust the global scale multiplier
+function C.setScaleMultiplier(multiplier)
+  if type(multiplier)=="number" and multiplier>0 then
+    ACTOR_SCALE_MULTIPLIER = multiplier
+  end
+  return ACTOR_SCALE_MULTIPLIER
+end
+
+function C.getScaleMultiplier()
+  return ACTOR_SCALE_MULTIPLIER
+end
+
+-- Load scale multiplier from user preferences
+function C.loadUserPreference(game)
+  if not (game and game.save) then return end
+  local p = game.save.colosseumBattle
+  if type(p)=="table" and p.actorScaleMultiplier then
+    local scale = tonumber(p.actorScaleMultiplier)
+    if scale and scale>0 then
+      ACTOR_SCALE_MULTIPLIER = scale
+    end
+  end
+end
 function C.order() return ORDER end
 function C.options()
   return {
@@ -233,6 +310,7 @@ function C.options()
     {id="outdoor_wild",label="ORRE WILDLANDS"},
     {id="mt_battle_summit",label="MT. BATTLE SUMMIT"},
     {id="cipher_lab_underground",label="CIPHER LAB UNDERGROUND"},
+    {id="overworld",label="OVERWORLD"},
   }
 end
 
@@ -349,7 +427,7 @@ function C.resolve(game,battle)
   -- arena preference. Gen II may surface its Battle model, BattleState view, or
   -- CBE facade at arena acquisition; all three must retain Summit ownership.
   if mtBattleOwned(battle) then
-    local summit=DEFINITIONS.mt_battle_summit or DEFINITIONS.water
+    local summit=C.definition("mt_battle_summit") or C.definition("water")
     return summit,"mt_battle_challenge"
   end
   local selected
@@ -382,8 +460,8 @@ function C.resolve(game,battle)
     -- arena the next battle receives.
     local def
     if battle then def=boundResolved
-    else def=primedRandom or (lastRandomResolved and DEFINITIONS[lastRandomResolved]) or DEFINITIONS.water end
-    if not def or not def.ready then def=DEFINITIONS.water end
+    else def=primedRandom or (lastRandomResolved and C.definition(lastRandomResolved)) or C.definition("water") end
+    if not def or not def.ready then def=C.definition("water") end
     return def,selected
   end
   local wanted=selected
@@ -394,8 +472,8 @@ function C.resolve(game,battle)
       wanted=(battle and (battle.kind=="wild" or battle.kind=="safari" or battle.wild==true)) and "outdoor_wild" or "water"
     end
   end
-  local def=DEFINITIONS[wanted] or DEFINITIONS.water
-  if not def.ready then def=DEFINITIONS.water end
+  local def=C.definition(wanted) or C.definition("water")
+  if not def.ready then def=C.definition("water") end
   return def,selected
 end
 
@@ -413,9 +491,9 @@ end
 function C.status(game,battle)
   local def,selected=C.resolve(game,battle)
   if not def then
-    return {enabled=C.enabled(game),selected=selected,resolved=nil,cache=nil,runtimeSelected=runtimeSelected,pendingSelected=pendingSelected,boundSelected=boundSelected,boundResolved=boundResolved and boundResolved.id or nil,lastRandomResolved=lastRandomResolved,primedRandom=primedRandom and primedRandom.id or nil,boundBattle=boundBattle~=nil,definitions=DEFINITIONS}
+    return {enabled=C.enabled(game),selected=selected,resolved=nil,cache=nil,runtimeSelected=runtimeSelected,pendingSelected=pendingSelected,boundSelected=boundSelected,boundResolved=boundResolved and boundResolved.id or nil,lastRandomResolved=lastRandomResolved,primedRandom=primedRandom and primedRandom.id or nil,boundBattle=boundBattle~=nil,definitions=DEFINITIONS,scaleMultiplier=ACTOR_SCALE_MULTIPLIER}
   end
-  return {enabled=C.enabled(game),selected=selected,resolved=def.id,cache=def.cache,runtimeSelected=runtimeSelected,pendingSelected=pendingSelected,boundSelected=boundSelected,boundResolved=boundResolved and boundResolved.id or nil,lastRandomResolved=lastRandomResolved,primedRandom=primedRandom and primedRandom.id or nil,boundBattle=boundBattle~=nil,definitions=DEFINITIONS}
+  return {enabled=C.enabled(game),selected=selected,resolved=def.id,cache=def.cache,runtimeSelected=runtimeSelected,pendingSelected=pendingSelected,boundSelected=boundSelected,boundResolved=boundResolved and boundResolved.id or nil,lastRandomResolved=lastRandomResolved,primedRandom=primedRandom and primedRandom.id or nil,boundBattle=boundBattle~=nil,definitions=DEFINITIONS,scaleMultiplier=ACTOR_SCALE_MULTIPLIER}
 end
 
 return C

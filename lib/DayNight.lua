@@ -777,7 +777,51 @@ end
 -- which is all that ever filtered through the leaves -- but not a sealed
 -- room either: night still FALLS in them. Of everything the clock does,
 -- exactly one thing reaches a canopy map: the hour's tint.
-DayNight.CANOPY = { VIRIDIAN_FOREST = true }
+--
+-- ONE TABLE, EVERY GENERATION. Ceiling.lua, Sky.lua, Flora.lua,
+-- SkyLayer.lua, Backdrop.lua, HorizonArt.lua, GroundFX.lua,
+-- StreetLamps.lua, Weather.lua, WindFX.lua, AmbientSound.lua,
+-- AmbientLife.lua, BattleScene.lua, DayTint.lua and VoxelScene.lua all
+-- read this one table through isCanopy() below, so they can never
+-- disagree with EACH OTHER -- but until now the table itself only ever
+-- named Kanto's Viridian Forest, which meant every other generation's
+-- forest silently fell through to the plain-outdoor or sealed-indoor
+-- paths instead: no dappled light, no shafts, no vines, no sky
+-- suppression, and on some maps (see Ceiling.lua's own outdoor check)
+-- a flat sealed lid with no sky at all.
+--
+-- Each generation keys its maps in its OWN vocabulary, so this table
+-- necessarily mixes formats -- that is expected, not a bug:
+--   Gen 1 (Kanto, native)   -- the engine's own friendly constant
+--   Gen 2 (Johto, native)   -- same vocabulary, its own forest
+--   Gen 3 (Hoenn, RSE)      -- MAP_G<group>_N<num>, keyed exactly as
+--                              data/gen3_maps.lua and Gen3.lua's own
+--                              `maps.maps[tostring(map.id)]` lookup key
+--                              it (see Gen3.lua ~line 3774)
+--   Gen 3 (Kanto, FRLG)     -- same MAP_G_N vocabulary, but resolved
+--                              against data/firered/gen3_maps.lua
+--                              instead -- FireRed's OWN Viridian Forest
+--                              remake carries a different id to Gen 1's
+--                              (it is a different cartridge's map), so
+--                              it needs its own row even though it is
+--                              "the same" forest by name.
+DayNight.CANOPY = {
+  VIRIDIAN_FOREST = true,        -- Gen 1 Kanto (native)
+  ILEX_FOREST = true,            -- Gen 2 Johto (native) -- data/gen3_maps.lua
+                                  -- has no Johto rows; this engine's own
+                                  -- Gen 2 loader supplies map.id == "ILEX_FOREST"
+                                  -- (see lib/ExpandedWildEncounters.lua's
+                                  -- g2({"ILEX_FOREST"}, ...) and the "ILEX"
+                                  -- match in lib/AmbientFlyers.lua)
+  MAP_G24_N11 = true,            -- Gen 3 Hoenn: PetalburgWoods
+                                  -- (data/gen3_maps.lua, kind="route")
+  MAP_G01_N00 = true,            -- Gen 3 Kanto (FRLG): ViridianForest
+                                  -- (data/firered/gen3_maps.lua, kind="route")
+  -- NOT added: FireRed's "SixIsland_PatternBush" (MAP_G01_N121) reuses
+  -- ViridianForest's own secondary tileset (frlg_gTileset_ViridianForest)
+  -- but it is a hedge maze, not a tree canopy -- add it here too if it
+  -- turns out to read the same in play.
+}
 
 function DayNight.isCanopy(map)
   return (map and map.id and DayNight.CANOPY[map.id]) and true or false

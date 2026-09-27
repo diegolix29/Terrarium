@@ -98,6 +98,14 @@ function ChunkMesher.clearCache()
   return false
 end
 
+function ChunkMesher.diskCacheEnabled()
+  return DiskCache ~= nil
+    and (type(DiskCache.enabled) ~= "function" or DiskCache.enabled())
+end
+
+-- GoldVoxelBridge reports this under its own name; same data as cacheStatus.
+ChunkMesher.diskCacheStatus = ChunkMesher.cacheStatus
+
 -- Ring of border blocks meshed around the body, matching the width
 -- TileRenderer draws so the two modes end at the same place.
 local RING = 3
@@ -121,6 +129,11 @@ local SIDES = {
   { 0, 1, 5 },    -- +Z south
   { 0, -1, 6 },   -- -Z north
 }
+
+local function gen3Built(run)
+  return run ~= nil and (run.gen3Bld ~= nil or run.door == true)
+end
+
 
 local function keyOf(tx, ty)
   return (ty + 64) * 4096 + (tx + 64)
@@ -412,6 +425,11 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
     local k = keyOf(tx, ty)
     local s = S.shapeAt[k]
     if not s then return false end
+    -- For Gen3, use byte-level water detection to exclude bridge reflection water
+    if S.isGen3 then
+      local okW, water = pcall(map.isWaterCell, map, math.floor(tx / 2), math.floor(ty / 2))
+      return okW and water
+    end
     return s.class == "water"
   end
 
@@ -681,7 +699,16 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
           if S.isGen3 and (run.roofRows or 0) > 0 then
             local span = math.max(mid, 0.5)
             local artRows = run.roofArtRows or run.roofRows
-            local artTop = run.roofArtTop or run.north
+            -- ...AND THE FALLBACK STEPS PAST A ROW THE BUILDING DOES NOT
+            -- DRAW.  See `Gen3.roofArtStart`: `run.north` is the top of the
+            -- blocked mass with the walkable course folded in, and Kanto's
+            -- fold is the roof's outline over grass (solid 0.50), not a
+            -- ridge.  Lavender's roofs came out patched with mint green.
+            local artTop = run.roofArtTop
+                           or (S.outdoor and gen3Built(run)
+                               and Gen3.roofArtStart(map, tx, run.north,
+                                                     run.front))
+                           or run.north
             local band = artRows * 8
             local artDepth = math.max(1, math.min(gext, artRows))
             if S.isGen3 and run.gen3RoofRows then artDepth = math.max(1, gext) end
@@ -726,9 +753,10 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             neY = math.max(run.h, hN - 8)
           end
           local u0, u1, v0, v1 = uvRect(roofTile, rv0, rv1)
+          local isWater = isWaterAt(tx, ty)
           push({ { x0, swY, z0 + 8 }, { x0 + 8, seY, z0 + 8 },
                  { x0 + 8, neY, z0 }, { x0, nwY, z0 } },
-               { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95, nil, s.class == "water")
+               { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, 0.95, nil, isWater)
 
           local function profileH(nr, d)
             local ne = nr.gableExtent or nr.extent
@@ -760,12 +788,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               push({ { fx, bS, z0 + 8 }, { fx, bN, z0 },
                      { fx, nY, z0 }, { fx, sY, z0 + 8 } },
                    { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
-                   Voxel3D.FACE_SHADE[1], nil, s.class == "water")
+                   Voxel3D.FACE_SHADE[1], nil, isWater)
             else
               push({ { fx, bN, z0 }, { fx, bS, z0 + 8 },
                      { fx, sY, z0 + 8 }, { fx, nY, z0 } },
                    { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
-                   Voxel3D.FACE_SHADE[2], nil, s.class == "water")
+                   Voxel3D.FACE_SHADE[2], nil, isWater)
             end
           end
           
@@ -802,12 +830,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               push({ { x0, bW, z0 + 8 }, { x0 + 8, bE, z0 + 8 },
                      { x0 + 8, eY, z0 + 8 }, { x0, wY, z0 + 8 } },
                    { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
-                   Voxel3D.FACE_SHADE[5], nil, s.class == "water")
+                   Voxel3D.FACE_SHADE[5], nil, isWater)
             else
               push({ { x0 + 8, bE, z0 }, { x0, bW, z0 },
                      { x0, wY, z0 }, { x0 + 8, eY, z0 } },
                    { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } },
-                   Voxel3D.FACE_SHADE[6], nil, s.class == "water")
+                   Voxel3D.FACE_SHADE[6], nil, isWater)
             end
           end
           
@@ -823,14 +851,24 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             roomTop = S.gen3RoomWallTop[(ty % 2) * 2 + (tx % 2) + 1]
           end
           local m = math.min(2, run.extent)
-          local artTop = run.north
+          local artTop = (S.isGen3 and S.outdoor and gen3Built(run)
+                          and Gen3.roofArtStart(map, tx, run.north, run.front))
+                         or run.north
           if S.isGen3 and (run.roofArtRows or 0) > 0 and run.roofArtTop
              and run.roofArtTop <= run.front then
+            -- THE BAND MAY START NORTH OF THE RUN.  Emerald draws a tall
+            -- building's top on the above-player layer so you can walk behind
+            -- it, those rows carry no run, and `roofArtTop` is where the
+            -- drawing really starts -- 309 of the 5,016 columns.  The gable
+            -- branch already trusts it for exactly this reason.
+            -- derived: 309 measured; `roofArtTop` is never SOUTH of
+            -- `run.north` on any of the 518 maps (measured: 0 cases).
             artTop = run.roofArtTop
             m = math.min(run.roofArtRows, run.front - artTop + 1)
           end
           if roomTop then
-            topQuad(x0, z0, h, roomTop, VOLUME_TOP_SHADE, s.class == "water")
+            local isWater = isWaterAt(tx, ty)
+            topQuad(x0, z0, h, roomTop, VOLUME_TOP_SHADE, isWater)
           elseif S.isGen3 and run.extent > m then
             local d = ty - run.north
             local band = m * 8
@@ -842,10 +880,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             local topTile = S.tileAt[keyOf(tx, artTop + ai)] or Gen3.tileAt(map, tx, artTop + ai)
             local tv0 = math.max(0, math.min(7.5, p0 - ai * 8))
             local tv1 = math.max(tv0 + 0.5, math.min(8, p1 - ai * 8))
-            topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, s.class == "water", nil, tv0, tv1)
+            local isWater = isWaterAt(tx, ty)
+            topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, isWater, nil, tv0, tv1)
           else
             local topTile = S.tileAt[keyOf(tx, artTop + ((ty - run.north) % m))] or Gen3.tileAt(map, tx, artTop + ((ty - run.north) % m))
-            topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, s.class == "water")
+            local isWater = isWaterAt(tx, ty)
+            topQuad(x0, z0, h, topTile, VOLUME_TOP_SHADE, isWater)
           end
         else
           local topTile = tile
@@ -864,6 +904,36 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             topTile = S.tileAt[keyOf(tx, cap.n + ci)] or topTile
             capV0 = math.max(0, math.min(7.5, cp0 - ci * 8))
             capV1 = math.max(capV0 + 0.5, math.min(8, cp1 - ci * 8))
+          elseif s.class == "waterfall" then
+            -- THE TOP OF A FALL IS THE RIVER RUNNING TO THE LIP.
+            --
+            -- A fall's drawing is its FACE -- that is the whole point of the
+            -- side arm below -- so laying the same rows flat on the cells the
+            -- fall occupies in plan drew the sheet twice: once plumb down the
+            -- drop, where it belongs, and once as a striped apron across the
+            -- five cells above it.  METEOR FALLS 1F_1R showed it as a blue
+            -- carpet banded across the head pool; ROUTE 119 as a striped
+            -- table top.
+            --
+            -- Those cells are not the sheet.  They are where the water is
+            -- before it goes over, and the cartridge says what that looks
+            -- like in the pool immediately upstream -- the same surface, at
+            -- the same height, since `g3-fall-350` hangs the fall from that
+            -- pool's own lip.  So the apron wears the river's tile and the
+            -- drawing is spent once, on the face.
+            --
+            -- Only where there IS a pool upstream: a fall with rock above it
+            -- keeps its own art rather than inventing water that is not
+            -- drawn there.
+            local n = ty
+            while ty - n < 32 do
+              local bs = S.shapeAt[keyOf(tx, n - 1)]
+              if bs and bs.class == "waterfall" then n = n - 1 else break end
+            end
+            local up = S.shapeAt[keyOf(tx, n - 1)]
+            if up and up.class == "water" then
+              topTile = S.tileAt[keyOf(tx, n - 1)] or topTile
+            end
           elseif s.art == "upright" and s.authored then
             local north, front = ty, ty
             while ty - north < 6 do
@@ -890,9 +960,11 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             end
             topTile = S.tileAt[keyOf(tx, row)]
           end
+          local isWater = isWaterAt(tx, ty)
           topQuad(x0, z0, h, topTile,
-                  s.art == "upright" and VOLUME_TOP_SHADE or 1, s.class == "water",
-                  (s.class == "water") and waterPush or nil, capV0, capV1)
+                  s.art == "upright" and VOLUME_TOP_SHADE or 1,
+                  (isWater or s.class == "waterfall"),
+                  (isWater or s.class == "waterfall") and waterPush or nil, capV0, capV1)
         end
 
         if s.class == "bridge" then
@@ -928,6 +1000,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               if y1 > y0 then
                 local src, shade = tile, Voxel3D.FACE_SHADE[d]
                 local vT, vB = nil, nil
+                local isWater = isWaterAt(tx, ty)
                 if run then
                   local bb = band - math.floor((run.base or 0) / 8)
                   if bb < 0 then bb = 0 end
@@ -958,9 +1031,193 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                     local rows = run.front - artNorth + 1
                     if rows >= 1 and faceH > rows * 8 then stretched = true end
                   end
-
-                  if run.face then
-                    local faceH = h - bottom
+                  -- THE FACADE FOLDS AT ITS DRAWN SIZE.
+                  --
+                  -- Two earlier cuts tried to keep the wall's courses off
+                  -- the roof's rows: clamping the fold drew the P.C sign
+                  -- three times, and stretching the shopfront over the wall
+                  -- drew it once at twice its height -- the stretched doors
+                  -- on every Center and house.  The Mart never had either
+                  -- problem and does neither: it folds one drawn row per 8px
+                  -- course from its front and stops at its own north edge.
+                  -- So does everything else now.
+                  -- A CLIFF FACE WEARS ITS OWN DRAWING, ONCE, TOP TO BOTTOM.
+                  --
+                  -- Structures marks a run that is a step between two stated
+                  -- levels rather than a thing standing on one (`run.face`).
+                  -- Its drawn rows ARE the drop: the row nearest the high
+                  -- ground is the crest and the row nearest the low ground
+                  -- is the foot, so they map continuously over the face
+                  -- instead of one row per 8px course.  Eight rows of rock
+                  -- over a 32px step then read as the cliff the cartridge
+                  -- draws, at whatever depth the step happens to be, with
+                  -- nothing stretched and nothing repeated.
+                  -- THE WALL'S DRAWING STOPS WHERE THE ROOF'S BEGINS.
+                  --
+                  -- MOTIVATED BY CERULEAN CITY'S TERRACE, (8..15, 9..11),
+                  -- and by every Kanto street behind it.
+                  --
+                  -- That run is six rows deep with `roofArtTop = 18` and
+                  -- `roofArtRows = 4`, so the wall is DRAWN in rows 22..23 --
+                  -- 16px of art.  The volume stands 24px of facade (`base`
+                  -- 16, `h` 40), because `GEN3_OUTDOOR_FACADE_CAP` is a FLOOR
+                  -- as well as a ceiling ("a building whose front reads as
+                  -- one row is still drawn as a house") and holds the
+                  -- measurement at 40 where the drawing would say 32.  One
+                  -- course of facade therefore has no drawn row to wear, and
+                  -- the southward fold -- `front - bb`, clamped only at the
+                  -- run's north edge -- walked past the wall into row 21, the
+                  -- roof's bottom course, and wore the eave on the wall.
+                  -- That is the striped facade under a clean roof.
+                  --
+                  -- g3-eave-330 stopped the ROOF wearing the WALL by trimming
+                  -- `roofArtRows` at the wall's first row.  This is the same
+                  -- boundary read from the other side.  Past the top of its
+                  -- own rows a facade carries on in the topmost one -- the
+                  -- plain panel the cartridge draws under the eave -- exactly
+                  -- as an indoor room's wall carries on plain above its
+                  -- drawing (`roomWall`, above).
+                  --
+                  -- The boundary is the run's OWN measurement, not a constant:
+                  -- where the roof band is not measured, or covers the front
+                  -- row too, nothing moves.  Applied to the south face and the
+                  -- two flanks, which wear the facade; the north face folds
+                  -- from the other end and is left alone.
+                  --
+                  -- MEASURED, building runs (those carrying `roofArtTop` and
+                  -- a non-zero `roofArtRows`) over every outdoor map:
+                  --   FireRed  2,743 runs, 1,710 (62.3%) fold past the wall,
+                  --            3,452 rows over -- 693 by one row, 779 by two
+                  --   Emerald  2,124 runs,   842 (39.6%), 1,986 rows over
+                  -- derived: both from a sweep of `S.runs`; no tuned number.
+                  local wallTop = artNorth
+                  if run.roofArtTop and (run.roofArtRows or 0) > 0 then
+                    local w = run.roofArtTop + run.roofArtRows
+                    if w > wallTop and w <= run.front then wallTop = w end
+                  elseif (run.gen3FlatRows or 0) > 0 then
+                    -- ...AND A FLAT ROOFTOP IS A ROOF TOO.
+                    --
+                    -- The band above is set only for a run that RISES, so a
+                    -- flat-topped building had nothing for the wall to stop
+                    -- at and the fold walked up through the wall into the
+                    -- roof.  CERULEAN CITY'S GYM, (28..37, 18..21), wore its
+                    -- own tan rooftop tiled down its front with the Pokeball
+                    -- emblem drawn three times over the GYM sign.
+                    --
+                    -- `gen3FlatRows` is the depth Structures measured off the
+                    -- vote's own evidence at the moment it flattened the run,
+                    -- so this is the same sentence as the branch above --
+                    -- "the wall's drawing stops where the roof's begins" --
+                    -- for the other kind of roof.
+                    local w = artNorth + run.gen3FlatRows
+                    if w > wallTop and w <= run.front then wallTop = w end
+                  end
+                  -- ...AND WHAT IT REPEATS PAST THE TOP IS A PANEL, NOT A
+                  -- SIGN.
+                  --
+                  -- MOTIVATED BY CERULEAN CITY'S GYM, (28..37, 18..21).  Its
+                  -- wall band is one cell deep and its facade stands eight
+                  -- courses, so four of them are past the drawing and the
+                  -- fold clamps -- "past the top of its own rows a facade
+                  -- carries on in the topmost one -- the plain panel the
+                  -- cartridge draws under the eave", as the note above says.
+                  -- On the DOOR column that topmost row is not a plain
+                  -- panel: it is the Pokeball plate over the entrance, and
+                  -- the gym wore five of them stacked up its front.
+                  --
+                  -- A hanging feature -- a sign, an emblem, an awning -- is
+                  -- drawn on the ABOVE-PLAYER layer, because it overhangs;
+                  -- the plain panel beside it is not.  MEASURED on the gym's
+                  -- own wall row, (29..34, 20): `337, 338, 339, 340, 341,
+                  -- 342`, and only `339`, the plate, reads `overhead`.
+                  --
+                  -- So a clamped course takes the nearest column of the SAME
+                  -- BUILDING whose cell on that row is a panel.  The courses
+                  -- that legitimately LAND on the feature's row still wear
+                  -- it, so the plate is drawn once, where the cartridge puts
+                  -- it.  MEASURED over every outdoor map, building runs
+                  -- whose facade clamps at all:
+                  --
+                  --   FireRed  825 runs on 38 maps, 170 (20.6%) clamp on a
+                  --            feature -- Fuchsia 31, Saffron 23, Celadon 14
+                  --   Emerald  429 runs on 15 maps, 105 (24.5%) -- Dewford
+                  --            28, the Battle Frontier 36, Oldale 14
+                  --
+                  -- derived: swept with `S.runs`; no tuned number. The reach
+                  -- sideways is bounded by the building itself (`gen3Bld`),
+                  -- not by a distance.
+                  local clampTile = nil
+                  if S.isGen3 and S.outdoor and run.front
+                     and (run.gen3Bld ~= nil or run.door == true)
+                     and wallTop <= run.front then
+                    local okA, g3a = pcall(Gen3.analyse, map.tileset)
+                    local gs = okA and g3a and g3a.stats or nil
+                    local wy = math.floor(wallTop / 2)
+                    local function statAt(x)
+                      local mm = gs and Gen3.metatileNumAt(map, math.floor(x / 2), wy)
+                      return mm and gs[mm] or nil
+                    end
+                    local own = statAt(tx)
+                    if own and own.overhead == true then
+                      for step = 2, 16, 2 do
+                        for _, dx in ipairs({ -step, step }) do
+                          local nx = tx + dx
+                          local nr = S.runs[keyOf(nx, wallTop)]
+                          if nr and nr.gen3Bld ~= nil
+                             and nr.gen3Bld == run.gen3Bld then
+                            local st2 = statAt(nx)
+                            if st2 and st2.overhead ~= true
+                               and (st2.solid or 0) >= 0.75 then
+                              clampTile = S.tileAt[keyOf(nx, wallTop)]
+                                          or Gen3.tileAt(map, nx, wallTop)
+                              break
+                            end
+                          end
+                        end
+                        if clampTile then break end
+                      end
+                    end
+                  end
+                  -- ...AND A BUILDING'S BACK IS A WALL, NOT A ROOF.
+                  --
+                  -- The north face folds from the drawing's NORTH end and
+                  -- walks south as it rises (`artNorth + bb`).  That is a
+                  -- CLIFF rule and right for one: a headland's north side
+                  -- sees the north end of the rock drawn on it.  On a
+                  -- building it hands the back wall the roof: Cerulean's
+                  -- terrace stands `artNorth = 18` with the roof drawn in
+                  -- rows 18..21, its facade is three courses, so the north
+                  -- face wears rows 18, 19 and 20 -- shingles from eave to
+                  -- pavement, with the wall band never shown.  Seen from the
+                  -- north every house in the town is a slab of roof.
+                  --
+                  -- A building has one drawing and it is its FACADE, which
+                  -- is why the flanks already wear the south face's stack
+                  -- darkened rather than a jumble of their own.  The back is
+                  -- the fourth side of the same box, so it wears the same
+                  -- stack -- only the south stays at full brightness.
+                  -- TERRAIN KEEPS THE NORTH-FIRST FOLD, and the gate is the
+                  -- CARTRIDGE'S OWN evidence of a building rather than the
+                  -- art's.  A measured roof band alone is not that: the sea
+                  -- routes' rocks carry one.  MEASURED, runs with a roof
+                  -- band: Route129 24, Route130 46, SouthernIsland 16 and
+                  -- OneIsland_TreasureBeach 28 -- every one of them with no
+                  -- `gen3BldRows`, no door and no pitch, because the roof
+                  -- band there is the above-player layer lying over a rock
+                  -- in the water.  `gen3BldRows` is the row span of a
+                  -- building A WARP NAMED (`bldRows[e.bld]`), and `door` is
+                  -- the doorstep, so the two together are the same evidence
+                  -- `ctx.buildings` founds a building on.  A house the warps
+                  -- do not name keeps the old back -- 10 of Cerulean's 102
+                  -- runs, 6 of Saffron's 316 -- which is the conservative
+                  -- side of the line.
+                  local facadeAllSides =
+                    (run.roofArtTop ~= nil and (run.roofArtRows or 0) > 0)
+                    and (run.gen3BldRows ~= nil or run.door == true)
+                  if run.gen3WallArtFront then
+                    src = foldTile(math.max(artNorth, run.gen3WallArtFront - bb))
+                  elseif run.face then
+                    local faceH = h - bottom                    
                     local rows = run.face.rows or 1
                     local idx = 0
                     if faceH > 0 and rows > 0 then
@@ -986,7 +1243,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                     else
                       src = foldTile(run.front - idx)
                     end
-                  elseif d == 6 then
+                  elseif d == 6 and not facadeAllSides then
                     if period then
                       src = foldTile(artNorth + (bb % period))
                     elseif roomWall and artNorth + bb > run.front then
@@ -999,11 +1256,78 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                       src = foldTile(run.front - (bb % period))
                     elseif roomWall and run.front - bb < artNorth then
                       src = roomWall[((run.front - bb) % 2) * 2 + (tx % 2) + 1] or src
+                    elseif clampTile and run.front - bb < wallTop then
+                      src = clampTile
                     else
-                      src = foldTile(math.max(artNorth, run.front - bb))
+                      src = foldTile(math.max(wallTop, run.front - bb))
                     end
                   end
                   if d == 5 then shade = 1 end
+                elseif s.class == "waterfall" then
+                  -- A FALL'S DRAWING IS THE WHOLE DROP, ONCE, TOP TO BOTTOM.
+                  --
+                  -- MOTIVATED BY METEOR FALLS 1F_1R, (8..15, 10..14), and
+                  -- ROUTE 119, (17..19, 25..28).  Since `g3-fall-350` a fall
+                  -- hangs from its lip and the whole drop is ONE vertical
+                  -- face at its foot, so that face has to wear the fall's
+                  -- whole picture: crest foam at the top, the body of the
+                  -- sheet down the middle, splash at the bottom.
+                  --
+                  -- It was wearing three courses of ONE mid-sheet row instead.
+                  -- A fall has no run -- `setBody` clears it -- so it fell to
+                  -- the profile-authored `upright` arm below, which scans at
+                  -- most SIX tile rows and maps them over the cell's height
+                  -- from the datum rather than over the exposed face.  At
+                  -- Meteor Falls that took rows 24..29 of a ten-row drawing
+                  -- and sampled 185/0, 185/1, 185/0 down a 16px drop: the
+                  -- same band of water three times, which is the smear this
+                  -- file already names on stacked cliff edges.
+                  --
+                  -- The fall's own rows are its contiguous `waterfall` cells.
+                  -- Index 0 is the SOUTHMOST -- the row the cartridge draws
+                  -- at the bottom of the sheet -- so the mapping is measured
+                  -- downward from `h` and the crest row lands at the top of
+                  -- the face.  Where the face is exactly as tall as the
+                  -- drawing the slices land on row boundaries and this is one
+                  -- drawn row per course exactly.
+                  --
+                  -- All four sides, like every other fold here: the flanks
+                  -- wear the same stack darkened, which is what keeps a
+                  -- fall's edge against the gorge wall from smearing a
+                  -- different row per course.
+                  if d == 5 then shade = 1 end
+                  isWater = true
+                  local front = ty
+                  while front < ty + 32 do
+                    local fs2 = S.shapeAt[keyOf(tx, front + 1)]
+                    if fs2 and fs2.class == "waterfall" then
+                      front = front + 1
+                    else
+                      break
+                    end
+                  end
+                  local rows = 0
+                  while rows < 32 do
+                    local rs = S.shapeAt[keyOf(tx, front - rows)]
+                    if rs and rs.class == "waterfall" then
+                      rows = rows + 1
+                    else
+                      break
+                    end
+                  end
+                  local faceH = h - bottom
+                  if rows > 0 and faceH > 0 then
+                    local artH = rows * 8
+                    local p0 = ((h - y1) / faceH) * artH
+                    local p1 = ((h - y0) / faceH) * artH
+                    local ri = math.floor(((p0 + p1) / 2) / 8)
+                    if ri < 0 then ri = 0 end
+                    if ri > rows - 1 then ri = rows - 1 end
+                    local sk = keyOf(tx, front - rows + 1 + ri)
+                    src = S.tileAt[sk] or src
+                    vT = math.max(0, math.min(7.5, p0 - ri * 8))
+                    vB = math.max(vT + 0.5, math.min(8, p1 - ri * 8))
+                  end
                 elseif s.art == "upright" then
                   if d == 5 then shade = 1 end
                   local front = ty
@@ -1025,7 +1349,46 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                       break
                     end
                   end
-                  if S.isGen3 and rows > 0 and h > 0 then
+                  -- ...AND ROCK TILES HERE TOO.
+                  --
+                  -- The run path above already draws this line -- "Terrain
+                  -- wraps instead... a tall cliff reads as courses of the
+                  -- rock it is drawn from rather than as a smear" -- and it
+                  -- was never drawn on THIS path, the fallback for a cell
+                  -- that carries no run.  REPORTED from play at Meteor Falls
+                  -- once its cliffs got their real height: "some textures
+                  -- aren't correct".  MEASURED at (29, 18..24), the map's
+                  -- own outer wall: sixteen cells of metatile 572 standing
+                  -- 160 units tall with no run on any of them, so each 8px
+                  -- course was handed (8/160) x 48 = 2.4px of art blown up
+                  -- to fill it -- one pale sliver magnified three and a
+                  -- third times, the length of the map.
+                  --
+                  -- The run path tiles only where the art PROVES it repeats,
+                  -- and the same proof is available here: look for the
+                  -- smallest period the sampled rows actually satisfy.  Rock
+                  -- drawn from one metatile repeats at two tile rows and is
+                  -- found at once; a facade with a window in it has no
+                  -- period, finds none, and keeps the spread -- which is the
+                  -- rule this arm was written for and still the right one
+                  -- for a piece of furniture that is its picture once.
+                  local period = nil
+                  if S.isGen3 and rows >= 2 and h > rows * 8 then
+                    for pp = 1, math.floor(rows / 2) do
+                      local same = true
+                      for r = 0, rows - 1 - pp do
+                        if S.tileAt[keyOf(tx, front - r)]
+                           ~= S.tileAt[keyOf(tx, front - r - pp)] then
+                          same = false
+                          break
+                        end
+                      end
+                      if same then period = pp break end
+                    end
+                  end
+                  if period then
+                    src = S.tileAt[keyOf(tx, front - (band % period))] or src
+                  elseif S.isGen3 and rows > 0 and h > 0 then
                     local artH = rows * 8
                     local p0 = (y0 / h) * artH
                     local p1 = (y1 / h) * artH
@@ -1056,7 +1419,8 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                 sideQuad(d, x0, z0, y0, y1, src,
                          vT or ((band * 8 + 8) - y1),
                          vB or ((band * 8 + 8) - y0),
-                         sideShades(hl, hr, y0, y1, y0 <= nh, shade), s.class == "water")
+                         sideShades(hl, hr, y0, y1, y0 <= nh, shade),
+                         isWater or isWaterAt(tx, ty))
               end
             end
           end
@@ -1225,16 +1589,55 @@ local function quadsMesh(quads)
   return Voxel3D.newMesh(verts, indices)
 end
 
+-- Group grass instances by their tile's real ground height (Grass3D.
+-- instanceForTile's `gz`, rounded to the nearest world pixel -- the source
+-- heights are whole numbers almost everywhere, and a bucket a pixel either
+-- way is invisible next to the meadow's own wind sway) so a route with
+-- several terrace levels under its tall grass gets one small mesh PER
+-- level rather than one mesh for the whole map stamped flat at y=0.
+--
+-- Each tuft's own geometry is built exactly as it always was -- local,
+-- planted at its own root -- only WHICH bucket it lands in changes, and the
+-- bucket's height is applied afterward as a plain translate when the mesh
+-- is drawn (see VoxelScene/BattleScene). That keeps the wind shader's own
+-- assumption intact: it reads a stamped vertex's raw Y as "how far up
+-- THIS tuft" it is, not as a world height, so the fix has to live outside
+-- the vertex data rather than inside it.
+local function bucketByHeight(instances)
+  local order, buckets = {}, {}
+  for i = 1, #instances do
+    local inst = instances[i]
+    local y = math.floor((inst.gz or 0) + 0.5)
+    local bucket = buckets[y]
+    if not bucket then
+      bucket = {}
+      buckets[y] = bucket
+      order[#order + 1] = y
+    end
+    bucket[#bucket + 1] = inst
+  end
+  return order, buckets
+end
+
+-- Returns a LIST of `{ mesh, y }` (parallel to buildFigureMeshes below)
+-- rather than one mesh -- see bucketByHeight above for why.
 local function buildGrassMesh(map)
   local S = Structures.forMap(map)
+  local out = {}
   if S.grassInstances and #S.grassInstances > 0 then
     local ok, G = pcall(V.require, "Grass3D")
     if ok and G and G.meshFromInstances then
-      local mesh = G.meshFromInstances(S.grassInstances)
-      if mesh then return mesh end
+      local order, buckets = bucketByHeight(S.grassInstances)
+      for _, y in ipairs(order) do
+        local mesh = G.meshFromInstances(buckets[y])
+        if mesh then out[#out + 1] = { mesh = mesh, y = y } end
+      end
+      if #out > 0 then return out end
     end
   end
-  return quadsMesh(S.grassQuads)
+  local mesh = quadsMesh(S.grassQuads)
+  if mesh then out[#out + 1] = { mesh = mesh, y = 0 } end
+  return out
 end
 
 local function buildDecorMesh(map)
@@ -1305,6 +1708,45 @@ local function swapSlot(c, slot, mesh)
   c[slot] = mesh
 end
 
+-- `c.grass` is a LIST of `{ mesh, y }` buckets (buildGrassMesh above), not
+-- one mesh, so it needs its own release/swap pair rather than swapSlot's
+-- single-object one -- the same reason figures got releaseFigures instead
+-- of swapSlot.
+local function releaseGrass(list)
+  for _, b in ipairs(type(list) == "table" and list or {}) do
+    if b.mesh and b.mesh.release then pcall(b.mesh.release, b.mesh) end
+  end
+end
+
+local function swapGrassSlot(c, list)
+  local old = c.grass
+  if old and old ~= list then releaseGrass(old) end
+  c.grass = list
+end
+
+-- A disk-cache hit hands back one flat terrain mesh and (maybe) one flat
+-- water mesh -- not the chunked Group runGeometry's live path produces. Wrap
+-- them as a one-or-two-chunk Group so Voxel3D.drawGroup/ShadowMap can draw a
+-- cache-loaded slot exactly like a freshly built one. The chunk boxes are
+-- left unbounded (drawGroup's box test always passes) rather than guessed at
+-- from map dimensions: this file's own rule is "over-drawing is slow, and
+-- under-drawing is a hole in the world", and a wrong guess here would be the
+-- second kind. A live-built slot still gets its normal per-chunk culling --
+-- only cache-loaded slots skip it.
+local function wrapCachedMesh(terrainMesh, waterMesh)
+  local chunks = {}
+  if terrainMesh then
+    chunks[#chunks + 1] = { mesh = terrainMesh,
+      x0 = -math.huge, z0 = -math.huge, x1 = math.huge, z1 = math.huge, ymax = 0 }
+  end
+  if waterMesh then
+    chunks[#chunks + 1] = { mesh = waterMesh,
+      x0 = -math.huge, z0 = -math.huge, x1 = math.huge, z1 = math.huge, ymax = 0 }
+  end
+  if #chunks == 0 then return nil end
+  return setmetatable({ chunks = chunks }, Group)
+end
+
 -- ------------------------------------------------------------- the cache
 
 local function entry(id)
@@ -1317,11 +1759,13 @@ local function entry(id)
 end
 
 local function releaseEntry(c)
-  for _, slot in ipairs({ "full", "body", "grass", "flowers", "custom", "road", "ground", "decor" }) do
+  for _, slot in ipairs({ "full", "body", "flowers", "custom", "road", "ground", "decor" }) do
     local mesh = c[slot]
     if mesh and mesh.release then pcall(mesh.release, mesh) end
     c[slot] = nil
   end
+  releaseGrass(c.grass)
+  c.grass = nil
   releaseFigures(c.figures)
   c.figures = nil
   c.stale = nil
@@ -1331,6 +1775,13 @@ end
 
 local jobs = {}       -- FIFO of pending jobs
 local jobIndex = {}   -- "id:slot" -> job
+
+-- Cache-only "warm" jobs (see warmDisk below): background disk-cache writes
+-- for maps nobody is looking at yet. Kept off the real `jobs` queue on
+-- purpose -- a warm job must never win the urgent pick or delay a mesh the
+-- player is actually waiting on -- and drained only once `jobs` is empty.
+local warmJobs = {}    -- FIFO of pending warm jobs
+local warmIndex = {}   -- "id:slot" -> warm job, for de-duplication
 
 local clock = (love and love.timer and love.timer.getTime) or os.clock
 
@@ -1376,7 +1827,7 @@ local function runJob(job)
     local okGnd, ground = pcall(buildGroundMesh, map)
     local okD, decor = pcall(buildDecorMesh, map)
     if (gen[job.id] or 0) ~= job.gen then
-      if okG and grass and grass.release then pcall(grass.release, grass) end
+      if okG and grass then releaseGrass(grass) end
       if okF and flowers and flowers.release then pcall(flowers.release, flowers) end
       if okX then releaseFigures(figures) end
       if okC and custom and custom.release then pcall(custom.release, custom) end
@@ -1385,7 +1836,7 @@ local function runJob(job)
       if okD and decor and decor.release then pcall(decor.release, decor) end
       return
     end
-    swapSlot(c, "grass", (okG and grass) or false)
+    swapGrassSlot(c, (okG and grass) or false)
     swapSlot(c, "flowers", (okF and flowers) or false)
     swapSlot(c, "figures", (okX and figures) or false)
     swapSlot(c, "custom", (okC and custom) or false)
@@ -1396,10 +1847,30 @@ local function runJob(job)
     c.figures = (okX and figures) or false
     if c.stale then c.stale.aux = nil end
   end
+  -- v0.3.60: this used to test an upvalue named `cachedTerrain` that nothing
+  -- ever set, so it was always nil and the persistent disk cache -- despite
+  -- being fully written by VoxelPrebake/warmDisk -- was never read back on
+  -- the live path; every arrival re-ran Structures + runGeometry from
+  -- scratch. Actually ask VoxelDiskCache first.
+  local cachedTerrain, cachedWater
+  if DiskCache and (type(DiskCache.enabled) ~= "function" or DiskCache.enabled()) then
+    local okLoad, hit, terrainMesh, waterMesh =
+      pcall(DiskCache.load, map, job.slot, job.masks)
+    if okLoad and hit then
+      cachedTerrain, cachedWater = terrainMesh, waterMesh
+    end
+  end
   if cachedTerrain == nil then
     local sink = newChunkedSink()
     runGeometry(map, job.slot == "body", job.masks, sink)
     local mesh = sink.finish()
+    if (gen[job.id] or 0) ~= job.gen then
+      if mesh and mesh.release then pcall(mesh.release, mesh) end
+      return
+    end
+    swapSlot(c, job.slot, mesh or false)
+  else
+    local mesh = wrapCachedMesh(cachedTerrain, cachedWater)
     if (gen[job.id] or 0) ~= job.gen then
       if mesh and mesh.release then pcall(mesh.release, mesh) end
       return
@@ -1436,6 +1907,18 @@ function ChunkMesher.pending()
   return #jobs
 end
 
+-- Has `map`'s slot already finished building (whether it came out as a real
+-- mesh or legitimately empty)? Read-only twin of the check `request` itself
+-- uses to decide whether to return early -- used by WarpPrefetch to poll a
+-- warm-up request without re-triggering or promoting it.
+function ChunkMesher.ready(map, bodyOnly)
+  if not (map and map.id) then return false end
+  local slot = bodyOnly and "body" or "full"
+  local c = cache[map.id]
+  local stale = c and c.stale and (c.stale[slot] or c.stale.aux)
+  return c ~= nil and c[slot] ~= nil and not stale
+end
+
 local URGENT_SLICE = 0.012
 local IDLE_SLICE = 0.005
 local COVERED_SLICE = 0.030
@@ -1470,6 +1953,102 @@ end
 
 function ChunkMesher.lastSlice() return lastSpend end
 
+-- Cache-only work gets a bigger slice than a real render job's idle share --
+-- it never touches the GPU or blocks anything visible, so desktop can let it
+-- run long; mobile stays conservative since the same core is doing everything
+-- else too.
+local WARM_SLICE_MOBILE = 0.004
+local WARM_SLICE_DESKTOP = 0.010
+
+local function warmSlice()
+  local osName = love and love.system and love.system.getOS
+    and love.system.getOS() or ""
+  if osName == "Android" or osName == "iOS" then return WARM_SLICE_MOBILE end
+  return WARM_SLICE_DESKTOP
+end
+
+-- Drain warm jobs until `deadline` or the queue empties. Each job just bakes
+-- straight to VoxelDiskCache -- see ChunkMesher.bake -- so a finished one
+-- leaves nothing in GPU memory and nothing in the live mesh cache to release.
+local function pumpWarmJobs(deadline)
+  while #warmJobs > 0 and clock() < deadline do
+    local job = warmJobs[1]
+    if not job.co then
+      job.co = coroutine.create(function()
+        return ChunkMesher.bake(job.map, job.slot, job.masks)
+      end)
+    end
+    Budget.begin(job.co, deadline - clock())
+    local ok = coroutine.resume(job.co)
+    Budget.finish()
+    if not ok or coroutine.status(job.co) == "dead" then
+      table.remove(warmJobs, 1)
+      warmIndex[jobKey(job.id, job.slot)] = nil
+    else
+      return -- slice spent mid-bake; resume next frame
+    end
+  end
+end
+
+-- Queue a low-priority disk-cache write for a map nobody is rendering yet.
+-- Returns (true, state) where state is "live" (already in the GPU-side mesh
+-- cache, nothing to do), "hit" (already on disk), or "queued" (a warm job was
+-- added, or one was already running for this map/slot); returns false when
+-- there is no disk cache to warm. `region` is an arbitrary tag the caller can
+-- later pass to warmPending/cancelWarmRegion to track or drop its own batch
+-- without touching anyone else's.
+function ChunkMesher.warmDisk(map, bodyOnly, masks, region)
+  if not (DiskCache and map and map.id) then return false end
+  if type(DiskCache.enabled) == "function" and not DiskCache.enabled() then
+    return false
+  end
+  local slot = bodyOnly and "body" or "full"
+  local c = cache[map.id]
+  if c and c[slot] ~= nil and c[slot] ~= false
+     and not (c.stale and (c.stale[slot] or c.stale.aux)) then
+    return true, "live"
+  end
+  local key = jobKey(map.id, slot)
+  if jobIndex[key] or warmIndex[key] then
+    return true, "queued"
+  end
+  if type(DiskCache.has) == "function" then
+    local okHas, hit = pcall(DiskCache.has, map, slot, masks)
+    if okHas and hit then return true, "hit" end
+  end
+  local job = { id = map.id, map = map, slot = slot, masks = masks,
+                region = region, co = nil }
+  warmIndex[key] = job
+  warmJobs[#warmJobs + 1] = job
+  return true, "queued"
+end
+
+-- Warm jobs currently queued, optionally narrowed to one region tag.
+function ChunkMesher.warmPending(region)
+  if region == nil then return #warmJobs end
+  local n = 0
+  for _, j in ipairs(warmJobs) do
+    if j.region == region then n = n + 1 end
+  end
+  return n
+end
+
+-- Drop every queued warm job tagged with `region` (a running one finishes its
+-- current slice but is not resumed). Used when a region's render data is
+-- unloaded, so cache warming does not keep working for a place nobody can see.
+function ChunkMesher.cancelWarmRegion(region)
+  local kept = {}
+  for _, j in ipairs(warmJobs) do
+    if j.region == region then
+      warmIndex[jobKey(j.id, j.slot)] = nil
+    else
+      kept[#kept + 1] = j
+    end
+  end
+  warmJobs = kept
+  return true
+end
+
 function ChunkMesher.pump(covered)
   local seamDirty = Structures.gen3SeamDirty
   if seamDirty then
@@ -1482,8 +2061,12 @@ function ChunkMesher.pump(covered)
       for _, id in ipairs(due) do ChunkMesher.refresh(id) end
     end
   end
-  
-  if #jobs == 0 then lastSpend = 0 return end
+
+  if #jobs == 0 then
+    lastSpend = 0
+    if #warmJobs > 0 then pumpWarmJobs(clock() + warmSlice()) end
+    return
+  end
   local pick = jobs[1]
   for _, j in ipairs(jobs) do
     if j.urgent then
@@ -1539,7 +2122,7 @@ function ChunkMesher.get(map, bodyOnly, masks)
     local okR, road = pcall(buildRoadMesh, map)
     local okGnd, ground = pcall(buildGroundMesh, map)
     local okD, decor = pcall(buildDecorMesh, map)
-    swapSlot(c, "grass", (okG and grass) or false)
+    swapGrassSlot(c, (okG and grass) or false)
     swapSlot(c, "flowers", (okF and flowers) or false)
     swapSlot(c, "custom", (okC and custom) or false)
     swapSlot(c, "road", (okR and road) or false)
@@ -1573,6 +2156,8 @@ function ChunkMesher.peek(map, bodyOnly)
   return mesh or nil
 end
 
+-- A LIST of `{ mesh, y }` height buckets (see buildGrassMesh), not a single
+-- mesh -- draw each one translated up by its own `y`.
 function ChunkMesher.grass(map)
   local c = cache[map.id]
   return c and c.grass or nil

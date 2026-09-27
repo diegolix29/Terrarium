@@ -370,6 +370,245 @@ local COLOSSEUM_ICON_FRAMES = {
   [149]=1,
   [150]=1,
   [151]=1,
+
+  -- Gen 2 (152-251)
+  [152]=1,
+  [153]=1,
+  [154]=1,
+  [155]=1,
+  [156]=1,
+  [157]=1,
+  [158]=1,
+  [159]=1,
+  [160]=1,
+  [161]=1,
+  [162]=1,
+  [163]=1,
+  [164]=1,
+  [165]=1,
+  [166]=1,
+  [167]=1,
+  [168]=1,
+  [169]=1,
+  [170]=1,
+  [171]=1,
+  [172]=1,
+  [173]=1,
+  [174]=1,
+  [175]=1,
+  [176]=1,
+  [177]=1,
+  [178]=1,
+  [179]=1,
+  [180]=1,
+  [181]=1,
+  [182]=1,
+  [183]=1,
+  [184]=1,
+  [185]=1,
+  [186]=1,
+  [187]=1,
+  [188]=1,
+  [189]=1,
+  [190]=1,
+  [191]=1,
+  [192]=1,
+  [193]=1,
+  [194]=1,
+  [195]=1,
+  [196]=1,
+  [197]=1,
+  [198]=1,
+  [199]=1,
+  [200]=1,
+  [201]=1,
+  [202]=1,
+  [203]=1,
+  [204]=1,
+  [205]=1,
+  [206]=1,
+  [207]=1,
+  [208]=1,
+  [209]=1,
+  [210]=1,
+  [211]=1,
+  [212]=1,
+  [213]=1,
+  [214]=1,
+  [215]=1,
+  [216]=1,
+  [217]=1,
+  [218]=1,
+  [219]=1,
+  [220]=1,
+  [221]=1,
+  [222]=1,
+  [223]=1,
+  [224]=1,
+  [225]=1,
+  [226]=1,
+  [227]=1,
+  [228]=1,
+  [229]=1,
+  [230]=1,
+  [231]=1,
+  [232]=1,
+  [233]=1,
+  [234]=1,
+  [235]=1,
+  [236]=1,
+  [237]=1,
+  [238]=1,
+  [239]=1,
+  [240]=1,
+  [241]=1,
+  [242]=1,
+  [243]=1,
+  [244]=1,
+  [245]=1,
+  [246]=1,
+  [247]=1,
+  [248]=1,
+  [249]=1,
+  [250]=1,
+  [251]=1,
+
+  -- Gen 3 (252-386)
+  [252]=1,
+  [253]=1,
+  [254]=1,
+  [255]=1,
+  [256]=1,
+  [257]=1,
+  [258]=1,
+  [259]=1,
+  [260]=1,
+  [261]=1,
+  [262]=1,
+  [263]=1,
+  [264]=1,
+  [265]=1,
+  [266]=1,
+  [267]=1,
+  [268]=1,
+  [269]=1,
+  [270]=1,
+  [271]=1,
+  [272]=1,
+  [273]=1,
+  [274]=1,
+  [275]=1,
+  [276]=1,
+  [277]=1,
+  [278]=1,
+  [279]=1,
+  [280]=1,
+  [281]=1,
+  [282]=1,
+  [283]=1,
+  [284]=1,
+  [285]=1,
+  [286]=1,
+  [287]=1,
+  [288]=1,
+  [289]=1,
+  [290]=1,
+  [291]=1,
+  [292]=1,
+  [293]=1,
+  [294]=1,
+  [295]=1,
+  [296]=1,
+  [297]=1,
+  [298]=1,
+  [299]=1,
+  [300]=1,
+  [301]=1,
+  [302]=1,
+  [303]=1,
+  [304]=1,
+  [305]=1,
+  [306]=1,
+  [307]=1,
+  [308]=1,
+  [309]=1,
+  [310]=1,
+  [311]=1,
+  [312]=1,
+  [313]=1,
+  [314]=1,
+  [315]=1,
+  [316]=1,
+  [317]=1,
+  [318]=1,
+  [319]=1,
+  [320]=1,
+  [321]=1,
+  [322]=1,
+  [323]=1,
+  [324]=1,
+  [325]=1,
+  [326]=1,
+  [327]=1,
+  [328]=1,
+  [329]=1,
+  [330]=1,
+  [331]=1,
+  [332]=1,
+  [333]=1,
+  [334]=1,
+  [335]=1,
+  [336]=1,
+  [337]=1,
+  [338]=1,
+  [339]=1,
+  [340]=1,
+  [341]=1,
+  [342]=1,
+  [343]=1,
+  [344]=1,
+  [345]=1,
+  [346]=1,
+  [347]=1,
+  [348]=1,
+  [349]=1,
+  [350]=1,
+  [351]=1,
+  [352]=1,
+  [353]=1,
+  [354]=1,
+  [355]=1,
+  [356]=1,
+  [357]=1,
+  [358]=1,
+  [359]=1,
+  [360]=1,
+  [361]=1,
+  [362]=1,
+  [363]=1,
+  [364]=1,
+  [365]=1,
+  [366]=1,
+  [367]=1,
+  [368]=1,
+  [369]=1,
+  [370]=1,
+  [371]=1,
+  [372]=1,
+  [373]=1,
+  [374]=1,
+  [375]=1,
+  [376]=1,
+  [377]=1,
+  [378]=1,
+  [379]=1,
+  [380]=1,
+  [381]=1,
+  [382]=1,
+  [383]=1,
+  [384]=1,
+  [385]=1,
+  [386]=1,
 }
 
 -- Corrected official Colosseum portraits for fossil entries that were
@@ -382,28 +621,73 @@ local COLOSSEUM_ICON_CORRECTIONS = {
     shiny="assets/portrait_corrections/141_shiny.png"},
 }
 
+-- Portrait identity (National Dex -> poke_face.fsys face id) lives in
+-- lib/ColosseumPortraitIndex + lib/ColosseumPortraitCatalog. Kanto/Johto faces
+-- equal the National Dex, but Hoenn faces do NOT (109 of 135 Gen III species
+-- differ, e.g. Taillow #276 is face 279). The catalog was never loaded by
+-- main.lua, so it is self-loaded here from the mod's own lib.
+local portraitCatalog=nil      -- nil = not tried yet, false = unavailable
+local portraitCatalogWarned=false
+
+local function colosseumPortraitCatalog()
+  if portraitCatalog~=nil then return portraitCatalog or nil end
+  local exp=modRef and modRef.exports
+  local ready=exp and exp.colosseumPortraits
+  if type(ready)=="table" and ready.assetPath and ready.dexForMon then
+    portraitCatalog=ready
+    return ready
+  end
+  local lib=exp and exp.lib
+  if not (lib and type(lib.require)=="function"
+      and modRef and type(modRef.read)=="function") then
+    return nil -- lib not exported yet; retry next draw instead of caching a miss
+  end
+  local okI,Index=pcall(lib.require,"ColosseumPortraitIndex")
+  local okN,Names=pcall(lib.require,"ColosseumDexNames")
+  local src=modRef:read("lib/ColosseumPortraitCatalog.lua")
+  local chunk=okI and okN and src and load(src,"@ColosseumPortraitCatalog.lua")
+  local okC,Cat=false,nil
+  if chunk then okC,Cat=pcall(chunk,{names=Names,portraitIndex=Index}) end
+  if okC and type(Cat)=="table" and Cat.assetPath and Cat.dexForMon then
+    portraitCatalog=Cat
+  else
+    portraitCatalog=false
+    if not portraitCatalogWarned and modRef.log and modRef.log.warn then
+      portraitCatalogWarned=true
+      pcall(modRef.log.warn,modRef.log,
+        "UIMain: Colosseum portrait catalog unavailable; Gen III icons may mismatch")
+    end
+  end
+  return portraitCatalog or nil
+end
+
 local function colosseumIconFrame(game,mon)
+  local cat=colosseumPortraitCatalog()
   local dex=nil
-  if game and game.data and game.data.pokemon and mon and mon.species then
+  if cat then
+    -- Species name wins over any legacy numeric field (see catalog notes).
+    dex=cat.dexForMon(game,mon)
+  end
+  if not dex and game and game.data and game.data.pokemon and mon and mon.species then
     local def=game.data.pokemon[mon.species]
     dex=def and tonumber(def.dex) or nil
   end
   if not dex or dex<1 or dex>386 then return nil end
 
-  -- Every species in the base Gen 1, Gen 2, and Gen 3 Pokédex now has at least one
-  -- authentic Colosseum frame. Preserve the extra animated Kanto frames where
-  -- supplied, and use frame one for the complete #001-#386 baseline.
-  local count=COLOSSEUM_ICON_FRAMES[dex] or 1
+  local count
+  if cat then
+    count=cat.frameCount(dex)          -- 0 when no face exists
+  else
+    count=COLOSSEUM_ICON_FRAMES[dex] or 1
+  end
   if count<=0 then
-    -- This exact species is absent from the supplied Colosseum icon sheet.
-    -- Never substitute another Pokemon: use the engine's correct sprite fallback.
+    -- Never substitute another Pokemon: use the engine's sprite fallback.
     return nil
   end
 
   local shiny=GoldCompat.monIsShiny(mon)
-  -- Alternate sheet frames often change facing rather than pose. Keep every
-  -- species stable across battle, Party, and PC -- except Gloom (#044), whose
-  -- harmless little side-to-side gag is intentionally retained.
+  -- Alternate frames mostly change facing, so keep every species on frame 1
+  -- except Gloom (#044), whose little side-to-side gag is intentionally kept.
   local now=love.timer and love.timer.getTime and love.timer.getTime() or 0
   local frame=(dex==44 and count>1) and ((math.floor(now/0.34)%count)+1) or 1
   local key=("%d:%d:%d"):format(dex,frame,shiny and 1 or 0)
@@ -417,7 +701,11 @@ local function colosseumIconFrame(game,mon)
 
   local corrected=COLOSSEUM_ICON_CORRECTIONS[dex]
   local correction=corrected and (shiny and corrected.shiny or corrected.normal)
-  local relative=correction or ("assets/portraits/%03d_%d%s.png"):format(
+  local relative=correction
+  if not relative and cat then
+    relative=cat.assetPath(dex,frame,shiny) -- uses the FACE id, not the dex
+  end
+  relative=relative or ("assets/portraits/%03d_%d%s.png"):format(
     dex,frame,shiny and "_shiny" or ""
   )
   -- Launcher mod API v2 sandboxes love.filesystem. Load packaged artwork
@@ -438,7 +726,6 @@ local function colosseumIconFrame(game,mon)
   if State.visualCache then State.visualCache.registerPortrait(img,relative) end
   return img
 end
-
 
 local dramatic = {
   V=nil,
@@ -1548,8 +1835,30 @@ local function commandRect()
   return {x=(sw-w)/2,y=sh-h-24*u,w=w,h=h,u=u}
 end
 
+local function realtimeBattleUiActive(battle)
+  -- Prefer the shared GoldCompat detector once UIMain has finished loading.
+  -- It also finds RealtimeBattle itself; this fallback only covers chunk load.
+  if GoldCompat and type(GoldCompat.realtimeBattleUiActive)=="function" then
+    return GoldCompat.realtimeBattleUiActive(battle)
+  end
+  local game=(battle and battle.game) or (modRef and modRef.game)
+  local lib=modRef and modRef.exports and modRef.exports.lib
+  local settings=lib and lib.BattleSettings
+  local realtime=lib and lib.RealtimeBattle
+  if settings and type(settings.realtimeEnabled)=="function" then
+    local ok,enabled=pcall(settings.realtimeEnabled,game)
+    if ok and enabled==true then return true end
+  end
+  if realtime and type(realtime.enabled)=="function" then
+    local ok,enabled=pcall(realtime.enabled,game)
+    if ok and enabled==true then return true end
+  end
+  return false
+end
+
 local function drawCommandMenu(battle)
   if battle.phase~="menu" then return end
+  if realtimeBattleUiActive(battle) then return end
 
   local r=commandRect()
   local u=r.u
@@ -1653,6 +1962,7 @@ local function drawMoveMenu(battle)
       or not (battle.player and battle.player.curMoves) then
     return
   end
+  if realtimeBattleUiActive(battle) then return end
 
   local sw,sh=love.graphics.getDimensions()
   local u=scaleForWindow()
@@ -2049,6 +2359,10 @@ local function drawBattlePresentation(game)
     activeSourceBattle=nil
     return false
   end
+  -- Realtime battles already draw their own HP rails, attack grid, and side
+  -- commands. Claiming this frame without painting keeps the Gold/Gen3
+  -- fallback HUD from stacking on top of that overlay.
+  if realtimeBattleUiActive(source or battle) then return true end
 
   love.graphics.push("all")
 
@@ -2078,6 +2392,7 @@ local function drawSafariPresentation(game,battle,source)
   if not battle or not resolvedSafariState(battle) then
     return false
   end
+  if realtimeBattleUiActive(source or battle) then return true end
 
   -- Safari is presentation-only here: native BattleState remains authoritative
   -- for encounter setup, catch odds, bait/rock, flee, counters, and naming.
@@ -2171,6 +2486,7 @@ function ColosseumUI.install(mod)
 end
 
 function ColosseumUI.draw(game,presentationBattle,sourceBattle)
+  if realtimeBattleUiActive(sourceBattle or presentationBattle) then return true end
   local provider=GoldCompat.findLoadedMod("DRAMATIC_SHAPE")
   local boss=provider and provider.exports and provider.exports.bossIntro
   if boss and boss.version==1 and boss.active(sourceBattle or presentationBattle) then return true end
@@ -2182,6 +2498,9 @@ function ColosseumUI.draw(game,presentationBattle,sourceBattle)
 end
 
 function ColosseumUI.drawSafari(game,presentationBattle,sourceBattle)
+  if realtimeBattleUiActive(sourceBattle or presentationBattle) then
+    return true
+  end
   if not GoldCompat.safariPresentationEnabled() then return false end
   if not presentationBattle or not resolvedSafariState(presentationBattle) then
     return false
@@ -3389,14 +3708,18 @@ function GoldCompat.battlePresentationEnabledFor(battle)
     (battle.battle and battle.battle.__cbeDoublesActive) or
     (battle.screen and battle.screen.__cbeDoublesActive))
   
-  -- Also check for engine-level double battle indicators - be very permissive
+  -- Engine-level doubles indicators. Only REAL flags count: `double` /
+  -- isDouble() is the native Gen III marker and `__cbeDoublesActive` (above)
+  -- is set the moment the doubles runtime engages. Guessing from
+  -- `#enemyParty>=2` matched every ordinary trainer battle (even with Double
+  -- Battles OFF or the Colosseum UI OFF) and hid the native command box with
+  -- nothing drawn in its place.
   if battle and not isDoubles then
     local host = battle.battle or battle
-    -- Check if enemy has multiple Pokemon (common double battle indicator)
-    isDoubles = (host.enemyParty and #host.enemyParty>=2) or
-                 (host.doubleBattle == true) or 
-                 (host.isDoubleBattle == true) or
-                 (host.battleType and (host.battleType==2 or host.battleType=="double"))
+    isDoubles = (host.double == true)
+      or (type(host.isDouble)=="function" and host:isDouble() == true)
+      or (host.doubleBattle == true)
+      or (host.isDoubleBattle == true)
   end
   
   if isDoubles then
@@ -3425,6 +3748,16 @@ function GoldCompat.ownsNativeBattleLayer(state)
   end
   return battle and (GoldCompat.battlePresentationEnabledFor(battle)
     or featureEnabled("hideNativeBattleUI")) or false
+end
+
+-- BattleBoxXY silences the engine's message/command box on the battle
+-- instance. Tell it when the Colosseum UI owns that box, so the native box is
+-- hidden while the Colosseum UI is on and shown again when it is off.
+function GoldCompat.bindBattleBoxOwnership()
+  local box=_G.TerrariumBattleBoxXY
+  if type(box)=="table" and box.ownedByExternalUI~=GoldCompat.ownsNativeBattleLayer then
+    box.ownedByExternalUI=GoldCompat.ownsNativeBattleLayer
+  end
 end
 
 GoldCompat.__shapeHudCompatCache=GoldCompat.__shapeHudCompatCache or {}
@@ -4632,6 +4965,7 @@ end
 local function shouldDrawStatusHUD(game, battle)
   -- Bag, Party, Summary, Naming, etc. are pushed above BattleState. When one
   -- owns the foreground, no battle status chrome should leak over it.
+  if GoldCompat.realtimeBattleUiActive(battle) then return false end
   if not battleOwnsForeground(game, battle) then return false end
 
   -- Move selection is a full battle-owned menu rather than a battlefield
@@ -5613,8 +5947,52 @@ local function drawPanelBase(rect)
   roundedRect("line", rect.x+1.25, rect.y+1.25, rect.w-2.5, rect.h-2.5, 14)
 end
 
+function GoldCompat.realtimeBattleUiActive(battle)
+  -- Realtime battles own HP banners, the attack grid, and side commands.
+  -- Hide every Colosseum / classic battle HUD while that mode is on.
+  --
+  -- BattleSettings lives on the Colosseum runtime namespace, NOT on
+  -- exports.lib (that table is the voxel Dramatic Shape V). Detect from
+  -- the settings module when we can find it, otherwise read the same save
+  -- tables BattleSettings writes.
+  battle=GoldCompat.sourceBattleState(battle) or battle
+  local game=(battle and battle.game) or (modRef and modRef.game) or GoldCompat.game
+  if not game then return false end
+
+  local function fromModule(mod)
+    if not mod then return nil end
+    local exports=mod.exports or {}
+    local lib=exports.lib
+    local settings=exports.BattleSettings
+      or (lib and lib.BattleSettings)
+    if settings and type(settings.realtimeEnabled)=="function" then
+      local ok,enabled=pcall(settings.realtimeEnabled,game)
+      if ok then return enabled==true end
+    end
+    local realtime=exports.RealtimeBattle or (lib and lib.RealtimeBattle)
+    if realtime and type(realtime.enabled)=="function" then
+      local ok,enabled=pcall(realtime.enabled,game)
+      if ok then return enabled==true end
+    end
+    return nil
+  end
+
+  local found=fromModule(modRef)
+  if found~=nil then return found end
+
+  local save=game.save
+  if type(save)=="table" then
+    local p=save.terrariumBattle
+    if type(p)=="table" and p.realtimeBattle==true then return true end
+    p=save.colosseumBattle
+    if type(p)=="table" and p.realtimeBattle==true then return true end
+  end
+  return false
+end
+
 local function drawCommandMenu(battle)
   if not (battle and battle.phase == "menu" and not battle.demo) then return end
+  if GoldCompat.realtimeBattleUiActive(battle) then return end
 
   local rect = commandGeometry()
   drawPanelBase(rect)
@@ -5873,6 +6251,7 @@ local function drawMoveSelect(battle)
       and battle.player and battle.player.curMoves) then
     return
   end
+  if GoldCompat.realtimeBattleUiActive(battle) then return end
 
   local rect = GoldCompat.moveGeometry()
   drawPanelBase(rect)
@@ -24875,6 +25254,12 @@ function GoldCompat.renderHudUnderlays(mod,game)
 
     local visualBattle=GoldCompat.presentBattleState(battle)
 
+    -- Realtime owns the visible fight HUD. Do not stack Colosseum cards,
+    -- FIGHT diamond, or Gold extras on top of the attack grid.
+    if GoldCompat.realtimeBattleUiActive(visualBattle or battle) then
+      return true
+    end
+
     -- Colosseum is routed HERE on Gold because the Gen 2 compatibility layer
     -- consumes battle rendering inside renderHudUnderlays before the generic
     -- renderHudBattleLayer is reached. Safari deliberately uses its dedicated
@@ -26048,7 +26433,7 @@ function GoldCompat.renderHudBattleLayer(mod,game)
   -- Activate BattleBoxXY for battle UI hiding across all generations
   local battle=battleStateInStack(game)
   if battle and _G.TerrariumBattleBoxXY and _G.TerrariumBattleBoxXY.claim then
-    pcall(function() _G.TerrariumBattleBoxXY.claim(battle) end)
+    pcall(GoldCompat.bindBattleBoxOwnership); pcall(function() _G.TerrariumBattleBoxXY.claim(battle) end)
   end
 
   -- Battle-only pushed UI states own the foreground, but should still feel
@@ -26105,6 +26490,12 @@ function GoldCompat.renderHudBattleLayer(mod,game)
   end
 
   local visualBattle=GoldCompat.presentBattleState(battle)
+
+  -- Realtime owns the visible fight HUD. Skip Colosseum cards, FIGHT diamond,
+  -- and the fallback status plates so they cannot stack on the attack grid.
+  if GoldCompat.realtimeBattleUiActive(visualBattle or battle) then
+    return false
+  end
 
   -- The opening trainer-party row used to require wrapping BattleState.draw.
   -- Draw it here in the final UI layer instead so renderer/camera mods keep
@@ -26969,7 +27360,7 @@ return function(mod)
       
       -- Activate BattleBoxXY for battle UI hiding across all generations
       if battle and _G.TerrariumBattleBoxXY and _G.TerrariumBattleBoxXY.claim then
-        pcall(function() _G.TerrariumBattleBoxXY.claim(battle) end)
+        pcall(GoldCompat.bindBattleBoxOwnership); pcall(function() _G.TerrariumBattleBoxXY.claim(battle) end)
       end
       
       local states=mod.game and mod.game.stack and mod.game.stack.states or {}
@@ -26985,6 +27376,7 @@ return function(mod)
   -- Reassert the UI-only compatibility firewall after every renderer that
   -- loaded before us has installed its battle presentation wrappers.
   GoldCompat.installBattleUiFirewall()
+  pcall(GoldCompat.bindBattleBoxOwnership)
 
   if GoldCompat.generation=="gen1" then
     State.Installers.installOverworldUI(mod)
