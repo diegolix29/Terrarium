@@ -317,6 +317,16 @@ function SettingsMenu.rows(catId, game)
       print("Stadium2RomPick.row() failed:", ok2, importRow2)
     end
     
+    -- HD sheet pack download (animated 2D fallback art, National Dex 1-493).
+    -- An action row like the ROM imports above: it starts/cancels the install
+    -- and its value shows live progress, then how many of the 493 are covered.
+    local okHD, hdRow = pcall(function()
+      return V.require("HDSheetInstaller").row()
+    end)
+    if okHD and hdRow and not rowExists(hdRow.id) then
+      out[#out + 1] = hdRow
+    end
+
     -- Stadium 2 status display (informational only)
     local okS2, Stadium2Setting = pcall(V.require, "Stadium2Setting")
     if okS2 and Stadium2Setting then

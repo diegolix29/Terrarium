@@ -52,6 +52,7 @@ local Map = require("src.world.Map")
 local Strings = require("src.core.Strings")
 
 local CityLife = {}
+CityLife.lastPipelineTick = nil
 
 local function game()
   return require("src.core.Game")
@@ -117,7 +118,18 @@ local STARE_REACH = 3         -- cells at which a challenger locks on
 
 local state = { mapId = nil, tick = 0 }
 
+-- Gen 4 (Platinum): Gen4Spawn answers the questions the Gen 1-3 Map does not.
+local function gen4()
+  local ok, Spawn = pcall(V.require, "Gen4Spawn")
+  if ok and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    return Spawn
+  end
+  return nil
+end
+
 local function halfView()
+  local Spawn = gen4()
+  if Spawn then return Spawn.halfView() end
   local Game = game()
   local vw, vh = 160, 144
   local r = Game and Game.renderer
@@ -154,6 +166,14 @@ end
 local function isTown(ow)
   local Game = game()
   local map = ow.map
+  local Spawn = gen4()
+  if Spawn then
+    -- Map.isOutdoor reads Gen 1/2 header fields and says "indoors" on Gen 4
+    if not Spawn.isOutdoor(map) then return false end
+    local enc = Spawn.encounterDef(Game, map)
+    if enc and enc.grass and (enc.grass.rate or 0) > 0 then return false end
+    return true
+  end
   if not Map.isOutdoor(map.def) then return false end
   local encDef = Game.data.encounters and Game.data.encounters[map.id]
   if encDef and encDef.grass and (encDef.grass.rate or 0) > 0 then
@@ -300,8 +320,15 @@ local function tick()
   pass(ow)
 end
 
-function CityLife.update()
+-- `source` is "driver" when Gen4Spawn's overworld-update driver calls this and
+-- nil when the voxel pipeline does. Only the pipeline stamps lastPipelineTick
+-- (every call, not just population passes), otherwise the driver would silence
+-- itself for DRIVE_GRACE after each of its own passes.
+function CityLife.update(source)
   if failed then return end
+  if source ~= "driver" then
+    CityLife.lastPipelineTick = love.timer and love.timer.getTime and love.timer.getTime()
+  end
   local ok, err = pcall(tick)
   if ok then return end
   failed = true

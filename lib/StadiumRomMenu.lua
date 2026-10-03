@@ -21,6 +21,7 @@ local PICKED_STADIUM = "picked_stadium.z64"
 local PENDING_FLAG = "stadium_overworld_picker_pending.flag"
 local BATTLE_BACKGROUND_PENDING_FLAG = "stadium2_battle_background_picker_pending.flag"
 local CUSTOM_PLAYER_PENDING_FLAG = "stadium2_custom_player_sprite_picker_pending.flag"
+local HD_POKEMON_PENDING_FLAG = "hd_pokemon_picker_pending.flag"
 
 local function isGen2()
   local ok, install = pcall(V.require, "StadiumInstall")
@@ -303,6 +304,8 @@ function M.poll(game)
     if okBg and pendingBg then return false end
     local okPlayer, pendingPlayer = pcall(f.getInfo, CUSTOM_PLAYER_PENDING_FLAG, "file")
     if okPlayer and pendingPlayer then return false end
+    local okHd, pendingHd = pcall(f.getInfo, HD_POKEMON_PENDING_FLAG, "file")
+    if okHd and pendingHd then return false end
   end
 
   -- Consume a fresh Android SAF result BEFORE cleanupStagingIfReady(). An

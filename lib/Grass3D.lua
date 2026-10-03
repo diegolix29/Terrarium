@@ -245,6 +245,11 @@ local function remesh()
   pcall(function()
     V.require("ChunkMesher").invalidate()
   end)
+  -- Platinum plants the same bake through lib/Gen4Grass; its own cache of
+  -- stamped meshes has to go too or the meadow keeps its old shape.
+  pcall(function()
+    V.require("Gen4Grass").invalidate()
+  end)
 end
 
 -- OPTIONS row: cycle then rebuild. The manager page writes through

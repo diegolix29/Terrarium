@@ -1,3 +1,4 @@
+local V=...
 local S={}
 local installed=false
 local modRef,Trainer,Music,ArenaCatalog,BattleMenuUI,CacheManager,TrainerRoster,Compat,AudioFidelity
@@ -15,7 +16,7 @@ end
 local function prefs(game)
   if not (game and game.save) then
     return {
-      music="normal",arena="auto",arenasEnabled=true,cameraEnabled=true,pokemonModelsEnabled=true,
+      music="normal",arena="auto",arenasEnabled=true,cameraEnabled=true,pokemonModelsEnabled=true,hdSheetsEnabled=true,
       realtimeBattle=false,realtimeZoom=1.0,
       playerModel="red",enemyTrainerModel="auto",rivalModel="leaf",
       doubleBattlesEnabled=true,abilitiesEnabled=true,freeLookEnabled=true,
@@ -36,6 +37,10 @@ local function prefs(game)
   -- declines them and the user's normal resolved sprite/model pipeline wins.
   if p.pokemonModelsEnabled==nil then p.pokemonModelsEnabled=true end
   p.pokemonModelsEnabled=p.pokemonModelsEnabled and true or false
+  -- HD 2D FALLBACK: animated HD sheets (lib/HDPokemonSheets.lua) for Pokemon
+  -- with no 3D model. Default ON; a species with no sheet stays native anyway.
+  if p.hdSheetsEnabled==nil then p.hdSheetsEnabled=true end
+  p.hdSheetsEnabled=p.hdSheetsEnabled and true or false
   if p.realtimeBattle==nil then p.realtimeBattle=false end
   p.realtimeBattle=p.realtimeBattle==true
   p.realtimeZoom=tonumber(p.realtimeZoom) or 1.0
@@ -95,10 +100,16 @@ local function prefs(game)
   if not validArena[p.arena] then p.arena="auto" end
   return p
 end
+local function isOptionsLabel(label)
+  local s=tostring(label or ""):upper()
+  return s=="OPTION" or s=="OPTIONS"
+end
 local function startMenuId()
   if Compat and type(Compat.current)=="function" then
     local ok,generation=pcall(Compat.current)
-    if ok and tonumber(generation)==2 then return "Gen2StartMenu" end
+    generation=ok and tonumber(generation) or nil
+    if generation==2 then return "Gen2StartMenu" end
+    if generation==3 or generation==4 then return "StartMenu" end
   end
   return GEN1_START
 end
@@ -139,6 +150,7 @@ local function openBattleMenu(game,returnId,returnParent)
   local environmentToggle={keepOpen=true}
   local cameraToggle={keepOpen=true}
   local pokemonModelsToggle={keepOpen=true}
+  local hdSheetsToggle={keepOpen=true}
   local realtimeToggle={keepOpen=true}
   local realtimeZoomRow={keepOpen=true}
   local doublesToggle={keepOpen=true}
@@ -161,11 +173,13 @@ local function openBattleMenu(game,returnId,returnParent)
   local rivalRow={keepOpen=true}
   local actorScaleRow={keepOpen=true}
   local hardCacheRow={keepOpen=true}
+  local packCacheRow={keepOpen=true}
   local cacheRow={keepOpen=true}
   local function refresh()
     environmentToggle.label="COLOSSEUM ARENAS  "..(p.arenasEnabled and "ON" or "OFF")
     cameraToggle.label="COLOSSEUM CAMERA  "..(p.cameraEnabled and "ON" or "OFF")
     pokemonModelsToggle.label="COLOSSEUM MODELS  "..(p.pokemonModelsEnabled and "ON" or "OFF")
+    hdSheetsToggle.label="HD 2D FALLBACK  "..(p.hdSheetsEnabled and "ON" or "OFF")
     realtimeToggle.label="REALTIME BATTLE  "..(p.realtimeBattle and "ON" or "OFF")
     realtimeZoomRow.label=("REALTIME ZOOM  %.2fX"):format(p.realtimeZoom or 1.0)
     freeLookToggle.label="FREE LOOK CAMERA  "..(p.freeLookEnabled~=false and "ON" or "OFF")
@@ -214,6 +228,14 @@ local function openBattleMenu(game,returnId,returnParent)
     elseif hs.teamReady then hardCacheRow.label="HARD CACHE SAVE   TEAM READY / MORE"
     elseif hs.needsRefresh then hardCacheRow.label="HARD CACHE SAVE   UPDATE CACHE"
     else hardCacheRow.label="HARD CACHE SAVE   BUILD" end
+    local pack=V.CacheArchive and V.CacheArchive.status and V.CacheArchive.status() or nil
+    if pack and pack.running then packCacheRow.label="PACK CACHE   "..tostring(pack.stage or "WORKING")
+    elseif pack and pack.pokemonPacked and pack.movefxPacked then
+      packCacheRow.label=("PACK CACHE   %s / SAVED %s"):format(tostring(pack.archiveLabel),tostring(pack.savedLabel))
+    elseif pack and (pack.pokemonPacked or pack.movefxPacked) then
+      packCacheRow.label="PACK CACHE   PARTIAL / CONTINUE"
+    elseif pack and pack.toolAvailable then packCacheRow.label="PACK CACHE   LOOSE FILES"
+    else packCacheRow.label="PACK CACHE   UNAVAILABLE" end
     local cs=CacheManager and CacheManager.inspect and CacheManager.inspect() or {sourceReady=false,sourceStatus="UNKNOWN"}
     cacheRow.label="ROM SOURCE   "..(cs.sourceReady and "READY" or tostring(cs.sourceStatus or "NOT IMPORTED"))
   end
@@ -228,6 +250,10 @@ local function openBattleMenu(game,returnId,returnParent)
   end
   pokemonModelsToggle.onSelect=function()
     p.pokemonModelsEnabled=not p.pokemonModelsEnabled
+    refresh()
+  end
+  hdSheetsToggle.onSelect=function()
+    p.hdSheetsEnabled=not p.hdSheetsEnabled
     refresh()
   end
   realtimeToggle.onSelect=function()
@@ -443,6 +469,49 @@ local function openBattleMenu(game,returnId,returnParent)
     end
     game.stack:push(picker)
   end
+  packCacheRow.onSelect=function()
+    local A=(V and V.CacheArchive) or (modRef and modRef.exports and modRef.exports.cacheArchive)
+    local rows={}
+    local statusRow={label="",keepOpen=true}
+    local sizeRow={label="",keepOpen=true}
+    local toolRow={label="",keepOpen=true}
+    local errRow={label="",keepOpen=true}
+    local function labels()
+      local st=A and A.status and A.status() or {}
+      if st.running then statusRow.label=tostring(st.stage or "PACKING")
+      elseif st.pokemonPacked and st.movefxPacked then statusRow.label="PACKED / READY"
+      elseif st.pokemonPacked or st.movefxPacked then statusRow.label="PARTIAL / CONTINUE"
+      elseif st.toolAvailable then statusRow.label="LOOSE FILES / NOT PACKED"
+      else statusRow.label="ZLIB UNAVAILABLE" end
+      sizeRow.label=(st.originalLabel or "0 B").." -> "..(st.archiveLabel or "0 B")
+      toolRow.label=st.toolLabel and ("CODEC  "..tostring(st.toolLabel)) or "CODEC  UNAVAILABLE"
+      errRow.label=st.error and tostring(st.error):sub(1,30) or (st.savedLabel and ("SAVED  "..tostring(st.savedLabel)) or "PACK AFTER EXTRACTION")
+      refresh()
+    end
+    local function start(scope)
+      if not (A and A.beginPack) then return end
+      A.beginPack(scope)
+      labels()
+    end
+    rows[#rows+1]={label="PACK POKEMON + MOVEFX",keepOpen=true,onSelect=function() start("all") end}
+    rows[#rows+1]={label="PACK POKEMON ONLY",keepOpen=true,onSelect=function() start("pokemon") end}
+    rows[#rows+1]={label="PACK MOVEFX ONLY",keepOpen=true,onSelect=function() start("movefx") end}
+    rows[#rows+1]={label="CANCEL PACKING",keepOpen=true,onSelect=function() if A and A.cancelPack then A.cancelPack() end;labels() end}
+    rows[#rows+1]=statusRow;rows[#rows+1]=sizeRow;rows[#rows+1]=toolRow;rows[#rows+1]=errRow
+    rows[#rows+1]={label="LOOSE ORIGINALS DELETE AFTER VERIFY",keepOpen=true}
+    rows[#rows+1]={label="RUNTIME UNPACKS ONE SPECIES / MOVE",keepOpen=true}
+    labels()
+    local picker=Menu.new(game,rows,{tx=1,ty=1,tw=29,maxVisible=10})
+    if BattleMenuUI and BattleMenuUI.mark then BattleMenuUI.mark(picker,"PACK GENERATED CACHE",rows,10,"ZLIB UNITS / ON-DEMAND LOAD") end
+    local nativeUpdate=picker.update
+    picker.update=function(self,dt,...)
+      if nativeUpdate then nativeUpdate(self,dt,...) end
+      if A and A.pump then A.pump(40) end
+      self._cbePackClock=(self._cbePackClock or 0)+(tonumber(dt) or 0)
+      if self._cbePackClock>=.25 then self._cbePackClock=0;labels() end
+    end
+    game.stack:push(picker)
+  end
   cacheRow.onSelect=function()
     local cs=CacheManager and CacheManager.inspect and CacheManager.inspect()
       or {ready=false,runtimeReady=false,sourceReady=false,sourceStatus="UNKNOWN",source="UNKNOWN",files=0,sizeLabel="0 B",componentCounts={}}
@@ -541,7 +610,7 @@ local function openBattleMenu(game,returnId,returnParent)
   refresh()
   -- Trainer presentation is intentionally three independent ownership rows:
   -- player Red, ordinary/special enemy trainers, and the Kanto rival substitute.
-  local mainRows={environmentToggle,cameraToggle,pokemonModelsToggle,realtimeToggle,realtimeZoomRow,doublesToggle,abilitiesToggle,wildSpawnRow,wildSpawnStatusRow,wildEncountersToggle,trainerEncountersToggle,gymEncountersToggle,eliteFourEncountersToggle,autoProgressToggle,freeLookToggle,bossIntroToggle,musicRow,soundsToggle,audioQualityRow,arenaRow,playerTrainerRow,enemyTrainerRow,rivalRow,actorScaleRow,hardCacheRow,cacheRow,back}
+  local mainRows={environmentToggle,cameraToggle,pokemonModelsToggle,hdSheetsToggle,realtimeToggle,realtimeZoomRow,doublesToggle,abilitiesToggle,wildSpawnRow,wildSpawnStatusRow,wildEncountersToggle,trainerEncountersToggle,gymEncountersToggle,eliteFourEncountersToggle,autoProgressToggle,freeLookToggle,bossIntroToggle,musicRow,soundsToggle,audioQualityRow,arenaRow,playerTrainerRow,enemyTrainerRow,rivalRow,actorScaleRow,hardCacheRow,packCacheRow,cacheRow,back}
   menu=Menu.new(game,mainRows,{tx=1,ty=2,tw=24,maxVisible=12,onCancel=function() reopen(game,returnId,returnParent) end})
   menu.screenId="TerrariumBattleSettings"
   if BattleMenuUI and BattleMenuUI.mark then
@@ -564,7 +633,7 @@ function S.install(mod,trainer,music,arenaCatalog,battleMenuUI,cacheManager,trai
     end
     local at=#out+1
     for i,entry in ipairs(out) do
-      if tostring(entry.label or ""):upper()=="OPTION" then at=i;break end
+      if isOptionsLabel(entry.label) then at=i;break end
     end
     table.insert(out,at,{label="TERRARIUM BATTLES",__terrariumBattleEntry=true,onSelect=function()
       -- Gen 1's generic StartMenu pops before invoking onSelect. Gold's
@@ -584,6 +653,7 @@ end
 function S.prefs(game) return prefs(game) end
 function S.cameraEnabled(game) return prefs(game or (modRef and modRef.game)).cameraEnabled~=false end
 function S.pokemonModelsEnabled(game) return prefs(game or (modRef and modRef.game)).pokemonModelsEnabled~=false end
+function S.hdSheetsEnabled(game) return prefs(game or (modRef and modRef.game)).hdSheetsEnabled~=false end
 function S.realtimeEnabled(game) return prefs(game or (modRef and modRef.game)).realtimeBattle==true end
 function S.realtimeZoom(game) return tonumber(prefs(game or (modRef and modRef.game)).realtimeZoom) or 1.0 end
 function S.setRealtimeEnabled(game,value)

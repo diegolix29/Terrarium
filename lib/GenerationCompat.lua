@@ -33,11 +33,19 @@ function C.current()
     local okGen,value=pcall(GameVersion.generation)
     if okGen and tonumber(value) then return tonumber(value) end
   end
-  -- Fallback detection for Gen 3, for callers reached before GameVersion is
-  -- available: check whether Gen 3-specific data is loaded.
+  -- Fallback detection for Gen 3/4, for callers reached before GameVersion is
+  -- available: check whether generation-specific data is loaded.
+  local okData, Data = pcall(engineRequire, "src.core.Data")
+  if okData and Data then
+    if Data.gen4_terrain or (Data.constants and Data.constants.gen4Behaviors) then
+      return 4
+    end
+    if Data.constants and Data.constants.gen3ItemEffects then
+      return 3
+    end
+  end
   local okGen3, Gen3Battle = pcall(engineRequire, "src.battle.BattleState")
   if okGen3 and Gen3Battle then
-    local okData, Data = pcall(engineRequire, "src.core.Data")
     if okData and Data and Data.constants and Data.constants.gen3ItemEffects then
       return 3
     end

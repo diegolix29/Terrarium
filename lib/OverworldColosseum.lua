@@ -22,7 +22,7 @@
 --              and ds.exports.lib.require("OverworldColosseum")
 --   if ow then ow.tag(npc, "PIKACHU") end
 --
--- Accepted tags are National Dex numbers (1-386) or engine species strings.
+-- Accepted tags are National Dex numbers (1-493, Platinum) or engine species strings.
 local V = ...
 
 local ColosseumDex = nil  -- Load lazily
@@ -148,10 +148,12 @@ local function cleanName(v)
   return s ~= "" and s or nil
 end
 
+local NATIONAL_DEX_MAX = 493
+
 local function dexNumber(v)
   if type(v) == "number" then
     local n = math.floor(v)
-    return n >= 1 and n <= 386 and n or nil
+    return n >= 1 and n <= NATIONAL_DEX_MAX and n or nil
   elseif type(v) == "string" then
     local n = tonumber(v)
     if n then return dexNumber(n) end
@@ -163,7 +165,7 @@ local function speciesDex(v)
   -- Resolve English species names to dex numbers using game data
   if type(v) == "number" then
     local n = math.floor(v)
-    return n >= 1 and n <= 386 and n or nil
+    return n >= 1 and n <= NATIONAL_DEX_MAX and n or nil
   elseif type(v) == "string" then
     local n = tonumber(v)
     if n then return dexNumber(n) end
@@ -175,7 +177,7 @@ local function speciesDex(v)
       for dex, mon in pairs(data.pokemon) do
         if mon.name and mon.name:upper() == v:upper() then
           local dexNum = tonumber(dex)
-          if dexNum and dexNum >= 1 and dexNum <= 386 then
+          if dexNum and dexNum >= 1 and dexNum <= NATIONAL_DEX_MAX then
             return dexNum
           end
         end
@@ -277,7 +279,7 @@ function OverworldColosseum.tag(entity, speciesOrDex)
     local match = speciesOrDex:match("^SPECIES_(%d+)$")
     if match then
       local dex = tonumber(match)
-      if dex and dex >= 1 and dex <= 386 then
+      if dex and dex >= 1 and dex <= NATIONAL_DEX_MAX then
         tagged[entity] = dex
         -- Also store by entity ID for more reliable matching
         if entity.id then
@@ -512,7 +514,7 @@ function OverworldColosseum.resolveDex(entity)
         local match = spriteSpecies:match("^SPECIES_(%d+)$")
         if match then
           local dex = tonumber(match)
-          if dex and dex >= 1 and dex <= 386 then
+          if dex and dex >= 1 and dex <= NATIONAL_DEX_MAX then
             return remember(dex)
           end
         end
@@ -722,23 +724,38 @@ function OverworldColosseum.draw(p)
   local y = (p.gh or 0) + (p.lift or 0)
 
   local renderFacing = p.facing or "down"
-  local fx, fz = facingVector(renderFacing)
+  local fx, fz
 
-  -- Handle first-person camera rotation (mirrors OverworldStadium's handling)
-  local okFirstPerson, FirstPerson = pcall(V.require, "FirstPerson")
-  if okFirstPerson and FirstPerson then
-    local b = FirstPerson.cardBlend()
-    if b > 0 then
-      local cameraYaw = FirstPerson.cardYaw(p.px or 0, p.py or 0)
-      local face = type(renderFacing) == "string" and string.lower(renderFacing) or renderFacing
-      local yaw = 0
-      if face == "down" then yaw = cameraYaw * b
-      elseif face == "up" then yaw = (cameraYaw + math.pi) * b
-      elseif face == "left" then yaw = (cameraYaw + math.pi / 2) * b
-      elseif face == "right" then yaw = (cameraYaw - math.pi / 2) * b
+  -- Handle camera rotation using the same approach as PlayerModel
+  local okCam, Cam = pcall(V.require, "Gen4ActorCam")
+  if okCam and Cam and Cam.freeRoam and Cam.freeRoam() then
+    local yaw = Cam.modelYaw()
+    fx, fz = math.sin(yaw), math.cos(yaw)
+  elseif okCam and Cam and Cam.active and Cam.active() then
+    fx, fz = Cam.facingVector(renderFacing)
+  else
+    local okFirstPerson, FirstPerson = pcall(V.require, "FirstPerson")
+    if okFirstPerson and FirstPerson then
+      local b = FirstPerson.cardBlend()
+      if b > 0 then
+        local cameraYaw = FirstPerson.cardYaw(p.px or 0, p.py or 0)
+        local face = type(renderFacing) == "string" and string.lower(renderFacing) or renderFacing
+        local yaw = 0
+        if face == "down" then yaw = (cameraYaw + math.pi) * b
+        elseif face == "up" then yaw = cameraYaw * b
+        elseif face == "left" then yaw = (cameraYaw + math.pi / 2) * b
+        elseif face == "right" then yaw = (cameraYaw - math.pi / 2) * b
+        else yaw = cameraYaw * b
+        end
+        fx = math.sin(yaw)
+        fz = math.cos(yaw)
+      else
+        -- Only use grid-based facingVector when not in camera-relative mode
+        fx, fz = facingVector(renderFacing)
       end
-      fx = math.sin(yaw)
-      fz = math.cos(yaw)
+    else
+      -- No FirstPerson available, use grid-based facing
+      fx, fz = facingVector(renderFacing)
     end
   end
 

@@ -25,6 +25,22 @@ Tags and packages:
 
 ## Unreleased
 
+### Gen 4: Colosseum OVERWORLD arena on the native world
+
+- **The OVERWORLD arena now works on Platinum.** It draws the cartridge's own
+  3D world through CBE's camera instead of a voxel snapshot that Gen 4 does not
+  have. New `Gen4WorldHost.renderPose`; `ArenaOverworldSnapshot` gains a native
+  branch (`capture` / `draw` / `blit` / `nativeWorld`); `Arena.lua` keeps the
+  pose-built view-projection for native worlds and blits after rebinding.
+  Colour only (no shared depth), see `GEN4_PORT_NOTES.md`.
+
+### Colosseum model scale
+
+- **Colosseum model scale is global, not a three-species patch.** Every
+  ColosseumMon / Colosseum A/B actor sizes from `PokemonHeights` metres by
+  dex, then a PokeAPI body-shape rule (long squiggles, winged meshes,
+  tentacles, giant fish). Abra and Furret stay as the only named exceptions.
+
 ### Roamer overworld art
 
 - **Gen-2-style walk sheets are optional and not redistributed.** Same policy

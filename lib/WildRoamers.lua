@@ -53,6 +53,7 @@ local FieldDefaults = require("src.world.FieldDefaults")
 local Map = require("src.world.Map")
 
 local WildRoamers = {}
+WildRoamers.lastPipelineTick = nil
 
 local function game()
   return require("src.core.Game")
@@ -115,6 +116,11 @@ local EVERY = 12              -- frames between population passes
 -- screen, which is what a headless run and a renderer that has not sized
 -- itself yet both come to.
 local function halfView()
+  -- On Gen 4, use Gen4Spawn's halfView
+  local ok, Spawn = pcall(V.require, "Gen4Spawn")
+  if ok and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    return Spawn.halfView()
+  end
   local Game = game()
   local vw, vh = 160, 144
   local r = Game and Game.renderer
@@ -198,6 +204,11 @@ end
 -- whole grid straight afterwards anyway when the answer is yes.
 local mapGrass = setmetatable({}, { __mode = "k" })
 local function mapHasGrass(map)
+  -- On Gen 4, use Gen4Spawn's mapHasGrass
+  local ok, Spawn = pcall(V.require, "Gen4Spawn")
+  if ok and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    return Spawn.mapHasGrass(map)
+  end
   local hit = mapGrass[map]
   if hit ~= nil then return hit end
   local found = false
@@ -216,6 +227,12 @@ end
 local function terrainsFor(ow)
   local Game = game()
   local map = ow.map
+  -- On Gen 4, use Gen4Spawn's terrain logic
+  local ok, Spawn = pcall(V.require, "Gen4Spawn")
+  if ok and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    return Spawn.terrains(Game, map)
+  end
+
   -- A city can have Super Rod water and NO encounter table at all
   -- (Vermilion, Cerulean).  Do not bail on a missing encDef -- grass and
   -- Surf water need it, the rod fallback does not.
@@ -330,7 +347,7 @@ local function place(ow, kind, slot, cx, cy)
   if not known then bakeBudget = bakeBudget - 1 end
   local def = RoamerArt.def(slot.species, known or bakeBudget >= 0)
   if not def then return nil end
-  local r = Roamer.new(def, slot.species, slot.level, kind, cx, cy)
+  local r = Roamer.new(def, slot.species, slot.level, kind, cx, cy, ow.map)
   ow.npcs[#ow.npcs + 1] = r
   ow.entities[#ow.entities + 1] = r
   state.covered[kind] = true
@@ -481,8 +498,13 @@ end
 -- in 3D.  Warned once, because a per-frame hook fails sixty times a second.
 local failed = false
 
-function WildRoamers.update()
+-- `source` is "driver" when Gen4Spawn's driver calls this, nil from the voxel
+-- pipeline. Only the pipeline stamps lastPipelineTick, on every call.
+function WildRoamers.update(source)
   if failed then return end
+  if source ~= "driver" then
+    WildRoamers.lastPipelineTick = love.timer and love.timer.getTime and love.timer.getTime()
+  end
   local ok, err = pcall(tick)
   if ok then return end
   failed = true

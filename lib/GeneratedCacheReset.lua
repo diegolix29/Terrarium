@@ -67,6 +67,8 @@ local EXPLICIT_GENERATED_PATHS={
 
   -- Build state / probes.
   "build/format_probe.txt","build/camera_probe.txt","build/error.txt","build/state.txt","build/generated_paths.lua","build/hard_cache_last_failure_v1.txt",
+  "cache/archive_v1/pokemon.lua","cache/archive_v1/movefx.lua","cache/archive_v1/hot.lua",
+  "build/cache_archive_pokemon_v1.complete","build/cache_archive_movefx_v1.complete",
   "build/stage_trainers.pending","build/stage_audio.pending","build/ball_release_warning.txt","build/boss_intro_warning.txt",
 }
 
@@ -190,6 +192,8 @@ end
 function R.reset(mod,assets)
   local seen={};local stats={deleted=0,pokemonSpecies=POKEMON_SPECIES_COUNT,pokemonManifestShards=POKEMON_MANIFEST_SHARDS,
     preservedArchives=true,importedSourcePreserved=true}
+  local packed=mod and mod.exports and mod.exports.cacheArchive
+  if packed and type(packed.wipe)=="function" then pcall(packed.wipe) end
 
   -- Lazy 001-386 Pokemon payloads live outside BuildPipeline's finalized manifest.
   local ok,why=deletePokemonManifest(mod,assets,"cache/pokemon/manifest.lua",seen,stats);if not ok then return false,why,stats end
@@ -273,6 +277,8 @@ local function scopedLoveWipe(mod,cache)
 end
 
 function R.wipeAll(mod,assets)
+  local packed=mod and mod.exports and mod.exports.cacheArchive
+  if packed and type(packed.wipe)=="function" then pcall(packed.wipe) end
   local cache=mod and mod.cache
   if cache and type(cache.wipeAll)=="function" then
     local ok,a,b=pcall(cache.wipeAll,cache)

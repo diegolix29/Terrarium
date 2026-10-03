@@ -139,6 +139,8 @@ end
 local Voxel = V.require("VoxelState")
 local Voxel3D = V.require("Voxel3D")
 local VoxelScene = V.require("VoxelScene")
+local Gen4WorldHost = V.require("Gen4WorldHost")
+V.Gen4WorldHost = Gen4WorldHost
 local TiltShift = V.require("TiltShift")
 local ChunkMesher = V.require("ChunkMesher")
 local WarpPrefetch = V.require("WarpPrefetch")
@@ -157,6 +159,34 @@ local DrawDistance = V.require("DrawDistance")
 local OverworldBattle = V.require("OverworldBattle")
 local WildRoamers = V.require("WildRoamers")
 local BattleExit = V.require("BattleExit")
+-- Gen 4 (Platinum): the engine already draws a real 3D world, so Terrarium's
+-- effects ride on it instead of rebuilding it (lib/Gen4Bridge.lua). Installed
+-- only on a Gen 4 cartridge (the hook and the grass effect; on Gen 1-3 the
+-- bridge module is loaded but does nothing).
+local Gen4Bridge = V.require("Gen4Bridge")
+V.Gen4Bridge = Gen4Bridge
+if Gen4Bridge.isGen4() and Gen4Bridge.install() then
+  Gen4Bridge.register("grass", V.require("Gen4Grass").draw)
+  -- voxel-scene 3D trees in place of Platinum's flat tree cards (also
+  -- registered inside Gen4Bridge.install; this keeps the hook next to grass)
+  pcall(function()
+    Gen4Bridge.register("trees", V.require("Gen4Trees").draw)
+  end)
+  -- HD Reloded roamers/followers when no Stadium/Colosseum model is bound
+  pcall(function()
+    Gen4Bridge.register("hd_pokemon", V.require("Gen4HdPokemon").draw)
+  end)
+  -- hide Platinum's own grass cards, water, and tree cards where the 3D versions draw
+  pcall(function() V.require("Gen4Hide").install() end)
+  -- the voxel scene's RayFX water reflection, pointed at Gen 4's water (Gen4Reflect)
+  pcall(function() V.require("Gen4Reflect").install() end)
+  -- 3D battles in the engine's own world, sprites for actors (Gen4Battle3D).
+  pcall(function() V.require("Gen4Battle3D").install() end)
+  -- Gen 4 roamers: spawn logic for grass/water/cave on Platinum (Gen4Spawn)
+  pcall(function() V.require("Gen4Spawn").install() end)
+  -- Gen 4 World Host: draws roamers, followers, and actors in native 3D world
+  pcall(function() Gen4WorldHost.install() end)
+end
 -- Battle UI hiding system for all generations
 local BattleBoxXY = V.require("BattleBoxXY")
 
@@ -369,6 +399,12 @@ local followerCountSetting = ModSetting.new(
   { 0, 1, 2, 3, 4, 5, 6 },
   { "0", "1", "2", "3", "4", "5", "6" }
 )
+local partyFollowerSetting = ModSetting.new(
+  "partyFollower",
+  "PARTY FOLLOWER",
+  { false, true },
+  { "OFF", "ON" }
+)
 
 -- Forward declaration: the voxel pipeline's update hook (registered below)
 -- calls this, and it is defined further down with the settings it drives.
@@ -427,6 +463,9 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
   -- answer false here, and the engine keeps the vanilla 2D path -- which
   -- is why no caller ever has to guard for a missing 3D pass.
   available = function()
+    -- Gen 4 draws its own 3D world (Gen4Ground); a voxelised tilemap would
+    -- REPLACE it. Stand down and let lib/Gen4Bridge.lua add effects instead.
+    if Gen4Bridge.isGen4() then return false end
     return Voxel3D.available()
   end,
 
@@ -638,6 +677,11 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
     -- PIXEL resolution (see sceneSize) so the 3D pass is crisp rather than
     -- a magnified low-res image, while the FX closures keep drawing in
     -- world-pixel units.
+            if Gen4WorldHost.isState(ctx.state) then
+      Voxel.ready = true
+      Gen4WorldHost.noteFrame(ctx)
+      return nil
+    end
     local sw, sh = sceneSize(ctx)
     local canvas = VoxelScene.render(ctx.state, sw, sh,
                                      ctx.vw, ctx.vh, ctx.paletteFor)
@@ -1623,6 +1667,9 @@ SettingsMenu.helpFor = function(id)
   if id == "DRAMATIC_SHAPE:jumpKey" then
     return "Press A to bind any keyboard key or gamepad button to the jump action. The jump allows you to hop over ledges in the overworld."
   end
+  if id == "DRAMATIC_SHAPE:characterWalkViewer" then
+    return "Opens the current Colosseum character. Left/Right orbit, Select toggles walk, Start re-saves walk_debug_<id>.txt into the LOVE save folder (see the console path) for tools/paint_walk_override.py."
+  end
   return originalHelpFor(id)
 end
 
@@ -1760,7 +1807,8 @@ SettingsMenu.define(SETTINGS)
 local HEADROOM = {
   GEN1 = { AIRY = 32, MID = 24, SNUG = 16 },
   GEN2 = { AIRY = 100, MID = 32, SNUG = 24 },
-  GEN3 = { AIRY = 32, MID = 24, SNUG = 16 }
+  GEN3 = { AIRY = 32, MID = 24, SNUG = 16 },
+  GEN4 = { AIRY = 32, MID = 24, SNUG = 16 }
 }
 -- Ceiling.headroom:get() returns the option VALUE (100/50/24), not the
 -- label (AIRY/MID/SNUG). Map both so generation tables can be keyed by name.
@@ -1776,7 +1824,7 @@ local function ceilingGeneration()
   if ok and GameVersion and type(GameVersion.generation) == "function" then
     local okGen, value = pcall(GameVersion.generation)
     local n = okGen and tonumber(value)
-    if n == 1 or n == 2 or n == 3 then return n end
+    if n == 1 or n == 2 or n == 3 or n == 4 then return n end
   end
   return 1
 end
@@ -2469,6 +2517,20 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
   if okMewtwo and mewtwoRow and not rowExists(mewtwoRow.id) then 
     table.insert(out, mewtwoRow) 
   end
+      -- Pokemon follower row (386 Pokemon support for Stadium/Colosseum models)
+  local okPokemonFollower, pokemonFollowerRow = pcall(function()
+    local StadiumInstall = V.require("StadiumInstall")
+    local Stadium2Install = V.require("Stadium2Install")
+    local ColosseumMon = V.require("ColosseumMon")
+    if StadiumInstall.available() or Stadium2Install.available()
+       or ColosseumMon.available(1, "normal") then
+      return V.require("PlayerModelPick").pokemonFollowerRow()
+    end
+    return nil
+  end)
+  if okPokemonFollower and pokemonFollowerRow and not rowExists(pokemonFollowerRow.id) then 
+    table.insert(out, pokemonFollowerRow) 
+  end
 
   -- Character model row (for Colosseum trainer characters)
   local okCharacter, characterRow = pcall(function()
@@ -2492,6 +2554,19 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
   end)
   if okAnimation and animationRow and not rowExists(animationRow.id) then 
     table.insert(out, animationRow) 
+  end
+
+  local okViewer, viewerRow = pcall(function()
+    local ColosseumTrainer = V.require("ColosseumTrainer")
+    if ColosseumTrainer.available("red") then
+      return V.require("CharacterWalkViewer").row()
+    end
+    return nil
+  end)
+  if not okViewer then
+    print("DRAMATIC_SHAPE: CharacterWalkViewer row failed:", viewerRow)
+  elseif viewerRow and not rowExists(viewerRow.id) then
+    table.insert(out, viewerRow)
   end
 
   local okWilds, wildsRow = pcall(function()
@@ -2722,6 +2797,8 @@ end
 -- where the reasoning for each one is written down. Installed once, here,
 -- so this file keeps naming every engine seam the mod touches.
 OverworldBattle.install()
+pcall(Gen4WorldHost.install)
+
 
 -- ------- shiny Pokemon (restored from DRAMATIC_SHAPE)
 --
@@ -3144,7 +3221,35 @@ end)
 
 -- Export follower API for companion mods
 mod.exports.follower = followerInstance
+-- HD animated 2D fallback for Pokemon with no 3D model (National Dex 1-493).
+-- Independent of the Colosseum disc: the billboard seam in OverworldBattle
+-- reads it through V.require, and it is republished for other mods.
+do
+  local okHD, HDSheets = pcall(V.require, "HDPokemonSheets")
+  if okHD and type(HDSheets) == "table" then
+    mod.exports.hdPokemonSheets = HDSheets
+    V.HDPokemonSheets = HDSheets
+  else
+    mod.log:warn("HDPokemonSheets not loaded: %s", tostring(HDSheets))
+  end
+end
 
+-- One-shot downloader for the HD sheet pack(s) (needs the "network" permission).
+-- Started from the OPTIONS-menu row (SettingsMenu ROOT); pumped here every
+-- frame, and a no-op unless an install is actually running.
+do
+  local okInst, HDInstaller = pcall(V.require, "HDSheetInstaller")
+  if okInst and type(HDInstaller) == "table" then
+    mod.exports.hdSheetInstaller = HDInstaller
+    mod.hooks:wrap("input.step", function(next, game, dt)
+      local out = next(game, dt)
+      if HDInstaller.active() then HDInstaller.update() end
+      return out
+    end)
+  else
+    mod.log:warn("HDSheetInstaller not loaded: %s", tostring(HDInstaller))
+  end
+end
 -- ------- what time it is
 --
 -- The cycle's clock rides the SAVE SLOT (save.modData, via mod.save): what
@@ -3215,6 +3320,7 @@ local function installOverworldStadium()
     mod.log:warn("PokemonHeights not loaded: %s", tostring(heightsErr))
     return false
   end
+  V.PokemonHeights = PokemonHeights
 
   local PokemonLocomotion, locoErr = loadLocal("lib/PokemonLocomotion.lua", V)
   if not PokemonLocomotion then
@@ -3726,9 +3832,17 @@ local function initializeColosseumIntegration()
     namespace = {
       mod = mod, FALLBACK = nil, engineRequire = require, OverworldBattle = OverworldBattle,
       Voxel3D = Voxel3D,
+      PokemonHeights = V.PokemonHeights,
       voxelRequire = function(name) return V.require(name) end,
       PayloadPreserver = colosseumPackage("extract/PayloadPreserver.lua"), GeneratedCacheReset = GeneratedCacheReset,
     }
+    if not namespace.PokemonHeights then
+      local okHeights, heightsMod = pcall(colosseumPackage, "lib/PokemonHeights.lua")
+      if okHeights then
+        namespace.PokemonHeights = heightsMod
+        V.PokemonHeights = heightsMod
+      end
+    end
     local function loadColosseumModule(name, arg)
       local value = colosseumModule(name, arg == nil and namespace or arg)
       if value then namespace[name] = value end
@@ -3741,8 +3855,13 @@ local function initializeColosseumIntegration()
     if PokemonExtractorRef and type(PokemonExtractorRef.installGeneratedAssets) == "function" then
       pcall(PokemonExtractorRef.installGeneratedAssets, GeneratedAssets)
     end
+    if MoveFXExtractorRef and type(MoveFXExtractorRef.installGeneratedAssets) == "function" then
+      pcall(MoveFXExtractorRef.installGeneratedAssets, GeneratedAssets)
+    end
     loadColosseumModule("RuntimeMeshCache")
     loadColosseumModule("WorkBudget")
+    local CacheArchive = loadColosseumModule("CacheArchive")
+    if CacheArchive then mod.exports.cacheArchive = CacheArchive end
     loadColosseumModule("FrameWork")
     namespace.MoveFXExtractor = MoveFXExtractorRef
     loadColosseumModule("WazaPhasePolicy")
@@ -3774,6 +3893,8 @@ local ArenaOverworldSnapshot = loadColosseumModule("ArenaOverworldSnapshot")
     loadColosseumModule("ShinySupport")
     loadColosseumModule("ModelIdentity")
     CurrentSpriteModels = loadColosseumModule("CurrentSpriteModels")
+    -- CSM reads V.HDPokemonSheets (V here is the Colosseum namespace).
+    namespace.HDPokemonSheets = mod.exports.hdPokemonSheets
     loadColosseumModule("ColosseumDex")
     loadColosseumModule("ColosseumDexNames")
     loadColosseumModule("ColosseumPortraitIndex")
@@ -4062,6 +4183,14 @@ end
     if CurrentSpriteModels and type(CurrentSpriteModels.registerCapability) == "function" and PokemonActors and PokemonActors.service then
       pcall(CurrentSpriteModels.registerCapability, "COLOSSEUM_BATTLE_ENVIRONMENTS/pokemon", "battleActors", PokemonActors.service)
     end
+    -- HD 2D fallback as a portable battleSprites v1 provider, for battles where
+    -- CurrentSpriteModels owns 2D drawing. Resolves only what has a sheet.
+    if CurrentSpriteModels and type(CurrentSpriteModels.registerCapability) == "function"
+       and mod.exports.hdPokemonSheets and mod.exports.hdPokemonSheets.spriteApi then
+      pcall(CurrentSpriteModels.registerCapability, "COLOSSEUM_BATTLE_ENVIRONMENTS/hd_sheets",
+        "battleSprites", mod.exports.hdPokemonSheets.spriteApi)
+    end
+
 
     -- Publish the same PokemonActors capability for OVERWORLD consumers.
     if PokemonActors and PokemonActors.service then
@@ -4481,6 +4610,7 @@ V.require = function(name)
     Mat4 = Mat4,
     ShadowMap = ShadowMap,
     SpriteBillboards = SpriteBillboards,
+    HDPokemonSheets = mod.exports.hdPokemonSheets,
   }
   
   if compatMap[name] then

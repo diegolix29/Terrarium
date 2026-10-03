@@ -3875,11 +3875,34 @@ function GoldCompat.installGen1HudDrawGuard()
   return true
 end
 
+function GoldCompat.installGen4HealthboxGuard()
+  -- Platinum draws HP on Gen4Battle.drawHealthboxes, not BattleState.drawHUDs.
+  -- BattleBoxXY only silences the text/fight box, so without this wrap the
+  -- DS healthboxes stay on top of the Colosseum HUD.
+  local ok,Gen4Battle=pcall(require,"src.battle.Gen4Battle")
+  if not (ok and type(Gen4Battle)=="table"
+      and type(Gen4Battle.drawHealthboxes)=="function") then
+    return false
+  end
+  local current=Gen4Battle.drawHealthboxes
+  if current==State.__colosseumGen4HealthboxGuard then return false end
+  local inner=current
+  local wrapper=function(battle,...)
+    if GoldCompat.ownsNativeBattleLayer(battle) then return true end
+    return inner(battle,...)
+  end
+  State.__colosseumGen4HealthboxGuard=wrapper
+  Gen4Battle.drawHealthboxes=wrapper
+  GoldCompat.__gen4HealthboxGuardInstalled=true
+  return true
+end
+
 function GoldCompat.installBattleUiFirewall()
   -- The launcher hooks remain the primary contract. These method-level guards
   -- are intentionally narrow fallbacks for renderer mods that cache or replace
   -- battle draw functions after mod load. They only answer the two visibility
   -- predicates (plus Gen I's HUD-only draw method for party-ball chrome).
+  GoldCompat.installGen4HealthboxGuard()
   if GoldCompat.generation=="gen1" then
     GoldCompat.installBattlePredicateGuard(BattleState,"bottomUIVisible",
       "__colosseumGen1BottomPredicate")

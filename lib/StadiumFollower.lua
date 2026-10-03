@@ -15,6 +15,7 @@ local StadiumMon = V.require("StadiumMon")
 local Voxel3D = V.require("Voxel3D")
 local ColosseumMon = V.require("ColosseumMon")
 local ColosseumDex = V.require("ColosseumDex")
+local ColosseumDexNames = V.require("ColosseumDexNames")
 
 local StadiumFollower = {}
 
@@ -96,6 +97,25 @@ local FOLLOWER_SCALE = 1.0
 local function loadSpriteFallback(dex)
   if not dex then return false, "no dex number" end
   
+  -- HD Reloded: back sheet on the follower; front is the battle/overworld pose.
+  -- Priority: HD sheets -> regular sprites
+  local HDSheets = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+  if HDSheets and type(HDSheets.frame) == "function" then
+    -- Try back sheet first (appropriate for follower), then front
+    local image, info = HDSheets.frame({dex = dex, facing = "back", shiny = false, key = "follower"})
+    if not image then
+      image, info = HDSheets.frame({dex = dex, facing = "front", shiny = false, key = "follower"})
+    end
+    if image then
+      spriteCache[dex] = image
+      currentSprite = image
+      currentSpecies = dex
+      usingSpriteFallback = true
+      print("StadiumFollower.loadSpriteFallback: Loaded HD sheet for dex", dex)
+      return true
+    end
+  end
+
   print("StadiumFollower.loadSpriteFallback: Attempting to load sprite for dex", dex)
   
   -- Check sprite cache first
@@ -196,7 +216,7 @@ function StadiumFollower.setSpecies(dex)
   usingSpriteFallback = false
   usingColosseum = false
   
-  if not dex or dex < 1 or dex > ColosseumDex.speciesCount then
+  if not dex or dex < 1 or dex > 493 then
     -- Save the disabled state
     writeMarker(nil)
     return true  -- Disabled
@@ -346,6 +366,10 @@ function StadiumFollower.update(dt)
     ColosseumMon.update(currentSpecies, colosseumVariant, dt)
     return
   end
+  if usingSpriteFallback then
+    -- HD sheets handle their own animation via frame() call with key
+    return
+  end
   if not currentRig then return end
   
   animTime = animTime + dt
@@ -357,8 +381,8 @@ end
 -- Draw the follower at the given position
 -- x, y: world coordinates (pixel position)
 -- facing: direction the follower is facing ("up", "down", "left", "right")
-function StadiumFollower.draw(x, y, facing)
-  print("[StadiumFollower.draw] Called with x:", x, "y:", y, "facing:", facing, "currentRig:", currentRig ~= nil, "currentModel:", currentModel ~= nil, "currentSprite:", currentSprite ~= nil, "usingSpriteFallback:", usingSpriteFallback)
+function StadiumFollower.draw(x, y, facing, yUp)
+  yUp = tonumber(yUp) or 0
   
   -- Handle sprite fallback
   if usingSpriteFallback and currentSprite then
@@ -368,11 +392,42 @@ function StadiumFollower.draw(x, y, facing)
   -- Handle Colosseum 3D model (dex outside StadiumPack's 1-151 range, or no
   -- Stadium ROM installed at all)
   if usingColosseum then
-    local fx, fz = ColosseumMon.towardFor(facing)
-    -- Camera-relative free-roam rotation isn't wired through ColosseumMon's
-    -- simpler toward-vector API yet; it draws facing the raw movement
-    -- direction in that mode, same as StadiumWilds' wild Pokemon already do.
-    local matrix = ColosseumMon.matrix(currentSpecies, colosseumVariant, x, 0, y, fx, fz)
+    -- Use the same camera approach as PlayerModel for Gen4 games
+    local FirstPerson = V.require("FirstPerson")
+    local Cam = V.require("Gen4ActorCam")
+    local b = FirstPerson.cardBlend()
+
+    local fx, fz
+
+    -- In camera-relative modes, use camera facing vectors directly, not grid-based towardFor
+    if Cam and Cam.freeRoam and Cam.freeRoam() then
+      local yaw = Cam.modelYaw()
+      fx, fz = math.sin(yaw), math.cos(yaw)
+    elseif Cam and Cam.active and Cam.active() then
+      fx, fz = Cam.facingVector(facing)
+    elseif b > 0 then
+      local cameraYaw = FirstPerson.cardYaw(x, y)
+      local face = type(facing) == "string" and string.lower(facing) or facing
+      local yaw = 0
+      -- Use "awayCam" kind like PlayerModel for follower
+      if face == "down" then
+        yaw = (cameraYaw + math.pi) * b
+      elseif face == "up" then
+        yaw = cameraYaw * b
+      elseif face == "right" then
+        yaw = (cameraYaw - math.pi / 2) * b
+      elseif face == "left" then
+        yaw = (cameraYaw + math.pi / 2) * b
+      else
+        yaw = cameraYaw * b
+      end
+      fx, fz = math.sin(yaw), math.cos(yaw)
+    else
+      -- Only use grid-based towardFor when not in camera-relative mode
+      fx, fz = ColosseumMon.towardFor(facing)
+    end
+
+    local matrix = ColosseumMon.matrix(currentSpecies, colosseumVariant, x, yUp, y, fx, fz)
     if not matrix then return false end
     return ColosseumMon.draw(currentSpecies, colosseumVariant, matrix)
   end
@@ -381,36 +436,34 @@ function StadiumFollower.draw(x, y, facing)
   if not currentRig or not currentModel then return false end
 
   -- Calculate the model matrix
-  local m = Mat4.translate(x, 0, y)
+  local m = Mat4.translate(x, yUp, y)
 
-  -- Check if we're in free-roam mode (1st or 3rd person)
+  -- Use the same camera and movement approach as PlayerModel for Gen4 games
   local FirstPerson = V.require("FirstPerson")
+  local Cam = V.require("Gen4ActorCam")
   local b = FirstPerson.cardBlend()
 
-  -- Apply rotation based on facing direction
+  -- Apply rotation based on facing direction (same as PlayerModel.yawForDraw)
   local yaw = 0
 
-  if b > 0 then
-    -- In free-roam mode, use camera-relative rotation like the player model
+  if Cam and Cam.freeRoam and Cam.freeRoam() then
+    yaw = Cam.modelYaw()
+  elseif Cam and Cam.active and Cam.active() then
+    yaw = -Cam.worldYaw(facing)
+  elseif b > 0 then
     local cameraYaw = FirstPerson.cardYaw(x, y)
-
-    if facing == "down" then
-      -- Moving backwards: face the camera
-      yaw = cameraYaw * b
-
-    elseif facing == "up" then
-      -- Moving forward: face away from the camera
+    local face = type(facing) == "string" and string.lower(facing) or facing
+    if face == "down" then
       yaw = (cameraYaw + math.pi) * b
-
-    elseif facing == "left" then
-      -- Moving left: turn 90 degrees left
-      yaw = (cameraYaw + math.pi / 2) * b
-
-    elseif facing == "right" then
-      -- Moving right: turn 90 degrees right
+    elseif face == "up" then
+      yaw = cameraYaw * b
+    elseif face == "right" then
       yaw = (cameraYaw - math.pi / 2) * b
+    elseif face == "left" then
+      yaw = (cameraYaw + math.pi / 2) * b
+    else
+      yaw = cameraYaw * b
     end
-
   else
     -- In other modes, rotate based on movement direction
     if facing == "right" then
@@ -455,6 +508,19 @@ function StadiumFollower.drawSprite(x, y, facing)
   
   print("[StadiumFollower.drawSprite] Drawing sprite at x:", x, "y:", y, "facing:", facing)
   
+  -- Try to refresh HD sheet frame (for animated sheets)
+  local HDSheets = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+  if HDSheets and type(HDSheets.frame) == "function" and usingSpriteFallback then
+    local image, info = HDSheets.frame({dex = currentSpecies, facing = "back", shiny = false, key = "follower"})
+    if not image then
+      image, info = HDSheets.frame({dex = currentSpecies, facing = "front", shiny = false, key = "follower"})
+    end
+    if image then
+      currentSprite = image
+      spriteCache[currentSpecies] = image
+    end
+  end
+  
   -- Try to use love.graphics for sprite rendering
   local lg = love and love.graphics
   if not lg then
@@ -464,11 +530,10 @@ function StadiumFollower.drawSprite(x, y, facing)
   
   lg.push()
   lg.translate(x, y)
-  lg.scale(FOLLOWER_SCALE, FOLLOWER_SCALE)
-  
-  -- Draw sprite centered
   local sw, sh = currentSprite:getDimensions()
-  lg.draw(currentSprite, -sw/2, -sh/2)
+  local s = (16 / math.max(sh, 1)) * FOLLOWER_SCALE
+  lg.scale(s, s)
+  lg.draw(currentSprite, -sw/2, -sh)
   
   lg.pop()
   
@@ -502,13 +567,60 @@ end
 -- Check if a follower is currently loaded
 function StadiumFollower.loaded()
   local result = (currentRig ~= nil and currentModel ~= nil) or (currentSprite ~= nil) or usingColosseum
-  print("[StadiumFollower.loaded] Returning:", result, "currentRig:", currentRig ~= nil, "currentModel:", currentModel ~= nil, "currentSprite:", currentSprite ~= nil, "currentSpecies:", currentSpecies, "usingSpriteFallback:", usingSpriteFallback)
   return result
 end
 
 -- Check if the follower is using sprite fallback
 function StadiumFollower.isUsingSpriteFallback()
   return usingSpriteFallback
+end
+
+-- ------- Species Cycling (386 Pokemon Support)
+
+-- Cycle through Pokemon species for the follower model
+-- dir: 1 for forward (right arrow), -1 for backward (left arrow)
+function StadiumFollower.cycleSpecies(dir)
+  dir = dir or 1  -- Default to forward if no direction specified
+  local current = StadiumFollower.getSpecies() or 0
+  
+  -- Move to next/previous species based on direction
+  local nextDex
+  if dir > 0 then
+    -- Forward (right arrow): count up
+    nextDex = current + 1
+    if nextDex > ColosseumDex.speciesCount then
+      nextDex = 0  -- Disable (back to normal follower)
+    end
+  else
+    -- Backward (left arrow): count down
+    if current == 0 then
+      -- If currently disabled, go to the last species (386)
+      nextDex = ColosseumDex.speciesCount
+    else
+      nextDex = current - 1
+      if nextDex < 0 then
+        nextDex = 0  -- Disable
+      end
+    end
+  end
+  
+  if nextDex == 0 then
+    -- Disable Stadium follower
+    StadiumFollower.setSpecies(nil)
+    print("StadiumFollower.cycleSpecies: Stadium follower disabled")
+  else
+    local shouty = ColosseumDexNames[nextDex]
+    local speciesName = shouty and (shouty:gsub("(%a)([%a]*)", function(first, rest)
+      return first:upper() .. rest:lower()
+    end)) or ("Dex " .. nextDex)
+    
+    local ok = StadiumFollower.setSpecies(nextDex)
+    if ok then
+      print("StadiumFollower.cycleSpecies: Follower set to", speciesName, "(dex", nextDex .. ")")
+    else
+      print("StadiumFollower.cycleSpecies: Failed to load", speciesName)
+    end
+  end
 end
 
 return StadiumFollower

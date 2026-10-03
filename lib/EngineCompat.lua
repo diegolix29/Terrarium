@@ -262,9 +262,43 @@ function Compat.chooseImageFile(title)
   return nil
 end
 
+local function persistenceSaveDir(f)
+  if f and type(f.getSaveDirectory) == "function" then
+    local okSave, resolved = pcall(f.getSaveDirectory)
+    if okSave and type(resolved) == "string" and resolved ~= "" then return resolved end
+  end
+  local SaveData = req("src.core.SaveData")
+  if SaveData and type(SaveData.portableBaseDir) == "function" then
+    local okBase, base = pcall(SaveData.portableBaseDir)
+    if okBase and type(base) == "string" and base ~= "" then return base end
+  end
+  return nil
+end
+
+-- True when a staged relative path is readable through the engine filesystem.
+-- Uses a 2-byte File read instead of f.read so a multi-hundred-MB HD zip is
+-- never pulled into Lua the way Colosseum refuses to buffer a disc image.
+local function stagedPresent(f, relative)
+  if not f then return false end
+  local okInfo, info = pcall(f.getInfo, relative, "file")
+  if okInfo and info and (not info.size or tonumber(info.size) == nil or info.size > 0) then
+    return true
+  end
+  if type(f.newFile) ~= "function" then return false end
+  local okF, file = pcall(f.newFile, relative)
+  if not (okF and file and type(file.open) == "function") then return false end
+  local okOpen = pcall(file.open, file, "r")
+  if not okOpen then return false end
+  local okR, sig = pcall(file.read, file, 2)
+  pcall(file.close, file)
+  return okR and type(sig) == "string" and #sig > 0
+end
+
 -- Copy an absolute desktop picker path into the engine save directory so the
--- rest of the Stadium importer can use the engine-owned PhysFS backend.  This
--- avoids io.open, which current sandboxes intentionally do not expose.
+-- rest of the Stadium / HD zip importers can use the engine-owned PhysFS
+-- backend.  This avoids io.open, which current sandboxes intentionally do
+-- not expose. Stadium ROMs are ~32 MB; HDReloded.zip is far larger, so the
+-- copy is done by the host (Copy-Item / cp) and verified with a tiny read.
 function Compat.stageExternal(path, relative)
   if type(path) ~= "string" or path == "" then
     return false, "no selected file"
@@ -273,49 +307,47 @@ function Compat.stageExternal(path, relative)
 
   local f = Compat.fs()
   if not f then return false, "save directory unavailable" end
-  local saveDir
-  if type(f.getSaveDirectory) == "function" then
-    local okSave, resolved = pcall(f.getSaveDirectory)
-    if okSave and type(resolved) == "string" and resolved ~= "" then saveDir = resolved end
-  end
-  if not saveDir then
-    local SaveData = req("src.core.SaveData")
-    if SaveData and type(SaveData.portableBaseDir) == "function" then
-      local okBase, base = pcall(SaveData.portableBaseDir)
-      if okBase and type(base) == "string" and base ~= "" then saveDir = base end
-    end
-  end
+  local saveDir = persistenceSaveDir(f)
   if not saveDir then return false, "save directory unavailable" end
 
   local shell = Compat.hostShell()
   if not shell then return false, "host file access unavailable" end
   local dest = saveDir .. "/" .. relative
   local osName = Compat.osName()
-  local command
+
+  if type(f.remove) == "function" then pcall(f.remove, relative) end
 
   if osName == "Windows" then
     local function psq(s)
       return "'" .. tostring(s):gsub("'", "''") .. "'"
     end
+    local scriptRel = "compat_stage_copy.ps1"
     local script = table.concat({
-      "$src=", psq(path), ";",
-      "$dst=", psq(dest), ";",
-      "Copy-Item -LiteralPath $src -Destination $dst -Force;",
-      "[Console]::Write('OK')",
-    })
-    local quoted = type(shell.quote) == "function" and shell.quote(script)
-      or ('"' .. script:gsub('"', '') .. '"')
-    command = "powershell -NoProfile -NonInteractive -Command " .. quoted
+      "$ErrorActionPreference = 'Stop'",
+      "$src = " .. psq(path),
+      "$dst = " .. psq(dest),
+      "New-Item -ItemType Directory -Force -Path (Split-Path -LiteralPath $dst) | Out-Null",
+      "Copy-Item -LiteralPath $src -Destination $dst -Force",
+      "if (Test-Path -LiteralPath $dst) { [Console]::Write('OK') } else { [Console]::Write('MISS') }",
+    }, "\r\n")
+    pcall(f.write, scriptRel, script)
+    local scriptAbs = (saveDir .. "/" .. scriptRel):gsub("/", "\\")
+    pipeOutput(shell,
+      'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'
+      .. scriptAbs .. '"')
+    if stagedPresent(f, relative) then return true, relative end
+
+    local srcWin = path:gsub("/", "\\"):gsub('"', "")
+    local dstWin = dest:gsub("/", "\\"):gsub('"', "")
+    pipeOutput(shell, 'cmd /c copy /Y "' .. srcWin .. '" "' .. dstWin .. '"')
+    if stagedPresent(f, relative) then return true, relative end
   else
     local quote = type(shell.quote) == "function"
       and function(s) return shell.quote(s) end
       or function(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-    command = "cp -f -- " .. quote(path) .. " " .. quote(dest) .. " 2>/dev/null"
+    pipeOutput(shell, "cp -f -- " .. quote(path) .. " " .. quote(dest) .. " 2>/dev/null")
+    if stagedPresent(f, relative) then return true, relative end
   end
-
-  pipeOutput(shell, command)
-  local okInfo, info = pcall(f.getInfo, relative, "file")
-  if okInfo and info then return true, relative end
   return false, "could not copy selected file"
 end
 
@@ -379,5 +411,22 @@ end
 -- engine entry point is named for ROM import. Expose a neutral alias for other
 -- sandbox-safe file pickers such as custom battle backgrounds.
 Compat.openMobileFilePicker = Compat.openMobileRomPicker
+
+-- Prefer pickFile("mod") so the copy lands as picked_mod.zip instead of
+-- picked_rom.gb. Sandboxed mods cannot see love.system; try it anyway, then
+-- fall back to the engine ROM-importer document picker.
+function Compat.openMobileZipPicker()
+  local osName = Compat.osName()
+  if osName ~= "Android" and osName ~= "iOS" then
+    return false, "not a mobile picker platform"
+  end
+  local okSys, launched = pcall(function()
+    return love and love.system and love.system.pickFile and love.system.pickFile("mod")
+  end)
+  if okSys and launched then return true, "picked_mod.zip" end
+  local ok, err = Compat.openMobileFilePicker()
+  if ok then return true, "picked_rom.gb" end
+  return false, err or "file picker did not open"
+end
 
 return Compat

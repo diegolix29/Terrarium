@@ -200,6 +200,26 @@ end
 -- Get the species dex number from an entity
 function StadiumWilds.getEntitySpeciesDex(entity)
   if not entity then return nil end
+
+  do
+    local def = entity.sprite and entity.sprite.def
+    local tagged = tonumber(def and def.hdDex)
+    if tagged and tagged >= 1 and tagged <= 493 then return tagged end
+  end
+
+  do
+    local HDSheets = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+    if not HDSheets then
+      local ok, m = pcall(V.require, "HDPokemonSheets")
+      if ok then HDSheets = m end
+    end
+    if HDSheets and type(HDSheets.dexOf) == "function" then
+      local game = V.mod and ((V.mod.game) or (V.mod.world and V.mod.world.game))
+      local dex = HDSheets.dexOf(entity, game and game.data)
+        or HDSheets.dexOf(entity.entity, game and game.data)
+      if dex then return dex end
+    end
+  end
   
   -- First check nested entity (the actual game entity)
   if entity.entity and type(entity.entity) == "table" then
@@ -207,7 +227,7 @@ function StadiumWilds.getEntitySpeciesDex(entity)
     if nestedSpecies then
       -- If it's already a number, return it
       local num = tonumber(nestedSpecies)
-      if num and num >= 1 and num <= 386 then
+      if num and num >= 1 and num <= 493 then
         return num
       end
       
@@ -216,7 +236,7 @@ function StadiumWilds.getEntitySpeciesDex(entity)
         local dexStr = nestedSpecies:match("SPECIES_(%d+)")
         if dexStr then
           local dexNum = tonumber(dexStr)
-          if dexNum and dexNum >= 1 and dexNum <= 386 then
+          if dexNum and dexNum >= 1 and dexNum <= 493 then
             return dexNum
           end
         end
@@ -229,7 +249,7 @@ function StadiumWilds.getEntitySpeciesDex(entity)
   
   -- If it's already a number, return it
   local num = tonumber(species)
-  if num and num >= 1 and num <= 386 then
+  if num and num >= 1 and num <= 493 then
     return num
   end
   
@@ -238,7 +258,7 @@ function StadiumWilds.getEntitySpeciesDex(entity)
     local dexStr = species:match("SPECIES_(%d+)")
     if dexStr then
       local dexNum = tonumber(dexStr)
-      if dexNum and dexNum >= 1 and dexNum <= 386 then
+      if dexNum and dexNum >= 1 and dexNum <= 493 then
         return dexNum
       end
     end
@@ -247,7 +267,7 @@ function StadiumWilds.getEntitySpeciesDex(entity)
   -- NEW: Try to get from sprite.dsSpecies (dex number set by sprite system)
   if entity.sprite and entity.sprite.dsSpecies then
     local spriteDex = tonumber(entity.sprite.dsSpecies)
-    if spriteDex and spriteDex >= 1 and spriteDex <= 386 then
+    if spriteDex and spriteDex >= 1 and spriteDex <= 493 then
       return spriteDex
     end
   end
@@ -256,14 +276,14 @@ function StadiumWilds.getEntitySpeciesDex(entity)
   if entity.sprite and entity.sprite.species then
     local spriteSpecies = entity.sprite.species
     local spriteNum = tonumber(spriteSpecies)
-    if spriteNum and spriteNum >= 1 and spriteNum <= 386 then
+    if spriteNum and spriteNum >= 1 and spriteNum <= 493 then
       return spriteNum
     end
     if type(spriteSpecies) == "string" then
       local dexStr = spriteSpecies:match("SPECIES_(%d+)")
       if dexStr then
         local dexNum = tonumber(dexStr)
-        if dexNum and dexNum >= 1 and dexNum <= 386 then
+        if dexNum and dexNum >= 1 and dexNum <= 493 then
           return dexNum
         end
       end
@@ -277,7 +297,7 @@ function StadiumWilds.getEntitySpeciesDex(entity)
     local mon = game.data.pokemon[species]
     if mon and mon.dex then
       local dexNum = tonumber(mon.dex)
-      if dexNum and dexNum >= 1 and dexNum <= 386 then
+      if dexNum and dexNum >= 1 and dexNum <= 493 then
         return dexNum
       end
     end
@@ -286,13 +306,13 @@ function StadiumWilds.getEntitySpeciesDex(entity)
     for id, def in pairs(game.data.pokemon) do
       if def and def.name and def.name:upper() == tostring(species):upper() then
         local dexNum = tonumber(def.dex)
-        if dexNum and dexNum >= 1 and dexNum <= 386 then
+        if dexNum and dexNum >= 1 and dexNum <= 493 then
           return dexNum
         end
       end
       if tostring(id):upper() == tostring(species):upper() then
         local dexNum = tonumber(def.dex)
-        if dexNum and dexNum >= 1 and dexNum <= 386 then
+        if dexNum and dexNum >= 1 and dexNum <= 493 then
           return dexNum
         end
       end

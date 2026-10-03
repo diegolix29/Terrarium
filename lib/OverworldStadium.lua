@@ -883,22 +883,36 @@ local function prepareOneColosseum(p, dex, dt)
   local renderFacing = p.facing
   local fx, fz = facingVector(renderFacing)
 
-  -- Camera-relative facing in first/third-person free-roam, same convention
-  -- the Stadium path below uses.
-  local okFirstPerson, FirstPerson = pcall(V.require, "FirstPerson")
-  if okFirstPerson and FirstPerson then
-    local okBlend, b = pcall(FirstPerson.cardBlend)
-    if okBlend and b and b > 0 then
-      local okYaw, cameraYaw = pcall(FirstPerson.cardYaw, p.px or 0, p.py or 0)
-      cameraYaw = okYaw and cameraYaw or 0
-      local face = type(renderFacing) == "string" and string.lower(renderFacing) or renderFacing
-      local yaw = 0
-      if face == "down" then yaw = cameraYaw * b
-      elseif face == "up" then yaw = (cameraYaw + math.pi) * b
-      elseif face == "left" then yaw = (cameraYaw + math.pi / 2) * b
-      elseif face == "right" then yaw = (cameraYaw - math.pi / 2) * b
+  -- Camera-relative facing using the same approach as PlayerModel
+  local okCam, Cam = pcall(V.require, "Gen4ActorCam")
+  if okCam and Cam and Cam.freeRoam and Cam.freeRoam() then
+    local yaw = Cam.modelYaw()
+    fx, fz = math.sin(yaw), math.cos(yaw)
+  elseif okCam and Cam and Cam.active and Cam.active() then
+    fx, fz = Cam.facingVector(renderFacing)
+  else
+    local okFirstPerson, FirstPerson = pcall(V.require, "FirstPerson")
+    if okFirstPerson and FirstPerson then
+      local okBlend, b = pcall(FirstPerson.cardBlend)
+      if okBlend and b and b > 0 then
+        local okYaw, cameraYaw = pcall(FirstPerson.cardYaw, p.px or 0, p.py or 0)
+        cameraYaw = okYaw and cameraYaw or 0
+        local face = type(renderFacing) == "string" and string.lower(renderFacing) or renderFacing
+        local yaw = 0
+        if face == "down" then yaw = (cameraYaw + math.pi) * b
+        elseif face == "up" then yaw = cameraYaw * b
+        elseif face == "left" then yaw = (cameraYaw + math.pi / 2) * b
+        elseif face == "right" then yaw = (cameraYaw - math.pi / 2) * b
+        else yaw = cameraYaw * b
+        end
+        fx, fz = math.sin(yaw), math.cos(yaw)
+      else
+        -- Only use grid-based facingVector when not in camera-relative mode
+        fx, fz = facingVector(renderFacing)
       end
-      fx, fz = math.sin(yaw), math.cos(yaw)
+    else
+      -- No FirstPerson available, use grid-based facing
+      fx, fz = facingVector(renderFacing)
     end
   end
 
@@ -977,39 +991,46 @@ local function prepareOne(p, dex, dt)
   local renderFacing = (skyMount and entity._stadiumSkyRideAnchorFacing)
       or p.facing
   
-  -- Check if we're in free-roam mode (1st or 3rd person) and apply camera-relative rotation
-  local okFirstPerson, FirstPerson = pcall(V.require, "FirstPerson")
+  -- Camera rotation using the same approach as PlayerModel
+  local okCam, Cam = pcall(V.require, "Gen4ActorCam")
   local cameraYaw = 0
   local useCameraRotation = false
-  local fx, fz = facingVector(renderFacing)
-  
-  if okFirstPerson and FirstPerson then
-    local b = FirstPerson.cardBlend()
-    if b > 0 then
-      useCameraRotation = true
-      cameraYaw = FirstPerson.cardYaw(p.px or 0, p.py or 0)
-      
-      -- Calculate camera-relative facing direction
-      local face = type(renderFacing) == "string" and string.lower(renderFacing) or renderFacing
-      local yaw = 0
-      
-      if face == "down" then
-        -- Moving backwards: face the camera
-        yaw = cameraYaw * b
-      elseif face == "up" then
-        -- Moving forward: face away from the camera
-        yaw = (cameraYaw + math.pi) * b
-      elseif face == "left" then
-        -- Moving left: turn 90 degrees left
-        yaw = (cameraYaw + math.pi / 2) * b
-      elseif face == "right" then
-        -- Moving right: turn 90 degrees right
-        yaw = (cameraYaw - math.pi / 2) * b
+  local fx, fz
+
+  if okCam and Cam and Cam.freeRoam and Cam.freeRoam() then
+    local yaw = Cam.modelYaw()
+    fx, fz = math.sin(yaw), math.cos(yaw)
+  elseif okCam and Cam and Cam.active and Cam.active() then
+    fx, fz = Cam.facingVector(renderFacing)
+  else
+    local okFirstPerson, FirstPerson = pcall(V.require, "FirstPerson")
+    if okFirstPerson and FirstPerson then
+      local b = FirstPerson.cardBlend()
+      if b > 0 then
+        useCameraRotation = true
+        cameraYaw = FirstPerson.cardYaw(p.px or 0, p.py or 0)
+        local face = type(renderFacing) == "string" and string.lower(renderFacing) or renderFacing
+        local yaw = 0
+        if face == "down" then
+          yaw = (cameraYaw + math.pi) * b
+        elseif face == "up" then
+          yaw = cameraYaw * b
+        elseif face == "left" then
+          yaw = (cameraYaw + math.pi / 2) * b
+        elseif face == "right" then
+          yaw = (cameraYaw - math.pi / 2) * b
+        else
+          yaw = cameraYaw * b
+        end
+        fx = math.sin(yaw)
+        fz = math.cos(yaw)
+      else
+        -- Only use grid-based facingVector when not in camera-relative mode
+        fx, fz = facingVector(renderFacing)
       end
-      
-      -- Convert yaw back to faceX/faceZ for StadiumMon:matrix
-      fx = math.sin(yaw)
-      fz = math.cos(yaw)
+    else
+      -- No FirstPerson available, use grid-based facing
+      fx, fz = facingVector(renderFacing)
     end
   end
   

@@ -709,6 +709,7 @@ function ControlEngine:forceYellowStockPikachuArt(ow, game)
     walker = resolvedWalker,
     trueColor = resolvedTrueColor,
     dsSpecies = resolved.dsSpecies,
+    hdDex = resolved.hdDex,
   }, npc.id or Constants.ENTITY_ID)
   if ok and sprite then
     npc.sprite = sprite
@@ -1032,9 +1033,10 @@ function ControlEngine:makeTrailer(game, ow, x, y, facing, kind, mon, slot)
         image = resolved.image,
         frames = resolved.frames or 6,
         walker = resolved.walker ~= false,
-        trueColor = resolved.trueColor ~= false,
-        pokepcShiny = npc.pokepcShiny,
-        dsSpecies = resolved.dsSpecies,
+          trueColor = resolved.trueColor ~= false,
+          pokepcShiny = npc.pokepcShiny,
+          dsSpecies = resolved.dsSpecies,
+          hdDex = resolved.hdDex,
       }, npc.id)
       if ok and sprite then
         npc.sprite = sprite
@@ -2426,6 +2428,7 @@ function ControlEngine:_refreshTrailerWaterSprites(game, ow, surface)
           trueColor = resolved.trueColor ~= false,
           pokepcShiny = shiny and true or false,
           dsSpecies = resolved.dsSpecies,
+          hdDex = resolved.hdDex,
         }, npc.id)
         if ok and sprite then
           npc.sprite = sprite

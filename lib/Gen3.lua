@@ -143,7 +143,17 @@ function Gen3.isGen3(tileset)
 end
 
 function Gen3.mapIsGen3(map)
-  return map ~= nil and Gen3.isGen3(map.tileset)
+  if map == nil then return false end
+  -- Sinnoh's stand-in tileset uses the Gen 3 block shape so 2D tools can
+  -- read it, but the live world is NSBMD. Treating it as Hoenn voxelizes
+  -- TILESET_GEN4_STANDIN over the cartridge mesh.
+  if map.renderer and map.renderer.gen4Ground then return false end
+  local ts = map.tileset
+  if type(ts) == "table" then
+    local id = tostring(ts.id or ts.primaryKey or "")
+    if id == "TILESET_GEN4_STANDIN" then return false end
+  end
+  return Gen3.isGen3(ts)
 end
 
 -- IS THIS CELL A BERRY PLOT?  ONE TEST, SHARED, SO NO TWO PASSES DISAGREE.

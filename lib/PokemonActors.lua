@@ -1989,26 +1989,57 @@ local LARGE_SPECIES_CEILING={
 }
 
 -- Species whose canonical Pokédex "height" is visually much closer to body
--- LENGTH than standing height. The global curve still applies first; these
--- factors convert the published measurement into the compact/coiled battle
--- silhouette actually authored in Colosseum. This is not an Ekans-only hack:
--- the complete Gen-I/II elongated-body family is handled by the same rule.
+-- LENGTH than standing height. Used ONLY if PokemonHeights.lua failed to
+-- load -- the live path is H.battleBodyFactor (shape rules for every dex).
 local LENGTH_MEASURED_FACTOR={
   [23]=.50,  -- Ekans
   [24]=.54,  -- Arbok
   [95]=.42,  -- Onix
   [130]=.47, -- Gyarados
+  [147]=.48, -- Dratini
   [148]=.52, -- Dragonair
   [162]=.62, -- Furret
   [206]=.60, -- Dunsparce
   [208]=.42, -- Steelix
 }
 
+local pokemonHeightsModule
+local function loadPokemonHeights()
+  if V and type(V.PokemonHeights)=="table" and type(V.PokemonHeights.meters)=="function" then
+    return V.PokemonHeights
+  end
+  local modObj=V and V.mod
+  if not (modObj and type(modObj.read)=="function") then return nil end
+  local okRead,src=pcall(modObj.read,modObj,"lib/PokemonHeights.lua")
+  if not (okRead and src) then return nil end
+  local chunk=load(src,"@lib/PokemonHeights.lua")
+  if not chunk then return nil end
+  local okRun,result=pcall(chunk)
+  return okRun and result or nil
+end
+
+local function heightsBodyFactor(dex)
+  if pokemonHeightsModule==nil then
+    pokemonHeightsModule=loadPokemonHeights() or false
+  end
+  local M=pokemonHeightsModule
+  if M and type(M.battleBodyFactor)=="function" then
+    local extra=tonumber(M.battleBodyFactor(dex))
+    return (extra and extra>0) and extra or 1
+  end
+  local factors=M and M.BATTLE_BODY_FACTOR
+  return (factors and tonumber(factors[tonumber(dex)])) or 1
+end
+
 local function normalizedPresentationRelative(meters,dex)
   local raw=meters and meters>0 and (meters/HUMAN_REFERENCE_METERS) or .72
   raw=math.max(.04,raw)
   local curved=raw^SCALE_CURVE_EXP
-  local body=LENGTH_MEASURED_FACTOR[tonumber(dex)] or 1
+  local id=tonumber(dex)
+  -- PokemonHeights.battleBodyFactor is the global rule (shape + rare
+  -- exceptions). The local LENGTH table is only a loader fallback.
+  local body=heightsBodyFactor(id)
+  if not (body and body~=1) then body=LENGTH_MEASURED_FACTOR[id] or 1 end
   return curved*body,raw,curved,body
 end
 local scaleTrim=1.0
@@ -2017,8 +2048,28 @@ local function actorWorldScale(actor)
   local h=tonumber(actor and actor.height) or 0
   local reference=tonumber(actor and actor.referenceActorHeight) or WORLD_HEIGHT
   local relative=tonumber(actor and actor.physicalScale) or .72
-  local target=reference*relative*scaleTrim
-  return (h>0.01) and (target/h) or (relative*scaleTrim)
+  local presentation=tonumber(actor and actor.arenaActorScale) or 1
+  if presentation<0.08 then presentation=0.08 end
+  local target=reference*relative*scaleTrim*presentation
+  return (h>0.01) and (target/h) or (relative*scaleTrim*presentation)
+end
+
+function A.setArenaActorScale(scale)
+  local k=tonumber(scale) or 1
+  if k<0.08 then k=0.08 end
+  local changed=false
+  for _,rec in pairs(A._liveActors or {}) do
+    -- Only CBE arena battlers. Overworld wilds/followers share _liveActors
+    -- and must not inherit the battle presentation boost.
+    if rec and rec.fromBattleArena==true then
+      if tonumber(rec.arenaActorScale)~=k then
+        rec.arenaActorScale=k
+        if rec.height and rec.height>0.01 then rec.worldScale=actorWorldScale(rec) end
+        changed=true
+      end
+    end
+  end
+  return changed
 end
 
 -- Real battles always have a battler/gameObj in scope (see
@@ -2049,18 +2100,8 @@ end
 -- V.require sibling-loader -- V.require does not exist on the namespace
 -- table this file receives as V, so calling it silently no-ops under pcall.
 -- Load PokemonHeights.lua the same low-level way colosseumPackage itself
--- does (mod:read + load), rather than through V.require.
-local pokemonHeightsModule
-local function loadPokemonHeights()
-  local modObj=V and V.mod
-  if not (modObj and type(modObj.read)=="function") then return nil end
-  local okRead,src=pcall(modObj.read,modObj,"lib/PokemonHeights.lua")
-  if not (okRead and src) then return nil end
-  local chunk,err=load(src,"@lib/PokemonHeights.lua")
-  if not chunk then return nil end
-  local okRun,result=pcall(chunk)
-  return okRun and result or nil
-end
+-- does (mod:read + load), rather than through V.require. The loader lives
+-- above with the body-factor tables so both paths share one module slot.
 local function pokemonHeightsMeters(dex)
   if pokemonHeightsModule==nil then
     pokemonHeightsModule=loadPokemonHeights() or false
@@ -2069,18 +2110,19 @@ local function pokemonHeightsMeters(dex)
 end
 
 local function dexHeightMeters(opts,dex)
+  -- Canonical National Dex metres (lib/PokemonHeights.lua) are the scale
+  -- source for ColosseumMon / Colosseum A/B. Look them up by dex FIRST so
+  -- Gen 3 (no gen2Pokedex / no dexEntry) and overworld acquires that only
+  -- have a number -- Wingull, etc. -- do not fall through to the generic
+  -- .72 trainer-relative size.
+  local canonical=dex and pokemonHeightsMeters(dex)
+  if canonical and canonical>0 then return canonical end
   local ctx=opts and opts.context
   local game=(ctx and ctx.game) or (ctx and ctx.battle and ctx.battle.game)
   local battler=opts and opts.battler
   local mon=battler and (battler.mon or battler)
   local species=mon and mon.species
   local data=(game and game.data) or liveGameData()
-  -- No battler species to key off of: resolve the species by dex number
-  -- instead of falling straight through to the generic .72 relative-height
-  -- fallback below. That fallback is what made every roamer/follower/wild
-  -- Colosseum model come out at nearly the same size regardless of species
-  -- -- only the handful of dex numbers in LENGTH_MEASURED_FACTOR/
-  -- TINY_SPECIES_FLOOR/LARGE_SPECIES_CEILING ever differed from it.
   if not species and data and data.pokemon and dex then
     for speciesId,candidate in pairs(data.pokemon) do
       if candidate and candidate.dex==dex then species=speciesId;break end
@@ -2093,16 +2135,12 @@ local function dexHeightMeters(opts,dex)
     local ft,inch=tonumber(e.heightFt),tonumber(e.heightIn)
     if ft then return (ft*12+(inch or 0))*0.0254 end
   end
-  -- Gold/Silver extraction stores the source Pokedex height as the digits the
-  -- cart prints (e.g. 204 == 2'04"). Convert that authoritative field here.
   local g2=data and data.gen2Pokedex and data.gen2Pokedex.entries
   local raw=g2 and species and g2[species] and tonumber(g2[species].height)
   if raw and raw>0 then
     local ft=math.floor(raw/100);local inch=raw%100
     return (ft*12+inch)*0.0254
   end
-  local canonical=dex and pokemonHeightsMeters(dex)
-  if canonical and canonical>0 then return canonical end
   return nil
 end         -- runtime multiplier, adjusted with F7/F8
 
@@ -2259,6 +2297,14 @@ function A.acquire(source,dex,variant,opts)
   actor.readabilityBoost=(rawRelative>0) and (relative/rawRelative) or 1
   actor.largeBodyCompression=(relative>0 and rawRelative>relative) and (rawRelative/relative) or 1
   actor.referenceActorHeight=HUMAN_WORLD_HEIGHT/figureScale
+  local arenaScale=tonumber(ctx and ctx.arena and ctx.arena.actorScale)
+    or tonumber(ctx and ctx.services and ctx.services.actorScale)
+  if arenaScale then
+    actor.fromBattleArena=true
+    actor.arenaActorScale=arenaScale
+  else
+    actor.arenaActorScale=1
+  end
   actor.worldScale=actorWorldScale(actor)
   -- Species without a source `rare_` model get the runtime recolour instead.
   -- Separate-source shinies already contain their authored palette. Never recolour twice.

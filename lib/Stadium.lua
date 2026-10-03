@@ -209,9 +209,20 @@ end
 -- than a table of its own.
 local function dexOf(species)
   if not species then return nil end
+  if type(species) == "number" then
+    local n = math.floor(species)
+    if n >= 1 and n <= 493 then return n end
+  end
+  local asNumber = tonumber(species)
+  if asNumber then
+    local n = math.floor(asNumber)
+    if n >= 1 and n <= 493 then return n end
+  end
   local data = game() and game().data
-  local def = data and data.pokemon and data.pokemon[species]
-  return def and def.dex or nil
+  local poke = data and data.pokemon
+  if not poke then return nil end
+  local def = poke[species] or (asNumber and poke[asNumber])
+  return def and (def.dex or asNumber) or nil
 end
 
 -- Whether this side is showing a TRAINER rather than a Pokemon.
@@ -708,13 +719,18 @@ function Stadium.captureBody()
            hh = math.max(4, h * 0.55) }
 end
 
-function Stadium.draw(pull)
+function Stadium.draw(pull, worldShift)
   if not session then return end
+  local Mat4 = worldShift and V.require("Mat4") or nil
   for _, side in ipairs({ "enemy", "player" }) do
     local mon = session[side]
     if mon.rig and mon.visible and mon.model_matrix then
       Stadium.guard(side, mon, "draw", function()
-        mon.rig:draw(mon.model_matrix, pull)
+        local matrix = mon.model_matrix
+        if Mat4 and worldShift then
+          matrix = Mat4.mul(worldShift, matrix)
+        end
+        mon.rig:draw(matrix, pull)
       end)
     end
   end

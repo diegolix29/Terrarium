@@ -207,6 +207,25 @@ function SpriteService:resolveFollowerSprite(opts)
   local game = opts.game
   local variant = shiny and "shiny" or "normal"
 
+  -- Annotate HD Reloded dex so VoxelScene can swap the 16px walker for the
+  -- battle HD sheet when no Stadium/Colosseum model is bound.
+  local function withHdDex(def)
+    if not def then return def end
+    if not def.hdDex then
+      local HDSheets = V.HDPokemonSheets or (self.mod and self.mod.exports and self.mod.exports.hdPokemonSheets)
+      if not HDSheets then
+        local okHd, m = pcall(V.require, "HDPokemonSheets")
+        if okHd then HDSheets = m end
+      end
+      if HDSheets and type(HDSheets.dexOf) == "function" then
+        def.hdDex = HDSheets.dexOf(species, game and game.data)
+          or HDSheets.dexOf(self:dexOf(species), game and game.data)
+      end
+    end
+    if def.hdDex then def.trueColor = true end
+    return def
+  end
+
   -- Water: prefer existing Wilds water resolver (swimming / levitates).
   if (surface == "surfing" or surface == "water") and self.logic
       and type(self.logic.resolveWaterSprite) == "function" then
@@ -216,7 +235,7 @@ function SpriteService:resolveFollowerSprite(opts)
       allowLandFallback = false,
     })
     if def and def.image then
-      return {
+      return withHdDex({
         id = def.id or "SPRITE_WILDS_FOLLOWER_WATER",
         image = def.image,
         frames = def.frames or 6,
@@ -225,7 +244,7 @@ function SpriteService:resolveFollowerSprite(opts)
         providerId = "water",
         role = role,
         surface = surface,
-      }
+      })
     end
   end
 
@@ -237,55 +256,55 @@ function SpriteService:resolveFollowerSprite(opts)
       local result = providers:resolve(style, species, variant, game)
       if result and result.def and result.def.image then
         local def = result.def
-        return {
+        return withHdDex({
           id = (role == "player_controlled") and "SPRITE_PLAYER_POKEMON"
             or (role == "party_trailer" or role == "primary") and "SPRITE_WILDS_FOLLOWER_MON"
             or def.id or Constants.SPRITE_ID,
           image = def.image,
           frames = def.frames or 6,
           walker = def.walker ~= false,
-          trueColor = def.trueColor ~= false,  -- Keep provider's trueColor setting
-          dsSpecies = species,  -- Include species for PaletteFX RGB coloring
+          trueColor = def.trueColor ~= false,
+          dsSpecies = species,
           providerId = result.providerId,
           role = role,
           surface = "land",
-        }
+        })
       end
     end
   end
+
+  -- Annotate HD Reloded dex so VoxelScene can swap the 16px walker for the
+  -- battle HD sheet when no Stadium/Colosseum model is bound.
 
   -- PRIORITY: Try RoamerArt first for Gen 1/2 (same system roamers use)
   local okRoamer, RoamerArt = pcall(V.require, "RoamerArt")
   if okRoamer and RoamerArt and RoamerArt.available then
     local def = RoamerArt.def(species, true)  -- Allow baking if needed
     if def and def.image then
-      -- Force trueColor to false to enable PaletteFX RGB coloring
-      -- Copy all fields from RoamerArt def to preserve other properties
       local result = {
         id = def.id or "SPRITE_WILDS_FOLLOWER_MON",
         image = def.image,
         frames = def.frames or 6,
         walker = def.walker ~= false,
-        trueColor = false,  -- Force false to enable PaletteFX RGB coloring
-        dsSpecies = def.dsSpecies or species,  -- Preserve species for PaletteFX RGB coloring
+        trueColor = def.trueColor == true or def.hdDex ~= nil,
+        dsSpecies = def.dsSpecies or species,
+        hdDex = def.hdDex,
         providerId = "roamer_art",
         role = role,
         surface = "land",
       }
-      -- Copy any additional fields from RoamerArt def (except trueColor)
       for k, v in pairs(def) do
-        if k ~= "trueColor" and result[k] == nil then result[k] = v end
+        if result[k] == nil then result[k] = v end
       end
-      return result
+      return withHdDex(result)
     end
   end
 
   -- PRIORITY: Try game battle front sprites first (works across all generations)
   local battleSpriteFallback = self:_tryBattleSpriteFallback(species, variant, game)
   if battleSpriteFallback then
-    return battleSpriteFallback
+    return withHdDex(battleSpriteFallback)
   end
-
   -- Land / fallback: Wilds sprite providers (pokedex → pokemmo → followers chain).
   local providers = self.render and self.render.spriteProviders
   if providers and type(providers.resolve) == "function" then
@@ -295,20 +314,20 @@ function SpriteService:resolveFollowerSprite(opts)
       -- follower sheets are always RGBA true-color; external packs may still
       -- state their own contract explicitly.
       local def = result.def
-      -- Force trueColor to false to enable PaletteFX RGB coloring
-      return {
+      return withHdDex({
         id = (role == "player_controlled") and "SPRITE_PLAYER_POKEMON"
           or (role == "party_trailer" or role == "primary") and "SPRITE_WILDS_FOLLOWER_MON"
           or def.id or Constants.SPRITE_ID,
         image = def.image,
         frames = def.frames or 6,
         walker = def.walker ~= false,
-        trueColor = false,  -- Force false to enable PaletteFX RGB coloring
-        dsSpecies = species,  -- Include species for PaletteFX RGB coloring
+        trueColor = def.trueColor == true or def.hdDex ~= nil,
+        dsSpecies = species,
+        hdDex = def.hdDex,
         providerId = result.providerId,
         role = role,
         surface = "land",
-      }
+      })
     end
   end
 
@@ -319,21 +338,21 @@ function SpriteService:resolveFollowerSprite(opts)
     local dex = self:dexOf(species) or 4
     local def = sheets:spriteDef(dex, variant, "SPRITE_WILDS_FOLLOWER_MON")
     if def and def.image then
-      -- Force trueColor to false to enable PaletteFX RGB coloring
-      return {
+      return withHdDex({
         id = def.id,
         image = def.image,
         frames = def.frames or 6,
         walker = def.walker ~= false,
-        trueColor = false,  -- Force false to enable PaletteFX RGB coloring
-        dsSpecies = species,  -- Include species for PaletteFX RGB coloring
+        trueColor = def.trueColor == true or def.hdDex ~= nil,
+        dsSpecies = species,
+        hdDex = def.hdDex,
         providerId = "pokemmo",
         role = role,
         surface = "land",
-      }
+      })
     end
   end
-  return {
+  return withHdDex({
     id = Constants.SPRITE_ID,
     image = self:_fallbackImage(),
     frames = 1,
@@ -342,7 +361,7 @@ function SpriteService:resolveFollowerSprite(opts)
     providerId = "fallback",
     role = role,
     surface = surface,
-  }
+  })
 end
 
 

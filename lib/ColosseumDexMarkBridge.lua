@@ -190,7 +190,9 @@ end
 
 function B.ensureSave(save,generation,forceScrub)
   generation=currentGeneration(generation)
-  if generation~=1 and generation~=2 then return false,"host generation unavailable" end
+  -- Gen 3/4 already store a national dex on the save. The Gen 1/2 sidecar
+  -- guard does not apply, and logging it every frame drowned the console.
+  if generation~=1 and generation~=2 then return true end
   if type(save)~="table" then return false,"save unavailable" end
   if type(save.pokedex)~="table" then return false,"save.pokedex unavailable" end
   if type(save.pokedex.seen)~="table" then return false,"save.pokedex.seen unavailable" end

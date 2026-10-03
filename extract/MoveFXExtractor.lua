@@ -433,6 +433,11 @@ local function runtimeRoot(path) return tostring(path or "cache/movefx/model.lua
 local function runtimeBinPath(path,i) return runtimeRoot(path)..("/base_%02d.f32"):format(tonumber(i) or 0) end
 local function runtimeMetaPath(path) return runtimeRoot(path).."/base.lua" end
 local function cacheSize(path)
+  local Assets=M.assets or (V and V.GeneratedAssets)
+  if Assets and type(Assets.info)=="function" then
+    local info=Assets.info(path)
+    return type(info)=="table" and tonumber(info.size) or nil
+  end
   local mod=M.mod;if not (mod and mod.cache and type(mod.cache.info)=="function") then return nil end
   local ok,info=pcall(mod.cache.info,mod.cache,path);return ok and type(info)=="table" and tonumber(info.size) or nil
 end
@@ -478,9 +483,23 @@ end
 local function saneRange(off,size,n)
   return type(off)=="number" and type(size)=="number" and off>=0 and size>=0 and off+size<=n
 end
+function M.installGeneratedAssets(assets)
+  M.assets=assets
+  return true
+end
 local function cacheReadLua(path)
-  local mod=M.mod;if not (mod and mod.cache and type(mod.cache.read)=="function") then return nil end
-  local ok,src=pcall(mod.cache.read,mod.cache,path); if not ok or type(src)~="string" then return nil end
+  local src
+  local Assets=M.assets or (V and V.GeneratedAssets)
+  if Assets and type(Assets.read)=="function" then
+    src=select(1,Assets.read(path))
+  else
+    local mod=M.mod
+    if mod and mod.cache and type(mod.cache.read)=="function" then
+      local ok,raw=pcall(mod.cache.read,mod.cache,path)
+      if ok then src=raw end
+    end
+  end
+  if type(src)~="string" then return nil end
   local f=load(src,"@generated/"..path);if not f then return nil end
   local ok2,v=pcall(f);return ok2 and v or nil
 end

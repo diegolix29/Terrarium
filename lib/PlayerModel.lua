@@ -225,7 +225,6 @@ end
 function PlayerModel.load(filename)
   if not filename then return false, "no filename" end
 
-  -- Check cache first
   if modelCache[filename] then
     currentModel = modelCache[filename]
     currentTexture = textureCache[filename]
@@ -237,9 +236,9 @@ function PlayerModel.load(filename)
   local f = love and love.filesystem
   if not (f and f.read) then return false, "no filesystem" end
   
-  -- Read file
   local ok, data = pcall(f.read, path)
   if not ok or not data then
+    print("[PlayerModel] Failed to read:", path)
     return false, "could not read file"
   end
 
@@ -278,12 +277,15 @@ function PlayerModel.load(filename)
     mesh = objToMesh(vertices, texCoords, faces)
   elseif ext == "glb" then
     local GLBModel = V.require("GLBModel")
+    GLBModel.setDirectory(PlayerModelInstall.DIR)
     local glbMesh, glbTexture, glbErr, glbStats = GLBModel.load(data, Voxel3D)
     if not glbMesh then
+      print("[PlayerModel] GLB load failed:", glbErr)
       return false, glbErr or "failed to load glb"
     end
     mesh = glbMesh
     texture = glbTexture
+    print("[PlayerModel] GLB loaded successfully")
   elseif ext == "gltf" then
     -- .gltf (JSON + separate .bin/.png files) isn't handled yet -- only the
     -- single-file .glb container is. Convert with e.g. Blender's glTF
@@ -426,6 +428,11 @@ function PlayerModel.loadColosseumCharacter(id)
   if not id or id == "" then return false, "no character id" end
 
   local cached = characterCache[id]
+  if cached and cached.walkVersion ~= CharacterWalkCycle.version then
+    if cached.native then pcall(CharacterNativeAnim.release, cached.native) end
+    characterCache[id] = nil
+    cached = nil
+  end
   if cached then
     characterGroups = cached.groups
     characterWalkRig = cached.walkRig
@@ -519,12 +526,23 @@ function PlayerModel.loadColosseumCharacter(id)
   local sourceHeight = b and ((tonumber(b.max and b.max[2]) or 0) - (tonumber(b.min and b.min[2]) or 0)) or 0
   local scale = (sourceHeight > 0) and (CHARACTER_HEIGHT / sourceHeight) or 1.0
 
-  -- Build the hip/knee/shoulder vertex-bucket rig once here (see
-  -- lib/CharacterWalkCycle.lua) rather than every frame -- it's the same
-  -- per-character shoulder/width landmarks TrainerRig.profile already
-  -- computes for the throw-anchor system, just sorted into buckets.
-  local walkRigOk, walkRig = pcall(CharacterWalkCycle.build, id, groups, b)
+  -- Bind walk overlay verts from the trainer rest skeleton so only
+  -- arms/hands and legs/feet stride on top of idle (victory for Wes).
+  -- Prefer model_cache.lua joints; native_v1/index.lua is the same skeleton
+  -- per clip frame, but the whole index is large, so only open it if the
+  -- rest-pose table is missing.
+  local joints = cache.jointPositions
+  if type(joints) ~= "table" or #joints == 0 then
+    local nativeIndex = GeneratedAssets.readLua(("cache/trainers/%s/native_v1/index.lua"):format(id))
+    local roles = nativeIndex and nativeIndex.roles
+    local role = roles and (roles.idle or roles.victory)
+    local frames = role and role.joints
+    if type(frames) == "table" then joints = frames[1] end
+  end
+  local skeleton = { jointPositions = joints, jointParents = cache.jointParents }
+  local walkRigOk, walkRig = pcall(CharacterWalkCycle.build, id, groups, b, skeleton)
   if not walkRigOk then walkRig = nil end
+  if walkRig then pcall(CharacterWalkCycle.applyFromCache, walkRig, id) end
 
   -- Native idle (or Wes victory) clip from the extracted cache. Optional: a
   -- character with no native_v1 cache (or a topology mismatch) just keeps
@@ -543,7 +561,10 @@ function PlayerModel.loadColosseumCharacter(id)
     print("[PlayerModel] no native animations for '" .. tostring(id) .. "': " .. tostring(nativeErr))
   end
 
-  characterCache[id] = { groups = groups, scale = scale, walkRig = walkRig, native = native }
+  characterCache[id] = {
+    groups = groups, scale = scale, walkRig = walkRig, native = native,
+    walkVersion = CharacterWalkCycle.version, bounds = b, skeleton = skeleton,
+  }
   characterGroups = groups
   characterWalkRig = walkRig
   characterNative = native
@@ -568,9 +589,44 @@ function PlayerModel.getCharacterId()
   return nil
 end
 
--- Get the current character groups (for animation reloading)
 function PlayerModel.getCharacterGroups()
   return characterGroups
+end
+
+function PlayerModel.getCharacterCache()
+  return characterCache
+end
+
+function PlayerModel.getWalkRig()
+  return characterWalkRig
+end
+
+-- Rebuild the gait buckets from rest pose, then re-apply painted
+-- cache/trainers/<id>/walk_overrides.lua (Python editor or model viewer).
+function PlayerModel.reloadWalkOverrides(id)
+  id = id or currentCharacterId
+  local cached = id and characterCache[id]
+  if not cached or not cached.groups then return false, "character not loaded" end
+  local walkRigOk, walkRig = pcall(
+    CharacterWalkCycle.build, id, cached.groups, cached.bounds, cached.skeleton
+  )
+  if not walkRigOk then return false, walkRig end
+  pcall(CharacterWalkCycle.applyFromCache, walkRig, id)
+  cached.walkRig = walkRig
+  cached.walkVersion = CharacterWalkCycle.version
+  if currentCharacterId == id then
+    characterWalkRig = walkRig
+    characterWalkVertexBuffers = {}
+  end
+  return true
+end
+
+function PlayerModel.saveWalkOverrides(id)
+  id = id or currentCharacterId
+  local cached = id and characterCache[id]
+  local rig = cached and cached.walkRig
+  if not rig then return false, "no walk rig" end
+  return CharacterWalkCycle.writeOverrides(id, rig)
 end
 
 -- Get the character cache (for animation reloading)
@@ -640,15 +696,18 @@ function PlayerModel.loadInstalled()
     return PlayerModel.loadColosseumCharacter(characterId)
   end
   
-  -- Check if it's a character model setting (from CharacterModelPick)
+  -- Load as regular model (custom GLB/OBJ takes priority over CharacterModelPick)
+  local ok, err = PlayerModel.load(filename)
+  if ok then return true end
+  
+  -- Fallback to CharacterModelPick if custom model fails
   local CharacterModelPick = V.require("CharacterModelPick")
   local currentCharacterId = CharacterModelPick.getCurrentCharacterId()
   if currentCharacterId and currentCharacterId ~= "off" then
     return PlayerModel.loadColosseumCharacter(currentCharacterId)
   end
   
-  -- Otherwise load as regular OBJ model
-  return PlayerModel.load(filename)
+  return false, err
 end
 
 -- Clear the current model. Leaves modelCache/textureCache/characterCache
@@ -689,6 +748,114 @@ end
 
 -- ------- Rendering
 
+-- Pose the loaded Colosseum character meshes (idle clip + optional gait).
+local function poseCharacterMeshes(walkBlend, walkPhase, jumpProgress)
+  if not (usingCharacter and characterGroups) then return end
+  local overlayWalk = characterWalkRig and (jumpProgress or (walkBlend or 0) > 0.001)
+  local posedGroups = nil
+  if characterNative then
+    local CharacterModelPick = V.require("CharacterModelPick")
+    local roleName = CharacterNativeAnim.resolveRole(characterNative, CharacterModelPick.getCurrentAnimation())
+    if roleName then
+      local sampled = CharacterNativeAnim.sample(characterNative, roleName)
+      if overlayWalk then
+        characterNativePose = CharacterNativeAnim.copyPositions(characterNative, roleName, characterNativePose)
+        posedGroups = characterNativePose
+        characterNative.dirty = true
+      elseif sampled or characterNative.dirty then
+        CharacterNativeAnim.upload(characterNative, roleName)
+        characterNative.dirty = false
+      end
+    end
+  end
+  if overlayWalk then
+    for gi, group in ipairs(characterGroups) do
+      if group.mesh and group.baseVertices then
+        local posed = posedGroups and posedGroups[gi] or nil
+        local buf
+        if jumpProgress then
+          buf = CharacterWalkCycle.applyJump(
+            characterWalkRig, gi, group, jumpProgress,
+            characterWalkVertexBuffers[gi], posed
+          )
+        else
+          buf = CharacterWalkCycle.apply(
+            characterWalkRig, gi, group,
+            walkPhase, walkBlend,
+            characterWalkVertexBuffers[gi], posed
+          )
+        end
+        characterWalkVertexBuffers[gi] = buf
+        group.mesh:setVertices(buf)
+      end
+    end
+  end
+end
+
+-- Draw the loaded character into an already-open Voxel3D scene (menu
+-- studio / CHARACTER VIEWER). yaw is model yaw in radians.
+function PlayerModel.drawPreview(yaw, walking)
+  if not (usingCharacter and characterGroups) then return false end
+  if walking then
+    characterWalkTime = characterWalkTime + 0.12
+  end
+  local blend = walking and 1 or 0
+  characterWalkBlend = blend
+  poseCharacterMeshes(blend, characterWalkTime, nil)
+  local cached = characterCache[currentCharacterId]
+  local scale = cached and cached.scale or 1.0
+  local m = Mat4.mul(Mat4.rotateY((yaw or 0) + math.pi), Mat4.scale(scale, scale, scale))
+  local drawn = false
+  for _, group in ipairs(characterGroups) do
+    if group.mesh then
+      Voxel3D.draw(group.mesh, group.texture, m)
+      drawn = true
+    end
+  end
+  return drawn
+end
+
+function PlayerModel.previewHeight()
+  local cached = currentCharacterId and characterCache[currentCharacterId]
+  local b = cached and cached.bounds
+  if type(b) == "table" and type(b.max) == "table" and type(b.min) == "table" then
+    return math.max(0.05, (b.max[2] or 1) - (b.min[2] or 0))
+  end
+  if type(b) == "table" and b.height then return math.max(0.05, b.height) end
+  return 1
+end
+
+-- Yaw for the player mesh. Voxel free-roam uses FirstPerson's eye. Gen 4
+-- third/first uses Gen4ActorCam.modelYaw (Gen4View look + travel), the
+-- same continuous body bearing FreeMove writes. field3d stays world
+-- compass -- that camera is still the cartridge look.
+local function yawForDraw(px, py, facing, kind, b, FirstPerson)
+  local Cam = V.require("Gen4ActorCam")
+  if Cam and Cam.freeRoam and Cam.freeRoam() then
+    return Cam.modelYaw()
+  end
+  if Cam and Cam.active and Cam.active() then
+    return -Cam.worldYaw(facing)
+  end
+  if not (b and b > 0 and FirstPerson) then
+    return (Cam and Cam.worldYaw(facing)) or 0
+  end
+  local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
+  facing = type(facing) == "string" and string.lower(facing) or facing
+  if kind == "awayCam" then
+    if facing == "down" then return (cameraYaw + math.pi) * b end
+    if facing == "up" then return cameraYaw * b end
+    if facing == "right" then return (cameraYaw - math.pi / 2) * b end
+    if facing == "left" then return (cameraYaw + math.pi / 2) * b end
+    return cameraYaw * b
+  end
+  if facing == "down" then return cameraYaw * b end
+  if facing == "up" then return (cameraYaw + math.pi) * b end
+  if facing == "left" then return (cameraYaw + math.pi / 2) * b end
+  if facing == "right" then return (cameraYaw - math.pi / 2) * b end
+  return 0
+end
+
 -- Draw the player model at the given position with the given transform.
 -- This integrates with the existing Voxel3D pipeline.
 --- `mirror` is the sprite step-flip flag (see stepFlip in movement.lua /
@@ -704,11 +871,14 @@ end
 --- parameter so callers can keep passing the same stepFlip value used for
 --- the 2D sprite path without needing a special case.
 function PlayerModel.draw(px, py, y, facing, mirror)
-  -- In free-roam mode with FreeMove, use the actual body facing direction
+  -- Voxel free-roam: FirstPerson body. Gen4 third/first: Gen4ActorCam
+  -- already owns facing via FreeMove; do not remap through worldToScreen
+  -- or the voxel cardBlend (that blend is 0 on Platinum).
   local FirstPerson = V.require("FirstPerson")
-  local b = FirstPerson.cardBlend()
+  local Cam = V.require("Gen4ActorCam")
+  local gen4Cam = Cam and Cam.freeRoam and Cam.freeRoam()
+  local b = (not gen4Cam) and FirstPerson.cardBlend() or 0
   if b > 0 then
-    -- Use the continuous body facing from FirstPerson instead of grid facing
     facing = FirstPerson.pointBody(0, 0)
   end
   
@@ -721,20 +891,21 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     local dt = 1 / 60  -- Assume 60 FPS, same assumption the Stadium branch makes
     ColosseumMon.update(currentColosseumDex, colosseumVariant, dt)
 
-    -- Check if we're in free-roam mode (1st or 3rd person)
-    local FirstPerson = V.require("FirstPerson")
-    local b = FirstPerson.cardBlend()
-    
     -- Detect if player is moving by checking actual input
     local Game = require("src.core.Game")
     local isMoving = Game.input:isDown("up") or Game.input:isDown("down") 
                     or Game.input:isDown("left") or Game.input:isDown("right")
     
     local fx, fz
-    local m
-    
-    if isMoving and b > 0 then
-      -- When moving in free-roam mode, detect which key is pressed and use that direction
+    local m = Mat4.translate(px + 8, y, py + 8)
+    local yaw = yawForDraw(px, py, facing, "awayCam", b, FirstPerson)
+
+    if gen4Cam or not (b > 0) then
+      if yaw ~= 0 then
+        m = Mat4.mul(m, Mat4.rotateY(yaw))
+      end
+      fx, fz = ColosseumMon.towardFor(facing)
+    elseif isMoving then
       local moveDirection = facing
       if Game.input:isDown("up") then
         moveDirection = "up"
@@ -745,77 +916,34 @@ function PlayerModel.draw(px, py, y, facing, mirror)
       elseif Game.input:isDown("right") then
         moveDirection = "right"
       end
-      
-      -- Calculate rotation based on camera yaw and movement direction
-      local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
-      local yaw = 0
-      
-      if moveDirection == "down" then
-        yaw = (cameraYaw + math.pi) * b
-      elseif moveDirection == "up" then
-        yaw = cameraYaw * b
-      elseif moveDirection == "right" then
-        yaw = (cameraYaw - math.pi / 2) * b
-      elseif moveDirection == "left" then
-        yaw = (cameraYaw + math.pi / 2) * b
-      end
-      
-      -- Create base matrix with position
-      m = Mat4.translate(px + 8, y, py + 8)
-      
-      -- Apply the calculated rotation
+      yaw = yawForDraw(px, py, moveDirection, "awayCam", b, FirstPerson)
       if yaw ~= 0 then
         m = Mat4.mul(m, Mat4.rotateY(yaw))
       end
-      
-      -- Use forward direction for towardFor (the rotation handles the actual direction)
       fx, fz = ColosseumMon.towardFor("up")
-      local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
-      if tempM then
-        -- Extract just the scale/transform parts from the Colosseum matrix
-        -- and apply them to our positioned+rotated matrix
-        m = Mat4.mul(m, tempM)
-      end
-    elseif b > 0 then
-      -- When idle in free-roam mode, follow camera yaw
-      local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
-      
-      -- Create base matrix with position
-      m = Mat4.translate(px + 8, y, py + 8)
-      
-      -- Apply camera yaw rotation
-      m = Mat4.mul(m, Mat4.rotateY(cameraYaw))
-      
-      -- Use forward direction for towardFor
-      fx, fz = ColosseumMon.towardFor("up")
-      local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
-      if tempM then
-        m = Mat4.mul(m, tempM)
-      end
     else
-      -- In other modes, use simple movement direction
-      -- Create base matrix with position
-      m = Mat4.translate(px + 8, y, py + 8)
-      
-      -- Apply simple rotation based on facing
-      local yaw = 0
-      if facing == "right" then
-        yaw = math.pi / 2
-      elseif facing == "up" then
-        yaw = math.pi
-      elseif facing == "left" then
-        yaw = -math.pi / 2
-      end
-      
-      if yaw ~= 0 then
-        m = Mat4.mul(m, Mat4.rotateY(yaw))
-      end
-      
-      -- Use facing direction for towardFor
-      fx, fz = ColosseumMon.towardFor(facing)
-      local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
-      if tempM then
-        m = Mat4.mul(m, tempM)
+      m = Mat4.mul(m, Mat4.rotateY(FirstPerson.cardYaw(px + 8, py + 8)))
+      fx, fz = ColosseumMon.towardFor("up")
+    end
+
+    local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
+    if tempM then
+      m = Mat4.mul(m, tempM)
+    end
+
+    -- Detect if we're in Gen4's native 3D world and adjust scale
+    -- Gen4 NSBMD world has different proportions than voxel worlds
+    local okGame, Game = pcall(require, "src.core.Game")
+    if okGame and Game then
+      local game = Game.get and Game:get()
+      if game and game.overworld and game.overworld.map then
+        local map = game.overworld.map
+        local renderer = map and map.renderer
+        local gen4Ground = renderer and renderer.gen4Ground
+        if gen4Ground then
+          -- In Gen4's native NSBMD world, scale up to match terrain proportions
+          m = Mat4.mul(m, Mat4.scale(2.0, 2.0, 2.0))
+        end
       end
     end
 
@@ -838,39 +966,8 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- Calculate the model matrix based on position and facing
     local m = Mat4.translate(px + 8, y, py + 8)
     
-    -- Check if we're in free-roam mode (1st or 3rd person)
-    local FirstPerson = V.require("FirstPerson")
-    local b = FirstPerson.cardBlend()
-    
     -- Apply rotation based on facing direction
-    local yaw = 0
-    if b > 0 then
-      -- In free-roam mode, use camera-relative rotation like StadiumFollower
-      local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
-      
-      if facing == "down" then
-        -- Moving backwards: face the camera
-        yaw = cameraYaw * b
-      elseif facing == "up" then
-        -- Moving forward: face away from the camera
-        yaw = (cameraYaw + math.pi) * b
-      elseif facing == "left" then
-        -- Moving left: turn 90 degrees left
-        yaw = (cameraYaw + math.pi / 2) * b
-      elseif facing == "right" then
-        -- Moving right: turn 90 degrees right
-        yaw = (cameraYaw - math.pi / 2) * b
-      end
-    else
-      -- In other modes, rotate based on movement direction
-      if facing == "right" then
-        yaw = math.pi / 2
-      elseif facing == "up" then
-        yaw = math.pi
-      elseif facing == "left" then
-        yaw = -math.pi / 2
-      end
-    end
+    local yaw = yawForDraw(px, py, facing, "towardCam", b, FirstPerson)
     
     if yaw ~= 0 then
       m = Mat4.mul(m, Mat4.rotateY(yaw))
@@ -881,6 +978,23 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- Apply scaling for Stadium model (use similar scale to Pokemon in battles)
     local model = currentStadiumModel
     local scale = StadiumMon.scaleFor(model) * 1.5  -- 0.5 * 4 = 2.0 (4x larger for Mewtwo)
+    
+    -- Detect if we're in Gen4's native 3D world and adjust scale
+    -- Gen4 NSBMD world has different proportions than voxel worlds
+    local okGame, Game = pcall(require, "src.core.Game")
+    if okGame and Game then
+      local game = Game.get and Game:get()
+      if game and game.overworld and game.overworld.map then
+        local map = game.overworld.map
+        local renderer = map and map.renderer
+        local gen4Ground = renderer and renderer.gen4Ground
+        if gen4Ground then
+          -- In Gen4's native NSBMD world, use larger scale to match terrain proportions
+          scale = scale * 1.7  -- Double the scale for Gen4
+        end
+      end
+    end
+    
     m = Mat4.mul(m, Mat4.scale(scale, scale, scale))
     
     -- Stand the model on its own lowest point and give back HOVER_CAP of
@@ -957,63 +1071,15 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- walking, then swing the procedural gait on those posed vertices.
     -- Native walk tracks are skipped: extraction dropped feet and broke
     -- other clips. See lib/CharacterWalkCycle.lua.
-    local overlayWalk = characterWalkRig and (jumpProgress or characterWalkBlend > 0.001)
-    local posedGroups = nil
-    if characterNative then
-      local CharacterModelPick = V.require("CharacterModelPick")
-      local roleName = CharacterNativeAnim.resolveRole(characterNative, CharacterModelPick.getCurrentAnimation())
-      if roleName then
-        local sampled = CharacterNativeAnim.sample(characterNative, roleName)
-        if overlayWalk then
-          characterNativePose = CharacterNativeAnim.copyPositions(characterNative, roleName, characterNativePose)
-          posedGroups = characterNativePose
-          -- Walk wrote over the mesh; idle stages stay valid for the stop.
-          characterNative.dirty = true
-        elseif sampled or characterNative.dirty then
-          CharacterNativeAnim.upload(characterNative, roleName)
-          characterNative.dirty = false
-        end
-      end
-    end
-
-    if overlayWalk then
-      for gi, group in ipairs(characterGroups) do
-        if group.mesh and group.baseVertices then
-          local posed = posedGroups and posedGroups[gi] or nil
-          local buf
-          if jumpProgress then
-            -- A hop has no gait to loop -- one clean up/down arc, not a
-            -- repeating stride -- so it gets its own single-pass pose
-            -- instead of another position on the walk cycle's phase wheel.
-            buf = CharacterWalkCycle.applyJump(
-              characterWalkRig, gi, group, jumpProgress,
-              characterWalkVertexBuffers[gi], posed
-            )
-          else
-            buf = CharacterWalkCycle.apply(
-              characterWalkRig, gi, group,
-              characterWalkTime, characterWalkBlend,
-              characterWalkVertexBuffers[gi], posed
-            )
-          end
-          characterWalkVertexBuffers[gi] = buf
-          group.mesh:setVertices(buf)
-        end
-      end
-    end
+    poseCharacterMeshes(characterWalkBlend, characterWalkTime, jumpProgress)
 
     -- Calculate the model matrix based on position and facing
     local m = Mat4.translate(px + 8, y, py + 8)
     
     -- Apply rotation based on facing direction (same as Pokemon models)
-    local yaw = 0
-    
-    if b > 0 then
-      -- In free-roam mode, use camera-relative rotation like Pokemon models
-      local cameraYaw = FirstPerson.cardYaw(px + 8, py + 8)
-      
+    local yaw = yawForDraw(px, py, facing, "awayCam", b, FirstPerson)
+    if (not gen4Cam) and b > 0 then
       if isMoving then
-        -- When moving in free-roam mode, detect which key is pressed and use that direction
         local moveDirection = facing
         if Game.input:isDown("up") then
           moveDirection = "up"
@@ -1024,35 +1090,21 @@ function PlayerModel.draw(px, py, y, facing, mirror)
         elseif Game.input:isDown("right") then
           moveDirection = "right"
         end
-        
-        -- Calculate rotation based on camera yaw and movement direction
-        if moveDirection == "down" then
-          yaw = (cameraYaw + math.pi) * b
-        elseif moveDirection == "up" then
-          yaw = cameraYaw * b
-        elseif moveDirection == "right" then
-          yaw = (cameraYaw - math.pi / 2) * b
-        elseif moveDirection == "left" then
-          yaw = (cameraYaw + math.pi / 2) * b
-        end
+        yaw = yawForDraw(px, py, moveDirection, "awayCam", b, FirstPerson)
       else
-        -- When idle in free-roam mode, follow camera yaw
-        yaw = cameraYaw * b
-      end
-    else
-      -- In other modes, use simple movement direction
-      if facing == "right" then
-        yaw = math.pi / 2
-      elseif facing == "up" then
-        yaw = math.pi
-      elseif facing == "left" then
-        yaw = -math.pi / 2
+        yaw = FirstPerson.cardYaw(px + 8, py + 8) * b
       end
     end
     
-    -- Add 180-degree rotation so character faces the right direction
+
+        local gen4Ground = ow and ow.map and ow.map.renderer and ow.map.renderer.gen4Ground
+    if gen4Ground then
+    -- Apply rotation so character faces the right direction
+    m = Mat4.mul(m, Mat4.rotateY(yaw))
+    else     -- Add 180-degree rotation so character faces the right direction
     m = Mat4.mul(m, Mat4.rotateY(yaw + math.pi))
-    
+
+    end
     -- The old whole-body bob+rock hack that used to stand in for a walk
     -- animation lived here -- it's gone now that CharacterWalkCycle
     -- actually swings the legs/arms per vertex (including its own, much
@@ -1064,6 +1116,15 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     -- Apply character scale from cache
     local cached = characterCache[currentCharacterId]
     local scale = cached and cached.scale or 1.0
+    
+    -- Detect if we're in Gen4's native 3D world and adjust scale
+    -- Gen4 NSBMD world has different proportions than voxel worlds
+    local gen4Ground = ow and ow.map and ow.map.renderer and ow.map.renderer.gen4Ground
+    if gen4Ground then
+      -- In Gen4's native NSBMD world, scale up to match terrain proportions
+      scale = scale * 1.5
+    end
+    
     m = Mat4.mul(m, Mat4.scale(scale, scale, scale))
     
     -- Draw each material group with its texture
@@ -1087,14 +1148,7 @@ function PlayerModel.draw(px, py, y, facing, mirror)
   local m = Mat4.translate(px + 8, y, py + 8)
   
   -- Apply rotation based on facing direction
-  local yaw = 0
-  if facing == "right" then
-    yaw = math.pi / 2
-  elseif facing == "up" then
-    yaw = math.pi
-  elseif facing == "left" then
-    yaw = -math.pi / 2
-  end
+  local yaw = yawForDraw(px, py, facing, "towardCam", b, FirstPerson)
   
   if yaw ~= 0 then
     m = Mat4.mul(m, Mat4.rotateY(yaw))
@@ -1103,8 +1157,8 @@ function PlayerModel.draw(px, py, y, facing, mirror)
   -- `mirror` intentionally unused here -- see the note above PlayerModel.draw.
   
   -- Apply scaling to match game world units
-  -- Increased scale to make the model more visible
-  local scale = 4.0  -- Increased from 0.1 to 1.0
+  -- GLB models from Battle Sprites Reloaded need much smaller scale
+  local scale = 0.1
   m = Mat4.mul(m, Mat4.scale(scale, scale, scale))
   
   -- Draw the mesh using Voxel3D with texture

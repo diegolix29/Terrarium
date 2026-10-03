@@ -400,4 +400,98 @@ function H.meters(dex)
   return dm and (dm / 10) or nil
 end
 
+-- PokeAPI pokemon-shape id per National Dex #1..386.
+-- https://github.com/PokeAPI/pokeapi/blob/master/data/v2/csv/pokemon_species.csv
+-- 1 ball, 2 squiggle, 3 fish, 4 arms, 5 blob, 6 upright, 7 legs, 8 quadruped,
+-- 9 wings, 10 tentacles, 11 heads, 12 humanoid, 13 bug-wings, 14 armor
+H.SHAPE = {
+   8, 8, 8, 6, 6, 6, 6, 6, 6,14, 2,13,14, 2,13, 9, -- 1..16
+   9, 9, 8, 8, 9, 9, 2, 2, 8, 6, 6, 6, 8, 8, 6, 8, -- 17..32
+   8, 6, 6, 6, 8, 8,12,12, 9, 9, 7,12,12,14,14,12, -- 33..48
+  13, 5,11, 8, 8, 6, 6, 6, 6, 8, 8, 7,12,12, 6, 6, -- 49..64
+  12, 6,12,12,12, 5, 5,10,10, 4,12,12, 8, 8, 8, 6, -- 65..80
+   4,11, 9, 7, 7, 3, 3, 4, 4, 1, 1, 1, 4, 6, 2,12, -- 81..96
+  12,14,14, 1, 1,11, 7, 6, 6,12,12, 6, 1,11, 8, 6, -- 97..112
+   6, 7, 6, 5, 5, 3, 3, 5, 5,12,13,12, 6, 6,12, 8, -- 113..128
+   3, 2, 3, 1, 8, 8, 8, 8, 7,10,10,14, 6, 9,12, 9, -- 129..144
+   9, 9, 2, 2, 6, 6, 6, 8, 8, 8,12, 8, 8, 6, 6, 6, -- 145..160
+   8, 8, 9, 9, 9, 9,14,14,13, 3, 3, 8, 6,12,12,12, -- 161..176
+   9, 9, 8, 6, 6,12, 6, 6,12,12, 6, 6, 6, 6, 1,12, -- 177..192
+  13, 7, 6, 8, 8, 9, 6, 1, 1, 5, 8, 1, 1, 2, 9, 2, -- 193..208
+  12, 6, 3,13,14,12, 6, 6, 6, 2, 2, 8, 8,14, 3,10, -- 209..224
+   9, 9, 9, 8, 8, 5, 8, 8, 7, 8, 6,12, 6,12,12, 6, -- 225..240
+   6,12, 8, 8, 8, 6, 2, 6, 9, 9,12, 6, 6, 6, 7, 6, -- 241..256
+   6, 8, 6, 6, 8, 8, 8, 8,14, 1,13, 1,13,14,12,12, -- 257..272
+   7,12,12, 9, 9, 9, 9,12,12,12,14,13, 7, 6, 8, 6, -- 273..288
+  12,14,13, 5, 6, 6, 6,12,12, 7,12, 8, 8,12,12, 8, -- 289..304
+   8, 6,12,12, 8, 8, 6, 6, 6,12,12, 4, 4, 3, 3, 3, -- 305..320
+   3, 8, 8, 8, 4, 6, 6,14,13, 9,12,12, 9, 9, 6, 2, -- 321..336
+   1, 1, 3, 3,14,14, 4, 4, 5, 5,14, 6, 3, 2, 1, 6, -- 337..352
+   1, 6, 4,12, 8, 4, 8, 6,12, 1, 3, 3, 8, 1, 2, 2, -- 353..368
+   3, 3,12, 8, 8, 5, 4,11,12,12,12, 9, 9, 3, 6, 2, -- 369..384
+  12,12, -- 385..386
+}
+
+H.SHAPE_ID = {
+  [1] = "ball",
+  [2] = "squiggle",
+  [3] = "fish",
+  [4] = "arms",
+  [5] = "blob",
+  [6] = "upright",
+  [7] = "legs",
+  [8] = "quadruped",
+  [9] = "wings",
+  [10] = "tentacles",
+  [11] = "heads",
+  [12] = "humanoid",
+  [13] = "bug-wings",
+  [14] = "armor",
+}
+
+-- Global silhouette rules. Pokédex "height" is standing height for uprights
+-- and most quadrupeds, but it is body length for long squiggles, often
+-- wingspan-adjacent for birds, and tentacle-span for jellies. Colosseum
+-- meshes are the compact battle pose, so these factors run for every species
+-- of that shape -- not a per-Pokémon patch list.
+--
+-- Squiggle/fish only kick in past a metre threshold so cocoons (Metapod)
+-- and short fish (Magikarp, Lapras) keep published standing size.
+H.SHAPE_FACTOR = {
+  [9] = 0.80,  -- wings
+  [13] = 0.80, -- bug-wings
+  [10] = 0.75, -- tentacles
+}
+
+H.LENGTH_SHAPE = {
+  [2] = { minMeters = 1.5, factor = 0.50 }, -- squiggle: Ekans, Dratini, Onix...
+  [3] = { minMeters = 3.0, factor = 0.55 }, -- fish: Wailord, Kyogre
+}
+
+-- True exceptions the shape rules still get wrong (sitting upright, long weasel).
+H.BATTLE_BODY_FACTOR = {
+  [63] = 0.68,  -- abra: upright in the dex, seated/floating in Colosseum
+  [162] = 0.62, -- furret: quadruped whose 1.8 m is body length
+}
+
+function H.shapeId(dex)
+  return H.SHAPE[tonumber(dex)]
+end
+
+function H.battleBodyFactor(dex)
+  local id = tonumber(dex)
+  if not id then return 1 end
+  local override = H.BATTLE_BODY_FACTOR[id]
+  if override and override > 0 then return override end
+  local shape = H.SHAPE[id]
+  local meters = H.meters(id)
+  local lengthRule = shape and H.LENGTH_SHAPE[shape]
+  if lengthRule and meters and meters >= lengthRule.minMeters then
+    return lengthRule.factor
+  end
+  local byShape = shape and H.SHAPE_FACTOR[shape]
+  if byShape and byShape > 0 then return byShape end
+  return 1
+end
+
 return H

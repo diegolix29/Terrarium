@@ -846,21 +846,104 @@ local function viewFacing(p)
   return p.facing
 end
 
+local function cardTexture(sprite, def)
+  if def and def.hdImage then return def.hdImage end
+  return sprite:resolveImage()
+end
+
+local function hdModule()
+  local HD = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+  if HD then return HD end
+  local ok, m = pcall(V.require, "HDPokemonSheets")
+  if ok and type(m) == "table" then
+    V.HDPokemonSheets = m
+    return m
+  end
+  return nil
+end
+
+local function poseGame(state)
+  if state and state.game then return state.game end
+  local mod = V.mod
+  if mod and mod.game then return mod.game end
+  if mod and mod.world and mod.world.game then return mod.world.game end
+  local ok, Game = pcall(require, "src.core.Game")
+  if ok and Game then
+    if type(Game.get) == "function" then
+      local inst = Game:get()
+      if inst then return inst end
+    end
+    return Game
+  end
+  return nil
+end
+
+local function poseIsFollower(p)
+  if not p then return false end
+  if p.isFollower then return true end
+  local e = p.entity
+  if type(e) ~= "table" then return false end
+  return e.isFollower == true or e.wildsFollower == true
+    or e.pikachuFollower == true or e.follower == true
+    or e._wildsFollowerSpecies ~= nil
+end
+
+-- HD Reloded overworld card when no Stadium/Colosseum model owns this mon.
+-- Uses a per-entity overlay so the shared 16px walk-sheet def stays intact
+-- for the 2D blit (and so PaletteFX cannot swap the HD texture for a bake).
+local function bindHdOverworld(p, facing, state)
+  if not p or p.isPlayer then return nil end
+  local HD = hdModule()
+  if not (HD and type(HD.bindOverworldDef) == "function") then return nil end
+  local sprite = p.sprite
+  local base = sprite and sprite.def
+  if type(base) ~= "table" then return nil end
+  local e = p.entity
+  local follower = poseIsFollower(p)
+  local pokemon = follower
+    or (type(e) == "table" and (e.roamer or e.species or e._wildsFollowerSpecies))
+    or base.hdDex or base.dsSpecies
+    or (StadiumWilds.isWildPokemon and StadiumWilds.isWildPokemon(p))
+  if not pokemon then return nil end
+  local game = poseGame(state)
+  local data = game and game.data
+  local dex = tonumber(base.hdDex)
+    or (HD.dexOf and (HD.dexOf(e, data) or HD.dexOf(p, data)
+                      or HD.dexOf(base.dsSpecies, data)
+                      or HD.dexOf(base.hdDex, data)))
+  if not dex then return nil end
+  local overlay = HD.bindOverworldDef(e or p, base, {
+    dex = dex,
+    facing = HD.sheetFacing(facing, follower and "follower" or "roamer"),
+    shiny = (e and (e.shiny or e.isShiny)) or p.shiny,
+    game = game,
+    key = "ow:" .. tostring(e or p) .. ":" .. tostring(dex),
+  })
+  if overlay then
+    p.hdDef = overlay
+    -- The 16px walk def is what inspectors and the 2D blit read. Tag it so
+    -- PaletteFX / TerrainAtlas stop remapping HD-backed mons as DMG pixels.
+    base.trueColor = true
+    if not base.hdDex then base.hdDex = dex end
+  end
+  return overlay
+end
+
 -- FALLBACK ONLY (see castShadows below). Draw one entity's drop shadow as
 -- a decal: its current sprite frame as a single quad, flattened onto the
 -- ground along the sun line (Voxel3D.shadowMatrix). Runs inside
 -- beginShadows, which supplies the translucent black; the texture is only
 -- consulted for its alpha, so no palette work is needed.
 local function drawShadow(sprite, px, py, facing, phase, flip, gh, lift,
-                          waterline, yaw)
-  local def = sprite.def
+                          waterline, yaw, defOverride)
+  local def = defOverride or sprite.def
   local frame, mirror = frameFor(def, facing, phase, flip, yaw)
   local mesh = SpriteBillboards.shadowQuad(def, frame, waterline or 0)
   if not mesh then return end
   
   -- Get sprite dimensions for dynamic sizing (texture dims and world dims)
   local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
-  Voxel3D.draw(mesh, sprite:resolveImage(),
+  Voxel3D.draw(mesh, cardTexture(sprite, def),
                Voxel3D.shadowMatrix(px, py, gh, lift, mirror, worldWidth, worldHeight))
 end
 
@@ -1028,10 +1111,10 @@ end
 -- `lift` raises the figure off the ground plane (ledge hops arc UP in 3D,
 -- where the 2D path could only slide the sprite north).
 local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
-                          lift, waterline, isPlayer, yaw)
-  local def = sprite.def
-  local tex = sprite:resolveImage()
-  if colors and not def.trueColor then
+                          lift, waterline, isPlayer, yaw, defOverride)
+  local def = defOverride or sprite.def
+  local tex = cardTexture(sprite, def)
+  if colors and not def.trueColor and not def.hdImage then
     tex = TerrainAtlas.forSprite(def.image, colors) or tex
   end
   local y = gh + (lift or 0)
@@ -1051,9 +1134,11 @@ local function drawEntity(sprite, px, py, facing, phase, flip, gh, colors,
   -- Get sprite dimensions for dynamic sizing (texture dims and world dims)
   local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
   
-  -- Apply LOD bias for sharpness when scaling down
+  -- Apply LOD bias for sharpness when scaling down (optional; Voxel3D may
+  -- not expose this hook). HD sheets always scale below 1, so a missing
+  -- field used to take the whole voxel pipeline down.
   local scale = def.scale or 1.0
-  if scale < 1.0 then
+  if scale < 1.0 and type(Voxel3D.setLodBias) == "function" then
     local lodBias = SpriteBillboards.getLodBiasForScale(scale)
     if lodBias ~= 0.0 then
       Voxel3D.setLodBias(lodBias)
@@ -1201,39 +1286,30 @@ local function drawCast(state, posed, me, atlasFor, yaw)
     if not (p.isPlayer and hideMe) and (p.isPlayer or cardShows(p)) then
       shown = shown + 1
       -- Check if this is the player and a custom model is loaded
+      local facing = viewFacing(p)
+      local hdDef = bindHdOverworld(p, facing, state)
+      local stadiumFollower3d = poseIsFollower(p) and StadiumFollower.loaded()
+        and not (StadiumFollower.isUsingSpriteFallback
+                 and StadiumFollower.isUsingSpriteFallback())
       if p.isPlayer and PlayerModel.loaded() then
-        -- Draw custom 3D model instead of sprite
-        PlayerModel.draw(p.px, p.py, p.gh + (p.lift or 0), viewFacing(p), p.flip)
-      -- Check if this is the Pikachu follower and Stadium follower is loaded
-      elseif p.isFollower and StadiumFollower.loaded() then
-        -- Update follower animation
+        PlayerModel.draw(p.px, p.py, p.gh + (p.lift or 0), facing, p.flip)
+      elseif stadiumFollower3d then
         StadiumFollower.update(1 / 60)
-        -- Draw Stadium follower model instead of sprite
-        StadiumFollower.draw(p.px, p.py, viewFacing(p))
-      -- Check if this is a wild Pokemon and Stadium wilds is enabled
+        StadiumFollower.draw(p.px, p.py, facing, p.gh)
       elseif StadiumWilds.enabled() and StadiumWilds.isWildPokemon(p) then
-        -- (a debug print stood here, twice, inside the per-entity draw loop.
-        -- On Windows print() to a console is a SYNCHRONOUS write -- the
-        -- engine's own Logger carries a comment about that exact cost -- so
-        -- every wild Pokemon on screen was buying a console round trip per
-        -- frame, inside the pass measured at 78 ms.)
-        -- Try to load the model if not already loaded
         if not StadiumWilds.hasModel(p) then
           StadiumWilds.loadEntityModel(p)
         end
-        -- If model is available, draw it
         if StadiumWilds.hasModel(p) then
           StadiumWilds.updateEntity(p, 1 / 60)
           StadiumWilds.drawEntity(p)
         else
-          -- Fall back to sprite if model not available
-          drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                     p.colors, p.lift, p.waterline, p.isPlayer, yaw)
+          drawEntity(p.sprite, p.px, p.py, facing, p.phase, p.flip, p.gh,
+                     p.colors, p.lift, p.waterline, p.isPlayer, yaw, hdDef)
         end
       else
-        --.Draw normal sprite entity
-        drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                   p.colors, p.lift, p.waterline, p.isPlayer, yaw)
+        drawEntity(p.sprite, p.px, p.py, facing, p.phase, p.flip, p.gh,
+                   p.colors, p.lift, p.waterline, p.isPlayer, yaw, hdDef)
       end
     elseif not (p.isPlayer and hideMe) then
       culled = culled + 1
@@ -1267,11 +1343,11 @@ end
 -- patch either. A silhouette is an outline, so an outline is the right
 -- mesh for it.
 local function drawGhost(p, yaw)
-  local def = p.sprite.def
+  local def = bindHdOverworld(p, viewFacing(p)) or p.hdDef or p.sprite.def
   local frame, mirror = frameFor(def, viewFacing(p), p.phase, p.flip, yaw)
   local mesh = SpriteBillboards.shadowQuad(def, frame)
   if not mesh then return end
-  local tex = p.sprite:resolveImage()
+  local tex = cardTexture(p.sprite, def)
   if p.colors and not def.trueColor then
     tex = TerrainAtlas.forSprite(def.image, p.colors) or tex
   end
@@ -1488,7 +1564,11 @@ local function posesOf(state, spriteColors)
       lift = onWater and 0 or (g.npc.py - vy),
       waterline = wl,
       colors = spriteColors(g.map or state.map),
+      entity = g.npc,
+      isFollower = g.npc.isFollower or g.npc.wildsFollower
+        or g.npc.pikachuFollower or g.npc._wildsFollowerSpecies ~= nil,
     }
+    bindHdOverworld(posed[#posed], facing, state)
     end
   end
   for ei, e in ipairs(state.entities or {}) do
@@ -1535,10 +1615,14 @@ local function posesOf(state, spriteColors)
         waterline = wl,
         colors = colors,
         entity = e, entityIndex = ei,
+        isFollower = e.isFollower or e.wildsFollower
+          or e.pikachuFollower or e._wildsFollowerSpecies ~= nil,
       }
       if e == state.player then
         me = posed[#posed]
         me.isPlayer = true
+      else
+        bindHdOverworld(posed[#posed], facing, state)
       end
     end
   end
@@ -1807,7 +1891,7 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
   for _, p in ipairs(posed) do
     if castsInto(box, p) then
       sunCards = sunCards + 1
-      local def = p.sprite.def
+      local def = bindHdOverworld(p, viewFacing(p), state) or p.hdDef or p.sprite.def
       -- viewFacing, exactly as the camera draw picks it (see viewFacing for
       -- why the two passes must agree): in first person the sun's card
       -- swaps frame as the eye circles, which costs a redraw the signature
@@ -1817,7 +1901,7 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
       local mesh = SpriteBillboards.shadowQuad(def, frame, p.waterline or 0)
       if mesh then
         local texWidth, texHeight, worldWidth, worldHeight = SpriteBillboards.getSpriteDimensions(def, frame)
-        ShadowMap.draw(mesh, p.sprite:resolveImage(),
+        ShadowMap.draw(mesh, cardTexture(p.sprite, def),
                        ShadowMap.snug(
                          Voxel3D.casterMatrix(p.px, p.py, p.gh + (p.lift or 0),
                                               mirror, worldWidth, worldHeight)))
@@ -2183,8 +2267,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     if Shadows.enabled() and not Voxel3D.shadowsActive() then
       Voxel3D.beginShadows()
       for _, p in ipairs(posed) do
-        drawShadow(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                   p.lift, p.waterline, yaw)
+        local facing = viewFacing(p)
+        drawShadow(p.sprite, p.px, p.py, facing, p.phase, p.flip, p.gh,
+                   p.lift, p.waterline, yaw,
+                   bindHdOverworld(p, facing, state) or p.hdDef)
       end
       Voxel3D.endShadows()
     end

@@ -357,6 +357,16 @@ end
 
 function BattleScene.groundY(map, arena)
   if arena and arena.discs then return 0 end
+  do
+    local okH, Host = pcall(V.require, "Gen4WorldHost")
+    if okH and Host and Host.groundOf then
+      local ground = Host.groundOf({ map = map })
+      if ground and ground.groundY and arena and arena.mid then
+        local okG, h = pcall(ground.groundY, ground, arena.mid[1], arena.mid[2])
+        if okG and tonumber(h) then return h end
+      end
+    end
+  end
   local ok, h = pcall(VoxelScene.groundAt, map,
                       arena.playerCell[1], arena.playerCell[2])
   return (ok and h) or 0
@@ -386,6 +396,14 @@ end
 function BattleScene.render(state, arena, textures, token)
   if not (state and state.map and arena) then return nil end
   if not Voxel3D.available() then return nil end
+  do
+    local okH, Host = pcall(V.require, "Gen4WorldHost")
+    if okH and Host and Host.isMap and Host.isMap(state.map)
+       and Host.renderBattle and not (arena.discs and not arena.showTerrain) then
+      local okShot, shot = pcall(Host.renderBattle, state, arena, textures, token)
+      if okShot and shot then return shot end
+    end
+  end
   tickTiles()
 
   local host = arena.map or state.map

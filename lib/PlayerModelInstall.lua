@@ -33,7 +33,8 @@ local function readMarker()
   if not (f and isFile(PlayerModelInstall.MARKER)) then return nil end
   local ok, text = pcall(f.read, PlayerModelInstall.MARKER)
   if not (ok and type(text) == "string") then return nil end
-  local format, filename = text:match("^(%S+)%s+(.+)$")
+  local cleaned = text:gsub("[\r\n]", "")
+  local format, filename = cleaned:match("^(%S+)%s+(.+)$")
   if not format then return nil end
   return { format = format, filename = filename }
 end
@@ -69,18 +70,13 @@ function PlayerModelInstall.installed()
   if not marker.filename or marker.filename == "" then
     return false
   end
-  -- Check if this is a Stadium model marker (format: stadium_player_X)
   local dexStr = marker.filename:match("stadium_player_(%d+)")
   if dexStr then
-    return true  -- Stadium models don't need physical files
+    return true
   end
-  -- Check if this is a Colosseum character marker (format:
-  -- colosseum_character_ID, see PlayerModel.loadColosseumCharacter) --
-  -- same deal, the model lives in the generated Colosseum cache, not here.
   if marker.filename:match("^colosseum_character_.+$") then
     return true
   end
-  -- For regular models, check if the file exists
   local path = PlayerModelInstall.DIR .. "/" .. marker.filename
   return isFile(path)
 end

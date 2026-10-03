@@ -163,13 +163,15 @@ local DEFINITIONS={
     -- Arena.lua draws the live voxel field pocket cached at battle start (see
     -- ArenaOverworldSnapshot) as this arena's stage. Spatial numbers below are
     -- overwritten at acquire time from BattleArena.find / BattleCam -- EXCEPT
-    -- figureScale/trainerScale, which are not touched by that path and are the
-    -- actual model scale used. Bumped 20% over the outdoor_wild baseline
-    -- (0.365/0.425/0.205): the fixed-frame CBE camera here sits farther back
-    -- than the stage arenas were tuned for, so actors otherwise read small.
+    -- figureScale/trainerScale/actorScale, which are not touched by that path.
+    -- figureScale is the actor-VP calibration (Pokemon worldScale divides by
+    -- it, so raising it does not enlarge models). actorScale is the real
+    -- presentation size for Pokemon and trainers. The live-overworld camera
+    -- sits farther back than stage arenas, so actors need a 3x boost.
     liveOverworld=true,
     stageScale=0.25,stageYaw=0,sceneRadiusRaw=620,maxGroupSpanRaw=1350,vertexRadiusRaw=610,
-    pokemon={player={-4.5,18.0},enemy={4.5,-18.0}},figureScale=1,trainers={player={14.0,29.5},enemy={-14.0,-29.5}},trainerScale={player=0.51,enemy=0.246},
+    pokemon={player={-4.5,18.0},enemy={4.5,-18.0}},figureScale=1,actorScale=3,
+    trainers={player={14.0,29.5},enemy={-14.0,-29.5}},trainerScale={player=0.51,enemy=0.246},
     camera={side=59,back=18,height=29,lookX=0,lookY=6.0,frameH=51,safe={minRadius=29,maxRadius=87,minY=7.0,maxY=43,maxPitch=33,minPitch=-10,minFov=31,maxFov=54}},
     backdrop={top={0.08,0.31,0.65},bottom={0.68,0.84,0.76}},profile="overworld",crowd="none",
   },
@@ -245,27 +247,22 @@ function C.definition(id)
   local def = DEFINITIONS[id]
   if not def then return nil end
 
-  -- Apply global scaling multiplier to actors
   local scaledDef = {}
   for k, v in pairs(def) do
     scaledDef[k] = v
   end
 
-  -- Scale Pokémon figure size
-  if scaledDef.figureScale then
-    scaledDef.figureScale = scaledDef.figureScale * ACTOR_SCALE_MULTIPLIER
-  end
-
-  -- Scale trainer sizes
-  if scaledDef.trainerScale then
-    scaledDef.trainerScale = {}
-    if scaledDef.trainerScale.player then
-      scaledDef.trainerScale.player = scaledDef.trainerScale.player * ACTOR_SCALE_MULTIPLIER
-    end
-    if scaledDef.trainerScale.enemy then
-      scaledDef.trainerScale.enemy = scaledDef.trainerScale.enemy * ACTOR_SCALE_MULTIPLIER
-    end
-  end
+  -- Presentation size for Pokemon + trainers. Do not bake this into
+  -- figureScale: PokemonActors divides reference height by figureScale while
+  -- the arena actor VP multiplies by it, so a figureScale change cancels for
+  -- Pokemon and only shifts anchors. Also copy trainerScale before mutating;
+  -- replacing the table first dropped player/enemy values entirely.
+  local presentation = (tonumber(def.actorScale) or 1) * (tonumber(ACTOR_SCALE_MULTIPLIER) or 1)
+  if presentation < 0.08 then presentation = 0.08 end
+  scaledDef.actorScale = presentation
+  local basePlayer = (def.trainerScale and tonumber(def.trainerScale.player)) or 0.405
+  local baseEnemy = (def.trainerScale and tonumber(def.trainerScale.enemy)) or 0.19
+  scaledDef.trainerScale = {player=basePlayer*presentation, enemy=baseEnemy*presentation}
 
   return scaledDef
 end
@@ -285,7 +282,7 @@ end
 -- Load scale multiplier from user preferences
 function C.loadUserPreference(game)
   if not (game and game.save) then return end
-  local p = game.save.colosseumBattle
+  local p = game.save.terrariumBattle or game.save.colosseumBattle
   if type(p)=="table" and p.actorScaleMultiplier then
     local scale = tonumber(p.actorScaleMultiplier)
     if scale and scale>0 then
@@ -347,6 +344,7 @@ function C.setSelected(game,id)
 end
 
 function C.sync(game)
+  C.loadUserPreference(game)
   -- Do not cache the first value forever. If mod load happens
   -- before the active save was fully attached, that stale AUTO/WATER value
   -- overrode later selection. Do not let background save synchronization erase
@@ -419,6 +417,7 @@ local function isArenaEnabledForEncounter(game,battle)
 end
 
 function C.resolve(game,battle)
+  C.loadUserPreference(game)
   -- Check if arenas are enabled for this specific encounter type
   if not isArenaEnabledForEncounter(game,battle) then
     return nil,"encounter_disabled"

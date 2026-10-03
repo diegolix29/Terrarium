@@ -1,0 +1,4 @@
+-- Painted walk-overlay limb maps (bucket/side/weight per vertex).
+-- Loaded by CharacterWalkCycle from the mod package. Idle/victory clips
+-- stay in cache/trainers/<id>/native_v1. Trainers without a file here
+-- keep the generic geometric classifier.

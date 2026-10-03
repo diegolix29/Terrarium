@@ -1391,6 +1391,14 @@ function OverworldBattle.textures(battle)
   end
   out.enemy = okE and enemy or nil
   out.player = okP and player or nil
+  -- HD 2D fallback (lib/HDPokemonSheets.lua). sideTexture() only yields a
+  -- descriptor for a side no Stadium/Colosseum model covers, so swapping the
+  -- native pic for an HD sheet frame here IS the "no 3D model" fallback. Any
+  -- miss (no sheet, form without art, toggle off) leaves the native pic as is.
+  pcall(function()
+    local HD = V.require("HDPokemonSheets")
+    if HD then HD.applyToTextures(battle, out) end
+  end)
   -- On the STADIUM rung both sides can legitimately have no pic -- the pair
   -- of them are models -- and this table must still come back, because it
   -- carries the HIT FLASH, and because the VR eye pass uses its presence to

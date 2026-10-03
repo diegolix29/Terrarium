@@ -24,6 +24,10 @@ PlayerModelPick.MEWTWO_ID = "DRAMATIC_SHAPE:pokemonPlayer"
 PlayerModelPick.FOLLOWER_LABEL = "CHARACTER MODEL"
 PlayerModelPick.FOLLOWER_ID = "DRAMATIC_SHAPE:characterModel"
 
+-- Pokemon follower option
+PlayerModelPick.POKEMON_FOLLOWER_LABEL = "POKEMON FOLLOWER"
+PlayerModelPick.POKEMON_FOLLOWER_ID = "DRAMATIC_SHAPE:pokemonFollower"
+
 -- Stadium wilds option
 PlayerModelPick.WILDS_LABEL = "STADIUM WILDS"
 PlayerModelPick.WILDS_ID = "DRAMATIC_SHAPE:stadiumWilds"
@@ -466,39 +470,32 @@ end
 
 -- ------- Stadium Pokemon player model
 --
--- Cycle through Pokemon species for the player model
+-- Cycle through Pokemon species for the player model (386 Pokemon support)
 -- dir: 1 for forward (right arrow), -1 for backward (left arrow)
 function PlayerModelPick.cyclePokemonPlayer(dir)
   dir = dir or 1  -- Default to forward if no direction specified
   local PlayerModel = V.require("PlayerModel")
-  local current = PlayerModel.getStadiumDex()
-  
-  -- Find current index in popular list
-  local currentIndex = 0
-  for i, species in ipairs(PlayerModelPick.POPULAR_SPECIES) do
-    if species.dex == current then
-      currentIndex = i
-      break
-    end
-  end
+  local ColosseumDex = V.require("ColosseumDex")
+  local ColosseumDexNames = V.require("ColosseumDexNames")
+  local current = PlayerModel.getStadiumDex() or 0
   
   -- Move to next/previous species based on direction
-  local nextIndex
+  local nextDex
   if dir > 0 then
     -- Forward (right arrow): count up
-    nextIndex = currentIndex + 1
-    if nextIndex > #PlayerModelPick.POPULAR_SPECIES then
-      nextIndex = 0  -- Disable (back to normal player sprite)
+    nextDex = current + 1
+    if nextDex > ColosseumDex.speciesCount then
+      nextDex = 0  -- Disable (back to normal player sprite)
     end
   else
     -- Backward (left arrow): count down
-    if currentIndex == 0 then
-      -- If currently disabled, go to the last species (151)
-      nextIndex = #PlayerModelPick.POPULAR_SPECIES
+    if current == 0 then
+      -- If currently disabled, go to the last species (386)
+      nextDex = ColosseumDex.speciesCount
     else
-      nextIndex = currentIndex - 1
-      if nextIndex < 0 then
-        nextIndex = 0  -- Disable
+      nextDex = current - 1
+      if nextDex < 0 then
+        nextDex = 0  -- Disable
       end
     end
   end
@@ -506,19 +503,23 @@ function PlayerModelPick.cyclePokemonPlayer(dir)
   -- Ensure the directory exists
   PlayerModelInstall.ensureDirectory()
   
-  if nextIndex == 0 then
+  if nextDex == 0 then
     -- Disable Stadium player model
     PlayerModel.clear()
     PlayerModelInstall.writeMarker("")
     print("PlayerModelPick.cyclePokemonPlayer: Stadium player model disabled")
   else
-    local species = PlayerModelPick.POPULAR_SPECIES[nextIndex]
-    local ok = PlayerModel.loadStadium(species.dex)
+    local shouty = ColosseumDexNames[nextDex]
+    local speciesName = shouty and (shouty:gsub("(%a)([%a]*)", function(first, rest)
+      return first:upper() .. rest:lower()
+    end)) or ("Dex " .. nextDex)
+    
+    local ok = PlayerModel.loadStadium(nextDex)
     if ok then
-      PlayerModelInstall.writeMarker("stadium_player_" .. species.dex)
-      print("PlayerModelPick.cyclePokemonPlayer: Player model set to", species.name)
+      PlayerModelInstall.writeMarker("stadium_player_" .. nextDex)
+      print("PlayerModelPick.cyclePokemonPlayer: Player model set to", speciesName, "(dex", nextDex .. ")")
     else
-      print("PlayerModelPick.cyclePokemonPlayer: Failed to load", species.name)
+      print("PlayerModelPick.cyclePokemonPlayer: Failed to load", speciesName)
     end
   end
 end
@@ -554,8 +555,9 @@ end
 -- ------- the Pokemon player row
 --
 -- A separate option to cycle through Pokemon species for the player model.
--- This requires Stadium models to be installed.
+-- Supports all 386 Pokemon (Gen 1-3) via Stadium/Colosseum models.
 function PlayerModelPick.mewtwoRow()
+  local ColosseumDexNames = V.require("ColosseumDexNames")
   return {
     id = PlayerModelPick.MEWTWO_ID,
     label = PlayerModelPick.MEWTWO_LABEL,
@@ -565,7 +567,14 @@ function PlayerModelPick.mewtwoRow()
       if not current then
         return "OFF"
       end
-      -- Find the name
+      -- Try to get name from ColosseumDexNames first (covers full 386)
+      local shouty = ColosseumDexNames[current]
+      if shouty then
+        return shouty:gsub("(%a)([%a]*)", function(first, rest)
+          return first:upper() .. rest:lower()
+        end)
+      end
+      -- Fallback to POPULAR_SPECIES lookup
       for _, species in ipairs(PlayerModelPick.POPULAR_SPECIES) do
         if species.dex == current then
           return species.name
@@ -627,6 +636,38 @@ function PlayerModelPick.followerRow()
     end,
     step = function(game, dir)
       pcall(CharacterModelPick.cycleCharacterModel, dir)
+      return true
+    end,
+  }
+end
+
+-- ------- Pokemon follower row
+--
+-- Cycle through Pokemon species for the follower model (386 Pokemon support)
+function PlayerModelPick.pokemonFollowerRow()
+  local StadiumFollower = V.require("StadiumFollower")
+  local ColosseumDexNames = V.require("ColosseumDexNames")
+  
+  return {
+    id = PlayerModelPick.POKEMON_FOLLOWER_ID,
+    label = "POKEMON FOLLOWER",
+    value = function()
+      local currentDex = StadiumFollower.getSpecies()
+      if not currentDex or currentDex == 0 then
+        return "OFF"
+      end
+      
+      local shouty = ColosseumDexNames[currentDex]
+      if shouty then
+        return shouty:gsub("(%a)([%a]*)", function(first, rest)
+          return first:upper() .. rest:lower()
+        end)
+      end
+      
+      return "DEX " .. currentDex
+    end,
+    step = function(game, dir)
+      pcall(StadiumFollower.cycleSpecies, dir)
       return true
     end,
   }

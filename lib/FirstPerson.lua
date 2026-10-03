@@ -158,6 +158,11 @@ end
 -- inputs, both walk free, and both turn the cards; how far behind the head
 -- the eye ends up is ThirdPerson's business alone.
 function FirstPerson.engaged()
+  -- Platinum already has Gen4View for 3rd/1st. Staying "engaged" here
+  -- captures the mouse and drives FreeMove from this yaw while the
+  -- picture is a different camera -- grid facing on a native 3D world.
+  local ok, Cam = pcall(V.require, "Gen4ActorCam")
+  if ok and Cam and Cam.onGen4 and Cam.onGen4() then return false end
   return Voxel.isFreeCam(Voxel.level) and Voxel3D.available()
 end
 

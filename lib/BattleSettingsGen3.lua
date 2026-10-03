@@ -344,7 +344,8 @@ function S.install(mod,trainer,music,arenaCatalog,battleMenuUI,cacheManager,trai
 
       local at=#out+1
       for i,entry in ipairs(out) do
-        if tostring(entry.label or ""):upper()=="OPTION" then at=i;break end
+        local s=tostring(entry.label or ""):upper()
+        if s=="OPTION" or s=="OPTIONS" then at=i;break end
       end
 
       if game and game.data then

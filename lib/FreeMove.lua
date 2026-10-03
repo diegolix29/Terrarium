@@ -83,6 +83,8 @@ function FreeMove.drop()
   -- engine's own four-direction facing is the whole truth about which way
   -- they point, so the card must stop reading our finer one
   FirstPerson.releaseBody()
+  local ok, Cam = pcall(V.require, "Gen4ActorCam")
+  if ok and Cam and Cam.releaseBody then Cam.releaseBody() end
 end
 
 -- named for the suite: the module's live position, nil while dropped
@@ -314,8 +316,15 @@ end
 -- has: never during scripted moves, transitions, or with anything above
 -- the overworld on the stack.
 
+local function lookSource()
+  local ok, Cam = pcall(V.require, "Gen4ActorCam")
+  if ok and Cam and Cam.driving and Cam.driving() then return Cam end
+  return FirstPerson
+end
+
 function FreeMove.tick(state)
   local p = state.player
+  local Look = lookSource()
 
   -- a grid move is animating -- a ledge hop, a spinner slide, a scripted
   -- walk -- or a cutscene owns the player: stand aside, adopt the result
@@ -334,7 +343,10 @@ function FreeMove.tick(state)
   -- standing one always faces where the camera looks, which is what makes
   -- A predictable.) pointBody rather than compassFacing, so the card also
   -- gets the CONTINUOUS bearing behind that compass point.
-  p.facing = FirstPerson.pointBody(0, 0)
+  --
+  -- On gen4hostworld this is Gen4ActorCam (Gen4View yaw), not the voxel
+  -- FirstPerson rig -- that rig is never the camera on Platinum.
+  p.facing = Look.pointBody(0, 0)
 
   -- HORDE MODE takes both of these away for as long as it runs: there is
   -- no pausing (START), and nobody stops to read a sign with the horde
@@ -355,7 +367,7 @@ function FreeMove.tick(state)
   end
 
   local mx, mz = FirstPerson.moveVector()
-  local wx, wz = FirstPerson.moveWorld(mx, mz)
+  local wx, wz = Look.moveWorld(mx, mz)
 
   -- Cycling Road's downhill pull, the free-walk restatement of the grid
   -- path's simulated PAD_DOWN: south drift with nothing held, braked by
@@ -380,7 +392,7 @@ function FreeMove.tick(state)
   -- rather than along the head: on the boom (3RD) you can see yourself, so
   -- a strafe has to look like walking sideways. In the head it is the head
   -- either way -- bodyBearing says so.
-  p.facing = FirstPerson.pointBody(wx, wz)
+  p.facing = Look.pointBody(wx, wz)
 
   -- the engine's own bonk clock, kept draining while the free walk has the
   -- wheel: nothing here rings it (see pushSpecials), but stepping back onto
@@ -484,7 +496,7 @@ function FreeMove.tick(state)
       return
     end
     -- the push handlers may have turned the facing; the walk still rules
-    p.facing = FirstPerson.pointBody(wx, wz)
+    p.facing = Look.pointBody(wx, wz)
   end
 end
 
@@ -502,6 +514,21 @@ function FreeMove.install()
   local inner = OverworldState.handleInput
 
   function OverworldState:handleInput()
+    local ok, Cam = pcall(V.require, "Gen4ActorCam")
+    -- Platinum's 3rd/1st camera is Gen4View. Voxel.level 3RD must not
+    -- steal the walk (grid facing, FirstPerson yaw) and must not block
+    -- the engine look either -- see FirstPerson.engaged.
+    if ok and Cam and Cam.onGen4 and Cam.onGen4() then
+      if Cam.driving() then
+        return FreeMove.tick(self)
+      end
+      if pos then
+        local p = self.player
+        p.px, p.py = p.cellX * 16, p.cellY * 16
+        FreeMove.drop()
+      end
+      return inner(self)
+    end
     if not FirstPerson.driving() then
       if pos then
         -- stepping off the rung: back onto the grid, on the cell the

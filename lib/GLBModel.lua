@@ -24,6 +24,13 @@ local JsonDecode = V and V.require and V.require("json_decode") or require("json
 
 local GLBModel = {}
 
+-- Directory for loading external texture files
+local textureDirectory = nil
+
+function GLBModel.setDirectory(dir)
+  textureDirectory = dir
+end
+
 local GLB_MAGIC = 0x46546C67 -- "glTF"
 local CHUNK_JSON = 0x4E4F534A -- "JSON"
 local CHUNK_BIN  = 0x004E4942 -- "BIN\0"
@@ -137,7 +144,27 @@ function GLBModel.buildVertexData(gltf, bin)
   if not (gltf and gltf.meshes and gltf.meshes[1]) then
     return nil, "no meshes in glTF document"
   end
-  local mesh = gltf.meshes[1]
+  
+  -- Find the mesh with the most vertices (likely the main visible mesh)
+  local bestMeshIndex = 1
+  local bestVertexCount = 0
+  
+  for i, mesh in ipairs(gltf.meshes) do
+    local prim = mesh.primitives and mesh.primitives[1]
+    if prim and prim.attributes and prim.attributes.POSITION then
+      local positions, err = readAccessor(gltf, bin, prim.attributes.POSITION)
+      if positions then
+        local vertexCount = #positions
+        if vertexCount > bestVertexCount then
+          bestVertexCount = vertexCount
+          bestMeshIndex = i
+        end
+      end
+    end
+  end
+  
+  print("[GLBModel] Selected mesh", bestMeshIndex, "of", #gltf.meshes, "with", bestVertexCount, "vertices")
+  local mesh = gltf.meshes[bestMeshIndex]
   local prim = mesh.primitives and mesh.primitives[1]
   if not prim then return nil, "mesh has no primitives" end
   if prim.mode ~= nil and prim.mode ~= 4 then
@@ -207,15 +234,15 @@ function GLBModel.parse(data)
   local vertexData, buildErr, stats = GLBModel.buildVertexData(gltf, bin)
   if not vertexData then return nil, gltf, buildErr end
 
-  return vertexData, gltf, nil, stats
+  return vertexData, gltf, bin, stats
 end
 
 -- Full load: parse + hand off to love.graphics.newMesh, matching the
 -- return contract PlayerModel.load()'s OBJ branch uses (mesh, texture).
 -- Requires a real LOVE runtime; call GLBModel.parse() directly to test
 -- the parsing logic headless.
-function GLBModel.load(data, Voxel3D)
-  local vertexData, gltf, err, stats = GLBModel.parse(data)
+function GLBModel.load(data, Voxel3D, directory)
+  local vertexData, gltf, bin, err, stats = GLBModel.parse(data)
   if not vertexData then return nil, nil, err end
 
   if not (love and love.graphics and love.graphics.newMesh) then
@@ -227,9 +254,53 @@ function GLBModel.load(data, Voxel3D)
   -- Embedded base color texture, if the glb ships one (image referenced
   -- by the first material, pulled from bufferView -> image, PNG/JPEG).
   local texture = nil
-  -- (Left for a follow-up: GLB image extraction. A follower without an
-  -- embedded texture still renders -- untextured, shaded by VertexShade --
-  -- same fallback objToMesh leaves for a texture-less OBJ.)
+  print("[GLBModel] Image count:", gltf.images and #gltf.images or 0)
+  if gltf.images and gltf.images[1] then
+    local image = gltf.images[1]
+    print("[GLBModel] Image type:", image.bufferView and "embedded" or (image.uri and "external (" .. image.uri .. ")" or "unknown"))
+    
+    -- Embedded texture (bufferView)
+    if image.bufferView ~= nil then
+      local bufferView = gltf.bufferViews and gltf.bufferViews[image.bufferView + 1]
+      if bufferView and bin then
+        local byteOffset = bufferView.byteOffset or 0
+        local byteLength = bufferView.byteLength
+        if byteOffset + byteLength <= #bin then
+          local imageData = bin:sub(byteOffset + 1, byteOffset + byteLength)
+          local fileData = love.filesystem.newFileData(imageData, "texture.png")
+          local ok, img = pcall(love.graphics.newImage, fileData)
+          if ok and img then
+            texture = img
+            print("[GLBModel] Embedded texture loaded:", img:getWidth(), "x", img:getHeight())
+          else
+            print("[GLBModel] Failed to load embedded texture")
+          end
+        end
+      end
+    -- External texture (URI)
+    elseif image.uri then
+      local texPath = (textureDirectory or "player_models") .. "/" .. image.uri
+      print("[GLBModel] Trying external texture:", texPath)
+      local f = love and love.filesystem
+      if f and f.read then
+        local ok, texData = pcall(f.read, texPath)
+        if ok and texData then
+          local fileData = love.filesystem.newFileData(texData, image.uri)
+          local imgOk, img = pcall(love.graphics.newImage, fileData)
+          if imgOk and img then
+            texture = img
+            print("[GLBModel] External texture loaded:", img:getWidth(), "x", img:getHeight())
+          else
+            print("[GLBModel] Failed to load external texture image")
+          end
+        else
+          print("[GLBModel] Failed to read external texture file")
+        end
+      end
+    end
+  else
+    print("[GLBModel] No images found in GLB")
+  end
 
   return mesh, texture, nil, stats
 end

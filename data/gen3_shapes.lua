@@ -736,10 +736,206 @@ gTileset_Sootopolis = {
     frlg_gTileset_TanobyRuins    = { rock_plateau = true },
 
     gTileset_General = {
-      roof_bands = { [72] = 6, [73] = 6, [74] = 6, [75] = 6 },
+      -- A POKEMON CENTRE'S ROOF IS FOUR ROWS OF THE DRAWING, NOT SIX.
+      --
+      -- IN-GAME LOCATION: metatiles 72..75 are the Centre's roof, laid in
+      -- PetalburgCity, OldaleTown, MauvilleCity, SlateportCity, MossdeepCity,
+      -- FortreeCity, EverGrandeCity and BattleFrontier_OutsideEast.
+      --
+      -- REPORTED from play: "pokemon center and pokemarts arent rendering
+      -- properly ... they should look like 3d representations of the 2d
+      -- tileset".
+      --
+      -- This number is how many 8px rows of the drawing the roof SURFACE
+      -- wears; the rest is wall.  `Structures.gen3RoofArtRows`' own measured
+      -- table already writes the answer down -- "ViridianCity Pokemon Centre,
+      -- bld 1: stated 6, plan 2, roof in the art 4 rows" -- and
+      -- `frlg_gTileset_General` below has carried 4 since.  HOENN'S COPY WAS
+      -- NEVER RE-MEASURED and kept the layer's own overstated 6.
+      --
+      -- MEASURED on Petalburg's run: at 6 the split gave the building a 16px
+      -- wall under a 32px roof, so two of the four drawn wall rows were worn
+      -- by the roof surface -- the roof ran down over its own facade as a
+      -- bulging dome with the shopfront squeezed into a strip at the bottom.
+      -- At 4 it is a 32px wall under a 16px roof: the hipped cap the 2D
+      -- draws, over the two storeys of window the 2D draws under it, and the
+      -- same silhouette FireRed's Viridian Centre has always built.
+      --
+      -- Eight Emerald maps move -- every outdoor map that lays this roof --
+      -- and no other geometry in Hoenn or Kanto does.
+      --
+      -- ...AND SO IS A POKEMON MART'S, drawn one course lower.
+      --
+      -- 40..43 is the MART's overhead course, the same thing 72..75 is for
+      -- the Centre and in the same primary tileset.  No Mart in Hoenn had a
+      -- band at all before this, so every one of them split on the whole
+      -- blocked run instead and came out with a 48px, 64px or 80px wall
+      -- under a single course of cap -- a shopfront stretched up a tower,
+      -- which is the "sank" the report describes.
+      --
+      -- IN-GAME LOCATIONS reached by these four: BattleFrontier_OutsideWest,
+      -- FortreeCity, MossdeepCity, SlateportCity (all four lay 40..43 on the
+      -- row above the Mart), OldaleTown and MauvilleCity (both lay it as the
+      -- Mart's own first row -- the lookup reads the cell before the row
+      -- above it, so one entry serves both placements).
+      --
+      -- 5, the same as the Centre, and for the same reason: MEASURED, the
+      -- drawing from 40..43 down to the footprint's last row is eight 8px
+      -- rows on all six, and the shopfront is the last THREE of them, so
+      -- `(artFront - top - rows + 1) * 8` is 24px of wall.  See "THE EAVE"
+      -- under the Centre above for how that number was settled.
+      -- ---- THE EAVE, MEASURED ----
+      --
+      -- g3-pcroof-389 took this from 6 to 4 and wrote down that the wall
+      -- came out 32px.  IT IS 24.  4 was one row short and every band in
+      -- this file inherited the error; g3-eave-394 corrects all of them.
+      --
+      -- HOW IT WAS MEASURED, and the method is reusable -- `/tmp/artrows.py`:
+      -- crop the building out of a 2D map render and, per 8px row of the
+      -- drawing, count the fraction of pixels with HSV saturation > 0.28 and
+      -- value > 90.  A painted roof runs 0.66..1.00; the shopfront, which is
+      -- white panel with small window glass and a sign, drops to ~0.29.  The
+      -- row where it drops IS the eave, and nothing about it is a judgement.
+      --
+      --     PetalburgCity Centre  0.88 0.96 0.88 0.79 0.66 | 0.29 0.44 0.52
+      --     OldaleTown    Centre  0.62 0.91 0.88 0.79 0.66 | 0.29 0.44 0.52
+      --     RustboroCity  Mart    0.01 0.80 1.00 0.79 0.66 | 0.29 0.44 0.44
+      --     MauvilleCity  Mart  ...0.83 1.00 0.89 0.75     | 0.46 0.57 0.67
+      --
+      -- DERIVED over ALL 26 Centres and Marts in Hoenn, both cartridges'
+      -- shared art and every town's own: the drop is THREE ROWS FROM THE
+      -- BOTTOM in every single one, Lavaridge's seven-row Centre and
+      -- Mauville's eight-wide Mart included.  There is no exception, so
+      -- there is no per-town number: the wall is 24px and the band is
+      -- (rows from the keyed course to the last) - 3, which is 5 on all of
+      -- them.
+      --
+      -- WHAT SETTLED IT, rather than the measurement alone.  REPORTED from
+      -- play: *"in oldale the pokemon centers not right"*, with a screenshot
+      -- of the Centre torn down the middle.  Oldale is the only building in
+      -- Hoenn drawn across TWO bands -- 72..73 at 4 and 642..643 at 6 -- so
+      -- it renders the two candidate numbers side by side on one wall, and
+      -- neither half matched the drawing.  g3-oldale-393 unified them at 4
+      -- and the seam closed; this revision moves both to the 5 the art
+      -- states.  The report is the evidence that the inherited 4 is visible
+      -- in play and not a pixel-counting quibble.
+      --
+      -- KANTO IS NOT TOUCHED.  `frlg_gTileset_General` keeps 4 -- its
+      -- drawings have not been put through the same measurement, and
+      -- `data/firered/gen3_maps.lua` names no bare `gTileset_*`, so nothing
+      -- in this block reaches a FireRed map in either direction.
+      roof_bands = {
+        [72] = 5, [73] = 5, [74] = 5, [75] = 5,   -- Centre, overhead course
+        [40] = 5, [41] = 5, [42] = 5, [43] = 5,   -- Mart, overhead course
+      },
+    },
+
+    -- ---- AND THE TEN TOWNS THAT DRAW THEIR OWN OVERHEAD COURSE ----
+    --
+    -- `bldRoofBands` reads a footprint cell's own metatile and, failing
+    -- that, the row above it.  The two entries above are the SHARED courses
+    -- in the primary tileset, and eight maps lay them exactly.  The towns
+    -- below do not: each draws the top of its Centre or its Mart with
+    -- metatiles of its own, in its own secondary tileset, so nothing ever
+    -- matched and the split never ran.
+    --
+    -- Every entry here is 5 -- deliberately the same number, not a fresh
+    -- guess.  MEASURED per building: from the keyed course down to the
+    -- footprint's last row is eight 8px rows in every case, and the
+    -- shopfront is the last THREE of them, so 5 gives every one of them the
+    -- 24px wall its own drawing draws.  See "THE EAVE" under
+    -- `gTileset_General` for the measurement and the report that settled it.
+    --
+    -- Metatile ids are the ones the maps actually lay, read off the
+    -- cartridge: see `toprow`/`above` in the sweep behind this revision.
+    --
+    -- FIVE TOWNS GET NO ENTRY, because MEASURED they already answer 32 with
+    -- no band at all -- their blocked run happens to be four courses, so the
+    -- fallback lands where the band would have put it.  PacifidlogTown's
+    -- Centre, MossdeepCity's Mart, and both of LavaridgeTown's.  An entry
+    -- written for them was measured to change nothing and was taken back
+    -- out rather than left in reading as though it did.
+    --
+    -- LavaridgeTown and VerdanturfTown are also LEFT ALONE for a second
+    -- reason, and it is not a roof one.  Lavaridge's Centre is claimed as
+    -- (7..13, 0..6) and its Mart as (14..18, 0..5) -- seven rows and six,
+    -- both running off the top edge of the map -- and the two share metatile
+    -- 625, so no single number could serve them even if one were needed.
+    -- Verdanturf's Centre is claimed nine cells wide, (10..18, 0..3).  Those
+    -- footprints have swallowed what stands above and beside them; that is a
+    -- fault in the footprint, not in the split, and banding them would only
+    -- paint a roof over the wrong extent.
+    gTileset_Rustboro = {
+      -- RustboroCity: Centre (15..18, 36..38), Mart (15..18, 43..45).
+      roof_bands = { [598] = 5, [606] = 5, [607] = 5, [599] = 5,
+                     [615] = 5 },
+    },
+    gTileset_Lilycove = {
+      -- LilycoveCity: Centre (23..26, 11..14).  Nothing is drawn above it,
+      -- so the keyed course is the footprint's own first row.
+      roof_bands = { [619] = 5, [620] = 5, [621] = 5, [622] = 5 },
+    },
+    gTileset_Sootopolis = {
+      -- SootopolisCity: Centre (42..45, 28..31), Mart (16..19, 26..29).
+      --
+      -- 5 like the rest, for uniformity -- but NEITHER of these two looks
+      -- right at any band value, and the reason is not the split.  REPORTED
+      -- from play: *"sootoplis' looked better before same with the pokemart
+      -- in sootopolis is weird, might need specific rules for that city"*.
+      -- MEASURED: these are the only two Centre/Mart footprints in Hoenn
+      -- that are FOUR metatile rows (`gen3BldRows = 8`) where Petalburg's
+      -- Centre is three (6) -- Sootopolis draws the building's top course
+      -- BLOCKED, so it lands in the footprint, while Petalburg draws the
+      -- same course on the above-player layer and the height pass drops it.
+      -- Same drawing, two different founded heights: 64px here against 48px
+      -- there.  Rendered at 391, 392 and at 5, all three are wrong in the
+      -- same way.  That fault is OPEN and is a height fault, not a roof one.
+      roof_bands = { [635] = 5, [636] = 5, [637] = 5, [638] = 5,
+                     [619] = 5, [620] = 5, [621] = 5 },
+    },
+    gTileset_Dewford = {
+      -- DewfordTown: Centre (1..4, 7..10).
+      roof_bands = { [515] = 5, [516] = 5, [517] = 5, [518] = 5 },
+    },
+    gTileset_Fallarbor = {
+      -- FallarborTown: Centre (13..16, 4..7), Mart (14..17, 13..15).
+      roof_bands = { [672] = 5, [673] = 5, [674] = 5, [675] = 5,
+                     [680] = 5 },
     },
     gTileset_Petalburg = {
-      roof_bands = { [642] = 6, [643] = 6 },
+      -- ONE BUILDING, ONE BAND.
+      --
+      -- REPORTED from play: *"in oldale the pokemon centers not right"* --
+      -- the Centre torn down the middle, its two halves at different
+      -- heights and the pokeball emblem split across the seam.
+      --
+      -- DERIVED, over all six maps that use this tileset: metatiles 642 and
+      -- 643 are laid in EXACTLY TWO CELLS in the whole of Hoenn, (7,13) and
+      -- (8,13) in OldaleTown -- the right-hand half of that town's Pokemon
+      -- Centre overhead course.  The left-hand half, (5,13) and (6,13), is
+      -- the shared 72..73 in the primary tileset.  So this entry only ever
+      -- reached half of one building, and at 6 against the shared course's
+      -- 4 it gave that half a 16px wall where its other half had 32.
+      -- `bldRoofBands` keys per COLUMN and the split reads the band of the
+      -- run's own first column, so the two halves founded at different
+      -- heights and the building came apart.
+      --
+      -- MEASURED off the drawing, both halves separately: the saturation
+      -- profile of (5..6, 13..16) and (7..8, 13..16) is the same curve with
+      -- the eave in the same place -- it is one Centre, drawn once, and the
+      -- 2D shows no seam anywhere on it.  So the two halves must carry the
+      -- SAME number, and 4 is the one the other half already has.
+      --
+      -- The 6 was never measured; it is the layer's own overstated default,
+      -- the same one `gTileset_General` carried until g3-pcroof-389
+      -- re-measured it.  g3-oldale-393 unified this pair onto the shared
+      -- course's number and moved only OldaleTown; g3-eave-394 then took
+      -- every Hoenn band, this one included, to the measured 5.
+      roof_bands = { [642] = 5, [643] = 5,
+                     -- PetalburgCity's Mart, (24..27, 9..12).  This tileset
+                     -- is OldaleTown's secondary too, but Oldale's Mart lays
+                     -- the shared 40..43 and is banded by that.
+                     [592] = 5, [593] = 5, [600] = 5, [601] = 5 },
     },
 
     -- KANTO IS FLAT, AND ITS CARTRIDGE SAYS SO.

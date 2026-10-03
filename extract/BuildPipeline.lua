@@ -104,8 +104,29 @@ local function call(obj,name,...)
   if not obj or type(obj[name])~="function" then return nil,"unavailable" end
   local ok,a,b=pcall(obj[name],obj,...);if not ok then return nil,tostring(a) end;return a,b
 end
-local function exists(mod,path)local v=select(1,call(mod.cache,"info",path));return type(v)=="table" and (v.type==nil or v.type=="file")end
-local function read(mod,path)local v=select(1,call(mod.cache,"read",path));return type(v)=="string" and v or nil end
+local function archive(mod)
+  return (mod and mod.exports and mod.exports.cacheArchive) or V.CacheArchive
+end
+local function exists(mod,path)
+  local v=select(1,call(mod.cache,"info",path))
+  if type(v)=="table" and (v.type==nil or v.type=="file") then return true end
+  local A=archive(mod)
+  if A and type(A.contains)=="function" then
+    local ok,hit=pcall(A.contains,path)
+    if ok and hit then return true end
+  end
+  return false
+end
+local function read(mod,path)
+  local v=select(1,call(mod.cache,"read",path))
+  if type(v)=="string" then return v end
+  local A=archive(mod)
+  if A and type(A.readEntry)=="function" then
+    local ok,bytes=pcall(A.readEntry,path)
+    if ok and type(bytes)=="string" then return bytes end
+  end
+  return nil
+end
 local function readLuaTable(mod,path)
   local raw=read(mod,path)
   if not raw then return nil end

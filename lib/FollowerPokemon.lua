@@ -46,6 +46,26 @@ local function loadSpriteFallback(dex)
     print("FollowerPokemon.loadSpriteFallback: Loaded sprite from cache")
     return true
   end
+
+  do
+    local HDSheets = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+    if HDSheets and type(HDSheets.frame) == "function" then
+      -- Try back sheet first (appropriate for follower), then front
+      local image, info = HDSheets.frame({dex = dex, facing = "back", shiny = false, key = "follower"})
+      if not image then
+        image, info = HDSheets.frame({dex = dex, facing = "front", shiny = false, key = "follower"})
+      end
+      if image then
+        spriteCache[dex] = image
+        currentSprite = image
+        currentDex = dex
+        currentFilename = "follower_sprite_" .. dex
+        usingSpriteFallback = true
+        print("FollowerPokemon.loadSpriteFallback: Loaded HD sheet for dex", dex)
+        return true
+      end
+    end
+  end
   
   -- Try to use the sprite service for proper fallback chain
   local okSpriteService, SpriteService = pcall(function() return V.require("follower.sprite_service") end)
@@ -363,6 +383,19 @@ function FollowerPokemon.drawSprite(px, py, y, facing, mirror)
     return false
   end
   
+  -- Try to refresh HD sheet frame (for animated sheets)
+  local HDSheets = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+  if HDSheets and type(HDSheets.frame) == "function" and usingSpriteFallback then
+    local image, info = HDSheets.frame({dex = currentDex, facing = "back", shiny = false, key = "follower"})
+    if not image then
+      image, info = HDSheets.frame({dex = currentDex, facing = "front", shiny = false, key = "follower"})
+    end
+    if image then
+      currentSprite = image
+      spriteCache[currentDex] = image
+    end
+  end
+  
   -- Calculate follower position based on player facing
   local offsetX, offsetZ = 0, -2  -- Default: behind player
   
@@ -406,12 +439,10 @@ function FollowerPokemon.drawSprite(px, py, y, facing, mirror)
     if lg then
       lg.push()
       lg.translate(worldX, worldY, worldZ)
-      lg.scale(scale, scale, scale)
-      
-      -- Draw sprite centered
       local sw, sh = currentSprite:getDimensions()
-      lg.draw(currentSprite, -sw/2, -sh/2)
-      
+      local s = (16 / math.max(sh, 1)) * scale
+      lg.scale(s, s, s)
+      lg.draw(currentSprite, -sw/2, -sh)
       lg.pop()
     end
   else
@@ -420,12 +451,10 @@ function FollowerPokemon.drawSprite(px, py, y, facing, mirror)
     if lg then
       lg.push()
       lg.translate(worldX, worldY)
-      lg.scale(followerScale, followerScale)
-      
-      -- Draw sprite centered
       local sw, sh = currentSprite:getDimensions()
-      lg.draw(currentSprite, -sw/2, -sh/2)
-      
+      local s = (16 / math.max(sh, 1)) * followerScale
+      lg.scale(s, s)
+      lg.draw(currentSprite, -sw/2, -sh)
       lg.pop()
     end
   end

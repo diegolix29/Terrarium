@@ -25,6 +25,7 @@ local PENDING_FLAG = "stadium2_custom_player_sprite_picker_pending.flag"
 local OTHER_PENDING_FLAGS = {
   "stadium2_battle_background_picker_pending.flag",
   "stadium_overworld_picker_pending.flag",
+  "hd_pokemon_picker_pending.flag",
 }
 local DESKTOP_STAGE = "stadium2_custom_player_sprite_pick.bin"
 local META_FILE = "stadium2_custom_player_sprite.meta"

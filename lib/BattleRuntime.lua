@@ -490,6 +490,10 @@ function R.runWorkFrame(game,topBefore,topAfter)
       -- coordinator: keep the old one-species queue rather than bulk warm.
       pcall(PokemonActors.pumpPartyPrewarm,game)
     end
+    local Archive=V.CacheArchive
+    if Archive and type(Archive.pump)=="function" and Archive.running and Archive.running() then
+      pcall(Archive.pump,40)
+    end
     -- Only a tiny incremental GC step remains in interactive mobile TRUE
     -- overworld frames. Even incremental GC is kept out of 3D menu browsing
     -- so driver/Lua cleanup cannot coincide with rapid species changes.

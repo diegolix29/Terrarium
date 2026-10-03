@@ -87,7 +87,10 @@ local POSES = [====[local function posesOf(state, spriteColors)
         colors = spriteColors(ghostMap),
         entity = npc, entityIndex = gi,
         mapId = ghostMap and ghostMap.id,
+        isFollower = npc.isFollower or npc.wildsFollower
+          or npc.pikachuFollower or npc._wildsFollowerSpecies ~= nil,
       }
+      bindHdOverworld(posed[#posed], facing, state)
     end
   end
 
@@ -141,10 +144,14 @@ local POSES = [====[local function posesOf(state, spriteColors)
         gh = gh, lift = py - (vy or py), colors = colors,
         entity = e, entityIndex = ei,
         mapId = state.map and state.map.id,
+        isFollower = e.isFollower or e.wildsFollower
+          or e.pikachuFollower or e._wildsFollowerSpecies ~= nil,
       }
       if e == state.player then
         me = posed[#posed]
         me.isPlayer = true
+      else
+        bindHdOverworld(posed[#posed], facing, state)
       end
     end
   end
@@ -182,17 +189,25 @@ local function patchCastLoop(source)
   local block = [====[  local hideMe = FirstPerson.hidePlayer()
   for _, p in ipairs(posed) do
     if not (p.isPlayer and hideMe) and not OverworldStadium.safeShouldHidePose(p) then
+      local facing = viewFacing(p)
+      local hdDef = bindHdOverworld(p, facing, state)
+      local stadiumFollower3d = poseIsFollower(p) and StadiumFollower.loaded()
+        and not (StadiumFollower.isUsingSpriteFallback
+                 and StadiumFollower.isUsingSpriteFallback())
       -- Check if this is the player and ADVANCED_SHAPE's PlayerModel is loaded
       local okPlayerModel, PlayerModel = pcall(V.require, "PlayerModel")
       if p.isPlayer and okPlayerModel and PlayerModel and PlayerModel.loaded() then
         -- Draw custom 3D model instead of sprite
-        PlayerModel.draw(p.px, p.py, p.gh + (p.lift or 0), viewFacing(p), p.flip)
+        PlayerModel.draw(p.px, p.py, p.gh + (p.lift or 0), facing, p.flip)
+      elseif stadiumFollower3d then
+        StadiumFollower.update(1 / 60)
+        StadiumFollower.draw(p.px, p.py, facing, p.gh)
       -- safeDraw never throws.  Returning false means this one entity uses
       -- Dramatic Shape's original 2D card for this frame.
       elseif not OverworldColosseum.safeDraw(p)
           and not OverworldStadium.safeDraw(p) and p.sprite then
-        drawEntity(p.sprite, p.px, p.py, viewFacing(p), p.phase, p.flip, p.gh,
-                   p.colors, p.lift, yaw)
+        drawEntity(p.sprite, p.px, p.py, facing, p.phase, p.flip, p.gh,
+                   p.colors, p.lift, p.waterline, p.isPlayer, yaw, hdDef)
       end
     end
   end

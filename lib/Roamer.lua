@@ -28,6 +28,7 @@ local Collision = require("src.world.Collision")
 local SpriteRenderer = require("src.render.SpriteRenderer")
 local Water = V.require("Water")
 local Wind = V.require("Wind")
+local RoamerArt = V.require("RoamerArt")
 
 local Roamer = {}
 Roamer.__index = Roamer
@@ -72,6 +73,11 @@ local nextId = 0
 -- Warps are refused outright, for the reason NPC:update refuses them: a
 -- wanderer that steps onto a door is a wanderer that leaves the map.
 function Roamer.standable(kind, map, cx, cy)
+  -- On Gen 4, use Gen4Spawn's standable logic
+  local ok, Spawn = pcall(V.require, "Gen4Spawn")
+  if ok and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    return Spawn.standable(kind, map, cx, cy)
+  end
   if not map:inBounds(cx, cy) then return false end
   if map:warpAtCell(cx, cy) then return false end
   if kind == "water" then return map:isWaterCell(cx, cy) end
@@ -80,15 +86,45 @@ function Roamer.standable(kind, map, cx, cy)
   return true
 end
 
-function Roamer.new(spriteDef, species, level, kind, cellX, cellY)
+function Roamer.new(spriteDef, species, level, kind, cellX, cellY, map)
   nextId = nextId + 1
   local self = setmetatable({}, Roamer)
   self.roamer = true
   self.def = INERT_DEF
   self.id = ("TR_ROAM_%d"):format(nextId)
   self.species, self.level, self.kind = species, level, kind
-  self.sprite = SpriteRenderer.new(spriteDef, self.id)
-  self.sprite._colosseumEntity = self
+  self.map = map  -- Store map reference for Gen 4 ground height queries
+  
+  -- Handle HD sheets specially - create a minimal sprite placeholder for VoxelScene
+  if spriteDef and spriteDef.hdSheet then
+    local spritePlaceholder = { 
+      def = spriteDef, 
+      _colosseumEntity = self,
+      resolveImage = function() 
+        -- Return a placeholder image for VoxelScene (won't actually be used for HD sheets)
+        local HDSheets = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+        if HDSheets and type(HDSheets.frame) == "function" then
+          local dex = spriteDef.hdDex
+          if dex then
+            local image, info = HDSheets.frame({dex = dex, facing = "back", shiny = false, key = "roamer"})
+            if not image then
+              image, info = HDSheets.frame({dex = dex, facing = "front", shiny = false, key = "roamer"})
+            end
+            if image then return image end
+          end
+        end
+        return nil
+      end
+    }
+    self.sprite = spritePlaceholder
+    self.spriteDef = spriteDef
+    self.usesHDSheet = true
+  else
+    self.sprite = SpriteRenderer.new(spriteDef, self.id)
+    self.sprite._colosseumEntity = self
+    self.usesHDSheet = false
+  end
+  
   self.cellX, self.cellY = cellX, cellY
   self.px, self.py = cellX * 16, cellY * 16
   self.facing = "down"
@@ -151,6 +187,7 @@ end
 -- the same dialogue, stopped by the same battle and stepped at the same
 -- rate as the people around it, with nothing scheduling it separately.
 function Roamer:update(map, entities)
+  self.map = map  -- Update map reference in case it changes
   self.clock = self.clock + 1
   if self.moving then
     self.progress = self.progress + 1
@@ -208,7 +245,15 @@ function Roamer:update(map, entities)
   if love.math.random() < lookOnly then return end
   local tx, ty = Collision.target(self.cellX, self.cellY, dir)
   if not Roamer.standable(self.kind, map, tx, ty) then return end
-  if not Collision.canMove(map, entities, self, dir) then return end
+  -- On Gen 4, use Gen4Spawn's canStep logic
+  local ok, Spawn = pcall(V.require, "Gen4Spawn")
+  local canStep = true
+  if ok and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    canStep = Spawn.canStep(self.kind, map, entities, self, dir)
+  else
+    canStep = Collision.canMove(map, entities, self, dir)
+  end
+  if not canStep then return end
   self.targetX, self.targetY = tx, ty
   self.moving = true
   self.progress = 0
@@ -235,6 +280,17 @@ end
 function Roamer:pose()
   local px, py = self.px, self.py
   local vy = py
+  -- On Gen 4, use Gen4Spawn's actorY for water roamer height adjustment
+  local okSpawn, Spawn = pcall(V.require, "Gen4Spawn")
+  if okSpawn and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    local Game = require("src.core.Game")
+    local map = Game and Game.overworld and Game.overworld.map
+    local ground = map and map.renderer and map.renderer.gen4Ground
+    local groundY = ground and type(ground.groundY) == "function" and ground.groundY(ground, px + 8, py + 8)
+    if groundY then
+      vy = Spawn.actorY(self, groundY)
+    end
+  end
   if self.kind == "water" then
     local ok, h = pcall(Water.heightAt, px + 8, py + 8)
     if ok and h then vy = vy - h end
@@ -251,12 +307,49 @@ function Roamer:pose()
   elseif not self.moving and math.floor(self.clock / 30) % 2 == 1 then
     vy = vy - 1
   end
+  
+  -- Always return sprite (placeholder for HD sheets) - VoxelScene expects it
   return self.sprite, px, vy, self.facing,
          self:walkPhase(), self.stepFlip, false
 end
 
 function Roamer:draw(camX, camY)
   local sprite, px, py, facing, phase, flip = self:pose()
+  
+  -- Handle HD sheet animation refresh and drawing
+  if self.usesHDSheet then
+    local HDSheets = V.HDPokemonSheets or (V.mod and V.mod.exports and V.mod.exports.hdPokemonSheets)
+    if HDSheets and type(HDSheets.frame) == "function" then
+      local dex = self.spriteDef and self.spriteDef.hdDex
+      if dex then
+        -- Try back sheet first (appropriate for roamers), then front
+        local image, info = HDSheets.frame({dex = dex, facing = "back", shiny = false, key = "roamer"})
+        if not image then
+          image, info = HDSheets.frame({dex = dex, facing = "front", shiny = false, key = "roamer"})
+        end
+        if image then
+          -- Directly draw the HD sheet image
+          local lg = love and love.graphics
+          if lg then
+            lg.push()
+            lg.translate(px - camX, py - camY)
+            local sw, sh = image:getDimensions()
+            -- Scale HD sheet to fit 16x16 cell
+            local scale = 16 / math.max(sh, 1)
+            lg.scale(scale, scale)
+            lg.draw(image, -sw/2, -sh)
+            lg.pop()
+            return
+          end
+        end
+      end
+    end
+    -- If HD sheet failed, don't draw anything (VoxelScene will handle the 3D pass)
+    return
+  end
+  
+  if not sprite then return end
+  
   if self.kind ~= "water" or not love or not love.graphics then
     sprite:draw(px, py, camX, camY, facing, phase, flip)
     return
