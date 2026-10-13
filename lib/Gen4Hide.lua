@@ -45,7 +45,15 @@
 --          finished building the sheet around the camera yet (GW.ready).
 --   trees  when the "trees" effect was disabled or Gen4Trees is missing.
 --
--- Flip Hide.grass / Hide.water / Hide.trees to false to compare against the native look.
+--   flowers  Native flower-bed CARDS, only where Gen4Flowers has voxel flowers for every
+--          triangle of the shape (GF.isCovered). A flat bed floor is never hidden: Gen4Lawn
+--          repaints it instead.
+--
+--   fences Native `imped` fence banners, only where Gen4Fence has built a 3D fence for
+--          every card of the shape (GFe.isCovered). A shape that also holds rocks is
+--          hidden only once Gen4Rocks has built that land too.
+--
+-- Flip Hide.grass / Hide.water / Hide.trees / Hide.rocks / Hide.flowers / Hide.fences to false to compare against the native look.
 
 local V = ...
 
@@ -53,6 +61,9 @@ local Hide = {
   grass = true,
   water = true,
   trees = true,
+  rocks = true,
+  flowers = true,
+  fences = true,
   active = false,
   installed = false,
   -- exact material/texture names (lower case) that are water
@@ -152,6 +163,34 @@ local function treesOn()
   return (GT and type(GT.isCovered) == "function" and GT.enabled) and true or false
 end
 
+-- Native imped rock cards, only where Gen4Rocks converted the WHOLE shape.
+-- Fence banners that share the texture stay.
+local function rocksOn()
+  if Hide.rocks == false then return false end
+  local Bridge = optional("Gen4Bridge")
+  if Bridge and Bridge.disabled and Bridge.disabled.rocks then return false end
+  local GR = optional("Gen4Rocks")
+  return (GR and type(GR.isCovered) == "function" and GR.enabled) and true or false
+end
+
+-- Native fence banners, only where Gen4Fence built a 3D fence for every card of the shape.
+local function fencesOn()
+  if Hide.fences == false then return false end
+  local Bridge = optional("Gen4Bridge")
+  if Bridge and Bridge.disabled and Bridge.disabled.fence then return false end
+  local GFe = optional("Gen4Fence")
+  return (GFe and type(GFe.isCovered) == "function" and GFe.enabled) and true or false
+end
+
+-- Native flower-bed cards, only where Gen4Flowers converted the WHOLE shape.
+local function flowersOn()
+  if Hide.flowers == false then return false end
+  local Bridge = optional("Gen4Bridge")
+  if Bridge and Bridge.disabled and Bridge.disabled.flowers then return false end
+  local GF = optional("Gen4Flowers")
+  return (GF and type(GF.isCovered) == "function" and GF.enabled) and true or false
+end
+
 local lastWaterState
 local function waterOn()
   if not Hide.water then return false end
@@ -183,13 +222,19 @@ end
 -- model -> { key = "gw", list = {...} }
 local cache = setmetatable({}, { __mode = "k" })
 
-local function filtered(model, hideGrass, hideWater, hideTrees)
+local function filtered(model, hideGrass, hideWater, hideTrees, hideRocks, hideFlowers, hideFences)
   local GT = hideTrees and optional("Gen4Trees") or nil
+  local GR = hideRocks and optional("Gen4Rocks") or nil
+  local GF = hideFlowers and optional("Gen4Flowers") or nil
+  local GFe = hideFences and optional("Gen4Fence") or nil
   local GW = hideWater and optional("Gen4Water") or nil
   local covered = GW and type(GW.isCovered) == "function" and GW.isCovered or nil
   local key = (hideGrass and "g" or "-") .. (hideWater and "w" or "-")
               .. (covered and tostring(GW.coverVersion or 0) or "")
               .. (GT and ("t" .. tostring(GT.coverVersion or 0)) or "-")
+              .. (GR and ("r" .. tostring(GR.coverVersion or 0)) or "-")
+              .. (GF and ("f" .. tostring(GF.coverVersion or 0)) or "-")
+              .. (GFe and ("e" .. tostring(GFe.coverVersion or 0)) or "-")
   local rec = cache[model]
   local shapes = model.shapes
   if rec and rec.key == key and rec.source == shapes and rec.count == #shapes then
@@ -202,10 +247,25 @@ local function filtered(model, hideGrass, hideWater, hideTrees)
       drop = true
       note("g:" .. tostring(shape.name), "hid native grass cards '%s'", tostring(shape.name))
     elseif GT and ((shape.src and GT.isCovered(shape.src))
-                   or (GT.isCoveredName and GT.isCoveredName(shape))) then
+                   or (GT.isCoveredName and GT.isCoveredName(shape, model.terrariumLand))) then
       drop = true
       note("t:" .. tostring(shape.srcTexture or shape.name),
            "hid native tree cards '%s' (voxel trees stand in)", tostring(shape.srcTexture or shape.name))
+    elseif GR and shape.src and GR.isCovered(shape.src) then
+      drop = true
+      note("r:" .. tostring(shape.srcTexture or shape.name),
+           "hid native rock cards '%s' (voxel rocks stand in; fence banners kept)",
+           tostring(shape.srcTexture or shape.name))
+    elseif GFe and shape.src and GFe.isCovered(shape.src) then
+      drop = true
+      note("e:" .. tostring(shape.srcTexture or shape.name),
+           "hid native fence banners '%s' (3D fences stand in)",
+           tostring(shape.srcTexture or shape.name))
+    elseif GF and shape.src and GF.isCovered(shape.src) then
+      drop = true
+      note("f:" .. tostring(shape.srcTexture or shape.name),
+           "hid native flower cards '%s' (voxel flowers stand in)",
+           tostring(shape.srcTexture or shape.name))
     elseif hideWater then
       local why = Hide.classify(shape)
       -- and only where the sheet really stands in for it
@@ -252,6 +312,8 @@ function Hide.install()
     Ground.modelFor = function(self, land, ...)
       local model = originalModelFor(self, land, ...)
       if model and type(model.shapes) == "table" then
+        -- which land this model is: Gen4Trees' name fallback only holds inside its draw distance
+        model.terrariumLand = land
         pcall(function()
           local chunks = self.terrain and self.terrain.chunks
           local record = chunks and chunks[land]
@@ -329,7 +391,7 @@ function Hide.install()
     if not Hide.active then return originalDraw(self, ...) end
     local real = self.shapes
     if type(real) ~= "table" then return originalDraw(self, ...) end
-    local list = filtered(self, drawFilter.grass, drawFilter.water, drawFilter.trees)
+    local list = filtered(self, drawFilter.grass, drawFilter.water, drawFilter.trees, drawFilter.rocks, drawFilter.flowers, drawFilter.fences)
     if list == real then return originalDraw(self, ...) end
     self.shapes = list
     local ok, a = pcall(originalDraw, self, ...)
@@ -342,12 +404,33 @@ function Hide.install()
   Ground.drawFree = function(self, ...)
     drawFilter.grass, drawFilter.water = grassOn(), waterOn()
     drawFilter.trees = treesOn()
+    if drawFilter.water then
+      -- re-tag covered water shapes for this Ground before the native pass
+      local GW = optional("Gen4Water")
+      if GW and GW.prepare then pcall(GW.prepare, self) end
+    end
     if drawFilter.trees then
       -- decide which tree shapes are covered THIS frame before the native pass
       local GT = optional("Gen4Trees")
       if not (GT and pcall(GT.prepare, self)) then drawFilter.trees = false end
     end
-    Hide.active = drawFilter.grass or drawFilter.water or drawFilter.trees
+    drawFilter.rocks = rocksOn()
+    if drawFilter.rocks then
+      local GR = optional("Gen4Rocks")
+      if not (GR and pcall(GR.prepare, self)) then drawFilter.rocks = false end
+    end
+    drawFilter.flowers = flowersOn()
+    if drawFilter.flowers then
+      local GF = optional("Gen4Flowers")
+      if not (GF and pcall(GF.prepare, self)) then drawFilter.flowers = false end
+    end
+    drawFilter.fences = fencesOn()
+    if drawFilter.fences then
+      local GFe = optional("Gen4Fence")
+      if not (GFe and pcall(GFe.prepare, self)) then drawFilter.fences = false end
+    end
+    Hide.active = drawFilter.grass or drawFilter.water or drawFilter.trees or drawFilter.rocks
+                  or drawFilter.flowers or drawFilter.fences
     local ok, a, b = pcall(originalFree, self, ...)
     Hide.active = false
     if not ok then error(a, 0) end

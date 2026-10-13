@@ -125,10 +125,48 @@ function V.require(name)
   return value
 end
 
+-- The explicit form, for anything of ours that is genuinely optional: nil when
+-- it is not there, never an error, never a stub.
+function V.optional(name)
+  local hit = modules[name]
+  if hit ~= nil then return hit end
+  local rel = "lib/" .. name .. ".lua"
+  local source = mod:read(rel)
+  if not source then return nil end
+  local chunk = load(source, "@" .. mod.path .. "/" .. rel)
+  if not chunk then return nil end
+  local ok, value = pcall(chunk, V)
+  if not (ok and value ~= nil) then return nil end
+  modules[name] = value
+  return value
+end
+
 local dataFiles = {}
+-- Tables keyed by EMERALD's own identities -- map numbers, tileset ROM
+-- addresses, metatile ids, map names.  Another Gen 3 cartridge shares the
+-- key shapes and none of the meanings (FireRed's MAP_G05_N04 is Viridian's
+-- Pokemon Center, Emerald's is Fallarbor's), so such a game reads its own
+-- copy from data/<version>/ and, where it has none, reads NOTHING rather than
+-- Emerald's answers.  gen3_shapes is keyed by metatile BEHAVIOUR, which the
+-- importer normalises to Emerald's numbering, and is shared.
+local EMERALD_KEYED = {
+  gen3_maps = { version = 1, maps = {} },
+  gen3_metatiles = { version = 1, roles = {} },
+  gen3_terraces = { version = 1, maps = {} },
+  gen3_palings = { version = 1 },
+}
 function V.data(name)
   local hit = dataFiles[name]
   if hit ~= nil then return hit end
+  local okV, GameVersion = pcall(require, "src.core.GameVersion")
+  local version = okV and GameVersion.get and GameVersion.get() or nil
+  if EMERALD_KEYED[name] and version and version ~= "emerald"
+     and okV and GameVersion.generation(version) == 3 then
+    local rel = ("data/%s/%s.lua"):format(version, name)
+    local value = mod:read(rel) and chunkFor(rel)(V) or EMERALD_KEYED[name]
+    dataFiles[name] = value
+    return value
+  end
   local value = chunkFor("data/" .. name .. ".lua")(V)
   dataFiles[name] = value
   return value
@@ -156,6 +194,8 @@ local SpriteBillboards = V.require("SpriteBillboards")
 -- diorama's own draw-distance ladder, both dropped by TERRARIUM's fork
 local ViewBox = V.require("ViewBox")
 local DrawDistance = V.require("DrawDistance")
+-- Gen 4 only: how far the voxel trees reach (DrawDistance above never runs on Platinum)
+local Gen4Distance = V.require("Gen4Distance")
 local OverworldBattle = V.require("OverworldBattle")
 local WildRoamers = V.require("WildRoamers")
 local BattleExit = V.require("BattleExit")
@@ -172,12 +212,21 @@ if Gen4Bridge.isGen4() and Gen4Bridge.install() then
   pcall(function()
     Gen4Bridge.register("trees", V.require("Gen4Trees").draw)
   end)
+  -- voxel rocks on Platinum `imped` cards (also registered in Gen4Bridge.install)
+  pcall(function()
+    Gen4Bridge.register("rocks", V.require("Gen4Rocks").draw)
+  end)
+  -- real 3D fences on Platinum's `imped` fence banners (also registered inside Gen4Bridge.install)
+  pcall(function()
+    Gen4Bridge.register("fence", V.require("Gen4Fence").draw)
+  end)
   -- HD Reloded roamers/followers when no Stadium/Colosseum model is bound
   pcall(function()
     Gen4Bridge.register("hd_pokemon", V.require("Gen4HdPokemon").draw)
   end)
   -- hide Platinum's own grass cards, water, and tree cards where the 3D versions draw
   pcall(function() V.require("Gen4Hide").install() end)
+  pcall(function() V.require("Gen4Lawn").install() end)
   -- the voxel scene's RayFX water reflection, pointed at Gen 4's water (Gen4Reflect)
   pcall(function() V.require("Gen4Reflect").install() end)
   -- 3D battles in the engine's own world, sprites for actors (Gen4Battle3D).
@@ -742,6 +791,9 @@ mod.content.render_pipelines:register(PIPE_VOXEL, {
     ForestAtmos.invalidate()   -- shaft/particle meshes and shader sentinels
     VR.invalidate()            -- the mirror, and FBO ids of dead canvases
     Pokeball.invalidate()      -- the ball's meshes and palette texture
+    -- Gen 4's native-world effects (water, sand, trees, grass) are meshes of
+    -- the same kind and had no reset path at all
+    if Gen4Bridge.installed then Gen4Bridge.invalidateAll() end
   end,
 })
 
@@ -902,6 +954,13 @@ local SETTINGS = {
     .. "behavior), NEAR (0 neighbors) for best performance on low-end "
     .. "devices, MILD (2 neighbors) for balanced quality, or FAR "
     .. "(4 neighbors) for moderate quality/performance balance.",
+    full = true, cat = "perf" },
+  { Gen4Distance.setting,
+    "How far the 3D trees reach in the Gen 4 world: NEAR, MID, FAR or MAX "
+    .. "(every land, the old behaviour). Past the range Platinum's flat tree "
+    .. "cards keep drawing, so the far field is cheap trees rather than bare "
+    .. "ground. Lower is faster.",
+    when = function() return Gen4Bridge.isGen4() end,
     full = true, cat = "perf" },
   { Grass3D.simpleMeshes,
     "Simplified meshes for roads, ground and decorative grass. ON uses "

@@ -35,7 +35,7 @@ local V = ...
 local TrainerRig = V.require("TrainerRig")
 local GeneratedAssets = V.require("GeneratedAssets")
 
-local M = { version = 10 }
+local M = { version = 13 }
 
 -- ------- tuning constants (generic human-ish proportions + gait feel)
 
@@ -100,25 +100,58 @@ local ARM_CHAIN_MIN_NY = 0.20
 -- character's source mesh is built facing X instead -- flip this one
 -- constant to 1 rather than touching the rotation code below.
 local FORWARD_INDEX = 3
+
+-- Trainers whose walk (stride, arm swing, elbows, body lean) came out mirrored
+-- front-to-back because the auto facing detection (feet vs body center) picked
+-- the wrong way for their mesh. Listed ids get the whole animation inverted.
+-- Only the animation is flipped; mesh-part classification (coat tails, hair)
+-- still uses the detected facing. Keys are the trainer ids (lowercase).
+-- Set a value to false, or delete the line, to put a trainer back to normal.
+local FLIP_WALK = {
+  leaf = true,
+  dakim = true,
+}
+
+-- Trainers whose arms swung up/down instead of front/back. The shoulder swing
+-- pivots at the shared stride pendulum origin (stridePivotFwd, derived from
+-- where the shoes sit), and for a model whose shoes are far from the body
+-- center that origin is nowhere near the arms: a rotation about a point far
+-- ahead of/behind the arm moves it mostly vertically. Listed ids pivot the
+-- arms (shoulder + elbow) at the arms' own forward position instead.
+local ARM_PIVOT_AUTO = {
+  dakim = true,
+}
 local SIDE_INDEX = (FORWARD_INDEX == 3) and 1 or 3
 
--- Swing amplitudes, in radians. Overlay sits on an already-posed idle clip,
--- so keep the stride small and the sine a little rounded at the peaks.
-local HIP_SWING = 0.2
-local KNEE_BEND = 5
-local ARM_SWING = 0.4
--- Legs and arms do not share a front bias. (hipSin - LEG_FRONT) is what
--- finally plants the step ahead of the body; using that same term on the
--- arms yanked them into a backstroke/climbing pose. Arms keep the opposite
--- bias so they still reach forward while the same-side leg does.
-local LEG_FRONT = -0.65
-local ARM_FRONT = -0.80
+-- Swing amplitudes, in radians. The overlay still sits on an already-posed
+-- idle clip, but the old values (0.2 hip, rigid shin, no foot/elbow motion)
+-- read as a walking doll: legs swung stiff as planks and arms as one piece.
+-- The gait below is now a small FK chain per limb:
+--   leg : hip swing -> knee flex (shin folds back while the leg swings
+--         through) -> ankle counter-rotation (sole stays roughly level)
+--   arm : shoulder swing -> elbow flex (forearm lifts as the arm comes forward)
+--   body: footfall bob (drops when the legs are spread), side-to-side weight
+--         shift, and a shoulder twist counter to the hips.
+local HIP_SWING = 0.42      -- thigh swing either side of the bias
+local KNEE_BEND = 0.85      -- peak knee flex while the leg swings forward
+local ANKLE_LEVEL = 0.60    -- how much of (hip+knee) the foot cancels out
+local ARM_SWING = 0.55
+local ELBOW_BASE = 0.22     -- constant relaxed elbow bend
+local ELBOW_SWING = 0.55    -- extra forearm lift as the arm swings forward
+-- Mean lean of the limbs, as absolute angles. The arm value equals the old
+-- ARM_SWING * 0.80 offset; the leg value is trimmed from 0.13 so the larger
+-- swing stays balanced front-to-back. Retune these, not the FK math.
+-- (Positive hip angle = leg back, negative = leg forward; see M.apply.)
+local LEG_BIAS = 0.08
+local ARM_BIAS = -0.32
 
--- A small torso bob riding on top of the leg motion, the way a real walk
--- bobs down-and-up once per FOOTFALL (twice per full left/right cycle) --
--- see red_3d_player's own `bounce=0.5-0.5*math.cos(phase*2)` for the same
--- idea applied to its bone rig.
-local BOB_AMOUNT = 0.3
+-- Body motion, as fractions of the character's own height so it scales with
+-- every trainer model regardless of source units.
+local BOB_DROP = 0.035      -- body sinks this much when the legs are spread
+local SWAY = 0.010          -- weight shift toward the stance leg
+local LEAN = 0.12           -- forward lean of the upper body (radians, ~7 deg); 0 = upright
+local TWIST = 0.12          -- shoulder yaw (radians), opposite the hips
+local BOB_AMOUNT = 0.3      -- fallback only, for rigs built without rig.height
 
 -- ------- jump pose tuning (see M.applyJump below)
 --
@@ -661,10 +694,13 @@ function M.build(id, groups, bounds, skeleton)
   local rig = {
     hipY = hipY, kneeY = kneeY, shoulderY = shoulderY,
     centerSide = centerSide, version = M.version, groups = {},
+    minY = minY, height = prof.height,
+    centerFwd = centerFwd, legFwd = footFwd or centerFwd,
     -- Pendulum origin between the body and the rest-pose shoes so a stride
     -- can swing past the hip plane. Pivoting at fwd=0 made "forward" look
     -- like a lift back to idle, and only the back half read as a step.
-    strideSign = faceSign or 1,
+    armPivotAuto = ARM_PIVOT_AUTO[tostring(id or ""):lower()] and true or nil,
+    strideSign = (faceSign or 1) * (FLIP_WALK[tostring(id or ""):lower()] and -1 or 1),
     stridePivotFwd = 2 * ((footFwd or centerFwd) + centerFwd),
   }
 
@@ -955,32 +991,130 @@ function M.apply(rig, groupIndex, group, phase, blend, out, posedVertices)
   if not buckets or not base then return out end
 
   local hipY, kneeY, shoulderY = rig.hipY, rig.kneeY, rig.shoulderY
-  local pivotFwd = rig.stridePivotFwd or 0
-  local strideSign = rig.strideSign or 1
+  local pivotFwd = rig.stridePivotFwd or 0       -- hip / shoulder pendulum origin
+  local legFwd = rig.legFwd or pivotFwd          -- knee + ankle sit over the shoe
+  local centerFwd = rig.centerFwd or 0
+  local centerSide = rig.centerSide or 0
+  local sgn = rig.strideSign or 1
+  local armPivot = pivotFwd
+  if rig.armPivotAuto then
+    -- Mean forward position of this group's arm verts in the rest mesh,
+    -- computed once per group (membership is final by the first apply).
+    rig.armPivotCache = rig.armPivotCache or {}
+    local c = rig.armPivotCache[groupIndex]
+    if c == nil then
+      local sum, n = 0, 0
+      for vi = 1, #base do
+        local ab = buckets[vi]
+        if ab and ab.bucket == "arm" and ab.weight > 0 then
+          sum = sum + (base[vi][FORWARD_INDEX] or 0)
+          n = n + 1
+        end
+      end
+      c = (n > 0) and (sum / n) or pivotFwd
+      rig.armPivotCache[groupIndex] = c
+    end
+    armPivot = c
+  end
+  local h = rig.height or (shoulderY * 1.25)
+  local minY = rig.minY or 0
 
-  -- Both legs' hip-phase and knee-phase sines only ever take one of two
-  -- values per frame (the left leg is always exactly half a cycle behind
-  -- the right), so compute each pair once here instead of per vertex.
-  local hipSinR = math.sin(phase)
-  local bob = blend * BOB_AMOUNT * (0.5 - 0.5 * math.cos(phase * 2))
+  local ankleY = minY + h * 0.07
+  local elbowY = hipY + (shoulderY - hipY) * 0.5
+  local kneeBand, ankleBand, elbowBand = h * 0.04, h * 0.03, h * 0.05
+  local headBand = h * 0.08
+
+  local sinP, cosP = math.sin(phase), math.cos(phase)
+
+  -- Per-side gait state. The left side is exactly half a cycle behind the
+  -- right, so everything is computed once per frame for the two sides here
+  -- rather than per vertex. hs > 0 means that side's leg is ahead of the body.
+  local function sideState(sign)
+    local hs = sign * sinP
+    local cs = sign * cosP            -- d(hs)/dt: > 0 while the leg swings forward
+    local legAhead = HIP_SWING * hs + LEG_BIAS
+    local hip = -sgn * legAhead * blend
+    -- Knee folds during the swing-through (leg travelling forward, peaking a
+    -- touch before it passes under the body), stays straight on the stance leg.
+    local x = cs * 0.9394 - hs * 0.3429
+    local flex = (x > 0) and (KNEE_BEND * x ^ 1.5) or 0
+    local knee = sgn * flex * blend
+    local foot = -ANKLE_LEVEL * (hip + knee)
+    local arm = sgn * (ARM_SWING * hs + ARM_BIAS) * blend
+    local elbow = -sgn * (ELBOW_BASE + ELBOW_SWING * (0.5 - 0.5 * hs)) * blend
+    return { hip = hip, knee = knee, foot = foot, arm = arm, elbow = elbow, twist = -sgn * TWIST * hs * blend }
+  end
+  local stL, stR = sideState(-1), sideState(1)
+
+  -- Body: lowest when the legs are spread (double support), highest as the
+  -- stance leg passes under it. The leg rotation lifts the feet when spread,
+  -- so dropping the body keeps them planted instead of the character floating.
+  local bobDrop = (rig.height and (BOB_DROP * h) or BOB_AMOUNT * 0.07)
+    * (0.5 - 0.5 * math.cos(phase * 2)) * blend
+  local sway = -SWAY * h * cosP * blend
+  local twistTotal = stR.twist
 
   for vi = 1, #base do
     local v = (posedVertices and posedVertices[vi]) or base[vi]
     local side = v[SIDE_INDEX]
-    local up = v[2] + bob
+    local up = v[2]
     local fwd = v[FORWARD_INDEX]
+    local restUp = up
 
     local b = buckets[vi]
-    if b and b.weight > 0 and blend > 0 then
-      local hipSin = (b.side < 0) and -hipSinR or hipSinR
-      local w = b.weight * blend
-      local hipAngle = -strideSign * HIP_SWING * (hipSin - LEG_FRONT) * w
-      if b.bucket == "arm" then
-        local armAngle = strideSign * ARM_SWING * (hipSin + ARM_FRONT) * w
-        up, fwd = rotate2(up, fwd, shoulderY, pivotFwd, armAngle)
-      elseif b.bucket == "thigh" or b.bucket == "shin" then
-        up, fwd = rotate2(up, fwd, hipY, pivotFwd, hipAngle)
+    local twistW = 0
+    local leanW = 0
+    if blend > 0 then
+      -- Spine lean: everything above the hip tips forward about the hip,
+      -- ramping in over the torso. The head is NOT faded out here (unlike the
+      -- twist) so it leans with the body; arm verts hanging below the hip
+      -- still follow their shoulder.
+      if restUp > hipY * 0.9 then
+        leanW = smooth01((restUp - hipY * 0.9) / math.max(shoulderY - hipY * 0.9, 1e-4))
       end
+
+      -- Shoulders/arms/chest follow the spine twist; head fades back out so it
+      -- keeps looking where the character walks.
+      if restUp > hipY then
+        twistW = smooth01((restUp - hipY) / math.max(shoulderY - hipY, 1e-4))
+        twistW = twistW * (1 - 0.75 * smooth01((restUp - shoulderY) / headBand))
+      end
+
+      if b and b.weight > 0 then
+        local w = b.weight
+        local st = (b.side < 0) and stL or stR
+        local bk = b.bucket
+        if bk == "arm" then
+          local ew = smooth01((elbowY + elbowBand - up) / (2 * elbowBand))
+          if ew > 0 then
+            up, fwd = rotate2(up, fwd, elbowY, armPivot, st.elbow * w * ew)
+          end
+          up, fwd = rotate2(up, fwd, shoulderY, armPivot, st.arm * w)
+          if w > twistW then twistW = w end   -- hands must stay with the shoulder
+          if w > leanW then leanW = w end
+        elseif bk == "thigh" or bk == "shin" then
+          -- Innermost joint first, each about its REST pivot; the parent
+          -- rotation afterwards carries the child pivots along with it.
+          local fw = smooth01((ankleY + ankleBand - up) / (2 * ankleBand))
+          if fw > 0 then
+            up, fwd = rotate2(up, fwd, ankleY, legFwd, st.foot * w * fw)
+          end
+          local kw = smooth01((kneeY + kneeBand - up) / (2 * kneeBand))
+          if kw > 0 then
+            up, fwd = rotate2(up, fwd, kneeY, legFwd, st.knee * w * kw)
+          end
+          up, fwd = rotate2(up, fwd, hipY, pivotFwd, st.hip * w)
+        end
+      end
+
+      if leanW > 0 then
+        up, fwd = rotate2(up, fwd, hipY, centerFwd, sgn * LEAN * blend * leanW)
+      end
+      if twistW > 0 then
+        side, fwd = rotate2(side, fwd, centerSide, centerFwd, twistTotal * twistW)
+      end
+      up = up - bobDrop
+      side = side + sway
     end
 
     -- Reassemble (side, up, fwd) back into (x, y, z) using whichever axis

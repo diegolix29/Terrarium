@@ -78,8 +78,18 @@ end
 
 -- ------------------------------------------------------------- the pass --
 
+-- True while Gen4WorldHost.renderPose is drawing the Colosseum overworld arena's
+-- backdrop world. That world is drawn every frame at arena resolution, and a
+-- full-screen RayFX march on top of it was the most expensive thing in the
+-- frame, so the reflection is left to the overworld's own pass.
+local function inArenaPass()
+  local Host = optional("Gen4WorldHost")
+  return Host ~= nil and type(Host.inPose) == "function" and Host.inPose() or false
+end
+
 function R.run(ground, view, vw, vh)
   if not R.enabled then return end
+  if inArenaPass() then return end
   local RayFX = optional("RayFX")
   if not (RayFX and RayFX.level and RayFX.apply) then return end
   local level = RayFX.level()

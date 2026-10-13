@@ -1,0 +1,807 @@
+--- a/main.lua	2026-10-03 21:38:53.093759960 +0000
++++ b/main.lua	2026-10-03 21:39:29.301424205 +0000
+@@ -742,6 +742,9 @@
+     ForestAtmos.invalidate()   -- shaft/particle meshes and shader sentinels
+     VR.invalidate()            -- the mirror, and FBO ids of dead canvases
+     Pokeball.invalidate()      -- the ball's meshes and palette texture
++    -- Gen 4's native-world effects (water, sand, trees, grass) are meshes of
++    -- the same kind and had no reset path at all
++    if Gen4Bridge.installed then Gen4Bridge.invalidateAll() end
+   end,
+ })
+ 
+--- a/lib/ChunkMesher.lua	2026-10-03 21:38:53.096885881 +0000
++++ b/lib/ChunkMesher.lua	2026-10-03 21:39:29.302289492 +0000
+@@ -1813,6 +1813,33 @@
+   end
+ end
+ 
++-- DISK WRITE-BACK. VoxelDiskCache was READ on every build (below) but nothing
++-- ever WROTE to it on the normal path: only ChunkMesher.warmDisk (Kanto's
++-- region warm-up) and VoxelPrebake (which has no caller) store anything, so
++-- on an ordinary run every map was meshed from scratch on every launch -- the
++-- "mobile takes forever to load" case. After a live build that missed the
++-- disk, queue a low-priority bake of the same slot. It rides the existing warm
++-- queue: drained only when no real job is waiting, never before the player's
++-- own mesh. (warmDisk itself cannot be used here: it answers "live" for a map
++-- whose mesh was just swapped in.) Set ChunkMesher.WRITE_BACK = false to turn
++-- it off; the existing "voxelDiskCache" option still gates the store.
++ChunkMesher.WRITE_BACK = true
++local function queueWriteBack(map, slot, masks)
++  if not ChunkMesher.WRITE_BACK then return end
++  if not (DiskCache and map and map.id) then return end
++  if type(DiskCache.enabled) == "function" and not DiskCache.enabled() then return end
++  local key = jobKey(map.id, slot)
++  if jobIndex[key] or warmIndex[key] then return end
++  if type(DiskCache.has) == "function" then
++    local okHas, hit = pcall(DiskCache.has, map, slot, masks)
++    if okHas and hit then return end
++  end
++  local job = { id = map.id, map = map, slot = slot, masks = masks,
++                region = "writeback", co = nil }
++  warmIndex[key] = job
++  warmJobs[#warmJobs + 1] = job
++end
++
+ local function runJob(job)
+   local map = job.map
+   local c = entry(job.id)
+@@ -1869,6 +1896,7 @@
+       return
+     end
+     swapSlot(c, job.slot, mesh or false)
++    if mesh then pcall(queueWriteBack, map, job.slot, job.masks) end
+   else
+     local mesh = wrapCachedMesh(cachedTerrain, cachedWater)
+     if (gen[job.id] or 0) ~= job.gen then
+--- a/lib/Gen4Bridge.lua	2026-10-03 21:38:53.099931511 +0000
++++ b/lib/Gen4Bridge.lua	2026-10-03 21:39:29.299253074 +0000
+@@ -53,6 +53,34 @@
+   reported = {},
+ }
+ 
++-- The shared per-frame build budget (lib/Gen4Budget.lua). Resolved once.
++local budgetMod
++local function budget()
++  if not budgetMod then
++    local ok, B = pcall(V.require, "Gen4Budget")
++    if ok and type(B) == "table" then budgetMod = B end
++  end
++  return budgetMod
++end
++
++-- True while a warp fade hides the world: nothing on screen to hitch, so the
++-- budget may spend much more building meshes. Only `transitioning` is read (the
++-- same flag main.lua's own COVERED test uses for warps); the stack-top test is
++-- left out on purpose, because a Gen 4 world can run with an empty stack and
++-- that would read as "covered" for the whole game.
++local function worldCovered()
++  local okG, Game = pcall(require, "src.core.Game")
++  local ow = okG and type(Game) == "table" and Game.overworld or nil
++  return (ow and ow.transitioning) and true or false
++end
++
++local function frameEnd()
++  local B = budget()
++  if not B then return end
++  B.covered = worldCovered()      -- read by the NEXT frame's builds
++  B.nextFrame()
++end
++
+ local function report(key, fmt, ...)
+   if Bridge.reported[key] then return end
+   Bridge.reported[key] = true
+@@ -249,7 +277,13 @@
+     -- Runs while the free canvas is still open (colour + depth): terrain,
+     -- buildings and characters are already in it. See the header.
+     if Ground.freeOpen and self and self.freeW then Bridge.run(self) end
+-    return original(self, ...)
++    -- close the frame's shared build budget after the engine has finished with
++    -- the canvas, and pass every return value of the original through
++    local function finish(...)
++      frameEnd()
++      return ...
++    end
++    return finish(original(self, ...))
+   end
+   Bridge.installed = true
+ 
+@@ -291,6 +325,20 @@
+   return true
+ end
+ 
++-- Drop every baked Gen 4 effect mesh (water, sand, trees, grass). The voxel
++-- pipeline's invalidate used to be the only reset path and it knew none of
++-- these, so a graphics reset, a mod reload or a cache reset left the old
++-- meshes (and, on a lost GL context, dead ones) in place.
++function Bridge.invalidateAll()
++  for _, name in ipairs({ "Gen4Sand", "Gen4Trees", "Gen4Water", "Gen4Grass" }) do
++    local ok, mod = pcall(V.require, name)
++    if ok and type(mod) == "table" and type(mod.invalidate) == "function" then
++      local okI, err = pcall(mod.invalidate)
++      if not okI then report("inv:" .. name, "%s.invalidate failed: %s", name, tostring(err)) end
++    end
++  end
++end
++
+ function Bridge.uninstall()
+   if not Bridge.installed then return end
+   pcall(function() V.require("Gen4Sky").uninstall() end)
+--- a/lib/Gen4Sand.lua	2026-10-03 21:38:53.102953961 +0000
++++ b/lib/Gen4Sand.lua	2026-10-03 21:38:53.156345564 +0000
+@@ -72,6 +72,23 @@
+   return ok and mod or nil
+ end
+ 
++-- One shared per-frame build budget (lib/Gen4Budget.lua). The stub keeps the
++-- pass working, capped by BUILDS_PER_FRAME alone, if that module is missing.
++local Budget = optional("Gen4Budget") or { allow = function() return true end, charge = function() end }
++local clock = (love and love.timer and love.timer.getTime) or os.clock
++
++-- Resolved once. These used to be pcall(V.require, ...) PER CELL and per frame.
++local cellsMod
++local function getCells()
++  if cellsMod == nil then cellsMod = optional("Gen4Cells") or false end
++  return cellsMod or nil
++end
++local grass3dMod
++local function getGrass3D()
++  if not grass3dMod then grass3dMod = optional("Grass3D") end
++  return grass3dMod
++end
++
+ local cache = setmetatable({}, { __mode = "k" })    -- map -> { chunks = {} }
+ local texture                                        -- Image | false | nil (untried)
+ 
+@@ -90,7 +107,7 @@
+ local function isSand(map, cx, cy)
+   -- Gen4Cells: the live Map inside its crop, the shared layout beyond it, so
+   -- the beach carries on over the neighbouring maps.
+-  local Cells = optional("Gen4Cells")
++  local Cells = getCells()
+   local b
+   if Cells then b = Cells.behaviour(map, cx, cy)
+   elseif map.blockAt and map.inBounds and map:inBounds(cx, cy) then
+@@ -107,14 +124,14 @@
+ 
+ -- One quad, as Grass3D's stamp() does it: rotate the template corner by yaw,
+ -- scale it, move it to the tile's centre.
++local CSX, CSZ = { -1, 1, 1, -1 }, { -1, -1, 1, 1 }     -- corner signs (was a table per quad)
++local CU, CV = { 0, 1, 1, 0 }, { 0, 0, 1, 1 }
+ local function pushQuad(verts, indices, cx0, cz0, yaw, scale, half)
+   local c, s = math.cos(yaw), math.sin(yaw)
+-  local corners = { { -half, -half, 0, 0 }, { half, -half, 1, 0 },
+-                    { half, half, 1, 1 }, { -half, half, 0, 1 } }
+   local base = #verts
+-  for _, k in ipairs(corners) do
+-    local x, z = k[1] * scale, k[2] * scale
+-    verts[#verts + 1] = { cx0 + x * c - z * s, 0, cz0 + x * s + z * c, k[3], k[4], Sand.SHADE, 0 }
++  for i = 1, 4 do
++    local x, z = CSX[i] * half * scale, CSZ[i] * half * scale
++    verts[#verts + 1] = { cx0 + x * c - z * s, 0, cz0 + x * s + z * c, CU[i], CV[i], Sand.SHADE, 0 }
+   end
+   indices[#indices + 1], indices[#indices + 2], indices[#indices + 3] = base + 1, base + 2, base + 3
+   indices[#indices + 1], indices[#indices + 2], indices[#indices + 3] = base + 1, base + 3, base + 4
+@@ -156,74 +173,109 @@
+   return { buckets = out }
+ end
+ 
++local function numKey(kx, ky) return (ky + 32768) * 65536 + (kx + 32768) end
++
+ function Sand.draw(scene)
+   if not Sand.enabled then return end
+   local map = scene.map
+   if not map then return end
+-  local Grass3D = optional("Grass3D")
++  local Grass3D = getGrass3D()
+   if not (Grass3D and Grass3D.instanceForTile) then return end
+   local tex = groundTexture(Grass3D)
+   if not tex then return end
+ 
+   local rec = cache[map]
+-  if not rec then rec = { chunks = {} }; cache[map] = rec end
++  if not rec then rec = { chunks = {}, list = {} }; cache[map] = rec end
+ 
+   local fx, fz = scene.focusPx()
+   local span = Sand.CHUNK * 16
+   local kx0, ky0 = math.floor(fx / span), math.floor(fz / span)
+-
+-  local want = {}
+   local ground, view = scene.ground, scene.view
+   local px = ground and ground.chunkPx
+-  if px and view and tonumber(view.x) and tonumber(view.z) then
+-    local W = Sand.WINDOW
+-    local camCx, camCy = math.floor(view.x / px), math.floor(view.z / px)
+-    local x0, x1 = (camCx - W) * px - scene.offsetX, (camCx + W + 1) * px - scene.offsetX
+-    local z0, z1 = (camCy - W) * px - scene.offsetZ, (camCy + W + 1) * px - scene.offsetZ
+-    for ky = math.floor(z0 / span), math.ceil(z1 / span) - 1 do
+-      for kx = math.floor(x0 / span), math.ceil(x1 / span) - 1 do
+-        local dx, dy = kx - kx0, ky - ky0
+-        want[#want + 1] = { dx * dx + dy * dy, kx, ky }
++  local grid = (px and view and tonumber(view.x) and tonumber(view.z)) and true or false
++  local camCx, camCy = 0, 0
++  if grid then camCx, camCy = math.floor(view.x / px), math.floor(view.z / px) end
++  local ox, oz = scene.offsetX, scene.offsetZ
++
++  -- WHICH CHUNKS. The list only changes when the camera or focus crosses a
++  -- chunk boundary, so it is built (and sorted) then and reused every other
++  -- frame instead of being rebuilt, re-sorted and re-keyed 60 times a second.
++  if not (rec.want and rec.kx0 == kx0 and rec.ky0 == ky0 and rec.camCx == camCx
++          and rec.camCy == camCy and rec.ox == ox and rec.oz == oz and rec.grid == grid) then
++    local want = {}
++    if grid then
++      local W = Sand.WINDOW
++      local x0, x1 = (camCx - W) * px - ox, (camCx + W + 1) * px - ox
++      local z0, z1 = (camCy - W) * px - oz, (camCy + W + 1) * px - oz
++      for ky = math.floor(z0 / span), math.ceil(z1 / span) - 1 do
++        for kx = math.floor(x0 / span), math.ceil(x1 / span) - 1 do
++          local dx, dy = kx - kx0, ky - ky0
++          want[#want + 1] = { dx * dx + dy * dy, kx, ky, numKey(kx, ky) }
++        end
++      end
++    else
++      local R = Sand.RADIUS
++      for ky = ky0 - R, ky0 + R do
++        for kx = kx0 - R, kx0 + R do
++          local dx, dy = kx - kx0, ky - ky0
++          if dx * dx + dy * dy <= R * R + 1 then
++            want[#want + 1] = { dx * dx + dy * dy, kx, ky, numKey(kx, ky) }
++          end
++        end
+       end
+     end
+-  else
+-    local R = Sand.RADIUS
+-    for ky = ky0 - R, ky0 + R do
+-      for kx = kx0 - R, kx0 + R do
+-        local dx, dy = kx - kx0, ky - ky0
+-        if dx * dx + dy * dy <= R * R + 1 then want[#want + 1] = { dx * dx + dy * dy, kx, ky } end
++    table.sort(want, function(a, b) return a[1] < b[1] end)
++    rec.want, rec.kx0, rec.ky0, rec.camCx, rec.camCy = want, kx0, ky0, camCx, camCy
++    rec.ox, rec.oz, rec.grid, rec.dirty = ox, oz, grid, true
++  end
++
++  -- BUILD what the shared budget allows, nearest first. Nothing past the first
++  -- refusal can build this frame either, so stop looking.
++  local want, chunks = rec.want, rec.chunks
++  local builds = 0
++  for i = 1, #want do
++    local w = want[i]
++    if not chunks[w[4]] then
++      if builds < Sand.BUILDS_PER_FRAME and Budget.allow(false) then
++        builds = builds + 1
++        local t0 = clock()
++        local ok, built = pcall(buildChunk, Grass3D, scene, map, w[2], w[3])
++        Budget.charge(t0, "sand")
++        if ok then
++          chunks[w[4]] = built
++        else
++          chunks[w[4]] = { buckets = {} }
++          once("build", "a chunk failed to build and was skipped: %s", tostring(built))
++        end
++        rec.dirty = true
++      else
++        break
+       end
+     end
+   end
+-  table.sort(want, function(a, b) return a[1] < b[1] end)
+ 
+-  local now = love.timer and love.timer.getTime
+-  local started = now and now() or 0
+-  local builds, list = 0, {}
+-  for _, w in ipairs(want) do
+-    local key = w[2] .. ":" .. w[3]
+-    local chunk = rec.chunks[key]
+-    if not chunk and builds < Sand.BUILDS_PER_FRAME
+-       and (builds == 0 or not now or (now() - started) < Sand.BUILD_BUDGET) then
+-      builds = builds + 1
+-      local ok, built = pcall(buildChunk, Grass3D, scene, map, w[2], w[3])
+-      if ok then
+-        chunk = built
+-      else
+-        chunk = { buckets = {} }
+-        once("build", "a chunk failed to build and was skipped: %s", tostring(built))
+-      end
+-      rec.chunks[key] = chunk
++  if rec.dirty then
++    local list = {}
++    for i = 1, #want do
++      local chunk = chunks[want[i][4]]
++      if chunk then for _, b in ipairs(chunk.buckets) do list[#list + 1] = b end end
+     end
+-    if chunk then for _, b in ipairs(chunk.buckets) do list[#list + 1] = b end end
++    rec.list, rec.dirty = list, false
+   end
++  local list = rec.list
+   if #list == 0 then return end
+ 
+   Voxel3D.seams(false)
+   Voxel3D.glass(false)
+-  for _, b in ipairs(list) do
+-    Voxel3D.draw(b.mesh, tex, Mat4.translate(scene.offsetX, b.y + Sand.LIFT, scene.offsetZ),
+-                 Sand.PULL, nil, 0)
++  local lift = Sand.LIFT
++  for i = 1, #list do
++    local b = list[i]
++    local m = b.m
++    if not m or b.mox ~= ox or b.moz ~= oz or b.mlift ~= lift then
++      m = Mat4.translate(ox, b.y + lift, oz)       -- once per bucket, not per frame
++      b.m, b.mox, b.moz, b.mlift = m, ox, oz, lift
++    end
++    Voxel3D.draw(b.mesh, tex, m, Sand.PULL, nil, 0)
+   end
+   Voxel3D.seams(true)
+   Voxel3D.glass(true)
+--- a/lib/Gen4Grass.lua	2026-10-03 21:38:53.105538867 +0000
++++ b/lib/Gen4Grass.lua	2026-10-03 21:38:53.156671488 +0000
+@@ -66,6 +66,26 @@
+   return ok and mod or nil
+ end
+ 
++-- One shared per-frame build budget (lib/Gen4Budget.lua); see Gen4Sand.
++local Budget = optional("Gen4Budget") or { allow = function() return true end, charge = function() end }
++local clock = (love and love.timer and love.timer.getTime) or os.clock
++
++-- Resolved once: these were pcall(V.require, ...) per CELL and per frame.
++local cellsMod
++local function getCells()
++  if cellsMod == nil then cellsMod = optional("Gen4Cells") or false end
++  return cellsMod or nil
++end
++local grass3dMod, windMod
++local function getGrass3D()
++  if not grass3dMod then grass3dMod = optional("Grass3D") end
++  return grass3dMod
++end
++local function getWind()
++  if not windMod then windMod = optional("Wind") end
++  return windMod
++end
++
+ -- map -> { chunks = { ["cx:cy"] = { buckets = { {mesh, y}, ... } } } }
+ local cache = setmetatable({}, { __mode = "k" })
+ 
+@@ -73,7 +93,7 @@
+   -- Gen4Cells reads the live Map inside its crop and the shared layout beyond
+   -- it, so grass grows on the neighbouring maps' ground too (a Gen 4 Map is
+   -- only a rectangle cut out of the grid the engine draws around you).
+-  local Cells = optional("Gen4Cells")
++  local Cells = getCells()
+   local b
+   if Cells then b = Cells.behaviour(map, cx, cy)
+   elseif map.blockAt and map.inBounds and map:inBounds(cx, cy) then
+@@ -128,7 +148,7 @@
+ -- set here each time, the way VoxelScene's grass pass sets it.
+ local lastAt = nil
+ local function prepare(Grass3D, scene)
+-  local Wind = optional("Wind")
++  local Wind = getWind()
+   local sway = 0
+   if Wind and Wind.amount then
+     local ok, v = pcall(Wind.amount)
+@@ -171,10 +191,12 @@
+   return sway
+ end
+ 
++local function numKey(kx, ky) return (ky + 32768) * 65536 + (kx + 32768) end
++
+ function Grass.draw(scene)
+   local map = scene.map
+   if not map then return end
+-  local Grass3D = optional("Grass3D")
++  local Grass3D = getGrass3D()
+   if not (Grass3D and Grass3D.available and Grass3D.available()) then
+     once("bake", "the 3D grass bake is unavailable (assets/ground/grass, or GRASS "
+          .. "set to VOXEL) -- no grass drawn on Gen 4")
+@@ -184,83 +206,105 @@
+   if not tex then return end
+ 
+   local rec = cache[map]
+-  if not rec then rec = { chunks = {} }; cache[map] = rec end
++  if not rec then rec = { chunks = {}, list = {} }; cache[map] = rec end
+ 
+   local fx, fz = scene.focusPx()
+   local span = Grass.CHUNK * 16
+   local kx0, ky0 = math.floor(fx / span), math.floor(fz / span)
+-
+-  -- WHICH CHUNKS: every one the engine draws ground for. The engine draws the
+-  -- engine chunks within WINDOW of the camera's, so grass is wanted on exactly
+-  -- that square (in map pixels: world minus the ground's offset) and not on a
+-  -- smaller circle around the player, which is what made it fade in only when
+-  -- you were close.
+-  local want = {}
+   local ground, view = scene.ground, scene.view
+   local px = ground and ground.chunkPx
+-  if px and view and tonumber(view.x) and tonumber(view.z) then
+-    local W = Grass.WINDOW
+-    local camCx, camCy = math.floor(view.x / px), math.floor(view.z / px)
+-    local x0, x1 = (camCx - W) * px - scene.offsetX, (camCx + W + 1) * px - scene.offsetX
+-    local z0, z1 = (camCy - W) * px - scene.offsetZ, (camCy + W + 1) * px - scene.offsetZ
+-    for ky = math.floor(z0 / span), math.ceil(z1 / span) - 1 do
+-      for kx = math.floor(x0 / span), math.ceil(x1 / span) - 1 do
+-        local dx, dy = kx - kx0, ky - ky0
+-        want[#want + 1] = { dx * dx + dy * dy, kx, ky }
++  local grid = (px and view and tonumber(view.x) and tonumber(view.z)) and true or false
++  local camCx, camCy = 0, 0
++  if grid then camCx, camCy = math.floor(view.x / px), math.floor(view.z / px) end
++  local ox, oz = scene.offsetX, scene.offsetZ
++
++  -- WHICH CHUNKS: every one the engine draws ground for (the engine chunks
++  -- within WINDOW of the camera's), nearest first. The list only changes when
++  -- the camera or focus crosses a chunk boundary, so it is built and sorted
++  -- then and reused every other frame.
++  if not (rec.want and rec.kx0 == kx0 and rec.ky0 == ky0 and rec.camCx == camCx
++          and rec.camCy == camCy and rec.ox == ox and rec.oz == oz and rec.grid == grid) then
++    local want = {}
++    if grid then
++      local W = Grass.WINDOW
++      local x0, x1 = (camCx - W) * px - ox, (camCx + W + 1) * px - ox
++      local z0, z1 = (camCy - W) * px - oz, (camCy + W + 1) * px - oz
++      for ky = math.floor(z0 / span), math.ceil(z1 / span) - 1 do
++        for kx = math.floor(x0 / span), math.ceil(x1 / span) - 1 do
++          local dx, dy = kx - kx0, ky - ky0
++          want[#want + 1] = { dx * dx + dy * dy, kx, ky, numKey(kx, ky) }
++        end
+       end
+-    end
+-  else
+-    local R = Grass.RADIUS
+-    for ky = ky0 - R, ky0 + R do
+-      for kx = kx0 - R, kx0 + R do
+-        local dx, dy = kx - kx0, ky - ky0
+-        if dx * dx + dy * dy <= R * R + 1 then
+-          want[#want + 1] = { dx * dx + dy * dy, kx, ky }
++    else
++      local R = Grass.RADIUS
++      for ky = ky0 - R, ky0 + R do
++        for kx = kx0 - R, kx0 + R do
++          local dx, dy = kx - kx0, ky - ky0
++          if dx * dx + dy * dy <= R * R + 1 then
++            want[#want + 1] = { dx * dx + dy * dy, kx, ky, numKey(kx, ky) }
++          end
+         end
+       end
+     end
++    table.sort(want, function(a, b) return a[1] < b[1] end)
++    rec.want, rec.kx0, rec.ky0, rec.camCx, rec.camCy = want, kx0, ky0, camCx, camCy
++    rec.ox, rec.oz, rec.grid, rec.dirty = ox, oz, grid, true
+   end
+-  -- nearest chunks first, so the ones under the camera are built before the far
+-  table.sort(want, function(a, b) return a[1] < b[1] end)
+ 
+-  local now = love.timer and love.timer.getTime
+-  local started = now and now() or 0
++  -- BUILD what the shared budget allows, nearest first; nothing past the first
++  -- refusal can build this frame either.
++  local want, chunks = rec.want, rec.chunks
+   local builds = 0
+-  local list = {}
+-  for _, w in ipairs(want) do
+-    local key = w[2] .. ":" .. w[3]
+-    local chunk = rec.chunks[key]
+-    if not chunk and builds < Grass.BUILDS_PER_FRAME
+-       and (builds == 0 or not now or (now() - started) < Grass.BUILD_BUDGET) then
+-      builds = builds + 1
+-      local ok, built = pcall(buildChunk, Grass3D, scene, map, w[2], w[3])
+-      if ok then
+-        chunk = built
++  for i = 1, #want do
++    local w = want[i]
++    if not chunks[w[4]] then
++      if builds < Grass.BUILDS_PER_FRAME and Budget.allow(false) then
++        builds = builds + 1
++        local t0 = clock()
++        local ok, built = pcall(buildChunk, Grass3D, scene, map, w[2], w[3])
++        Budget.charge(t0, "grass")
++        if ok then
++          chunks[w[4]] = built
++        else
++          chunks[w[4]] = { buckets = {} }
++          once("chunk", "a chunk failed to build and was skipped: %s", tostring(built))
++        end
++        rec.dirty = true
+       else
+-        chunk = { buckets = {} }
+-        once("chunk", "a chunk failed to build and was skipped: %s", tostring(built))
++        break
+       end
+-      rec.chunks[key] = chunk
+     end
+-    if chunk then
+-      for _, b in ipairs(chunk.buckets) do list[#list + 1] = b end
++  end
++
++  if rec.dirty then
++    local list = {}
++    for i = 1, #want do
++      local chunk = chunks[want[i][4]]
++      if chunk then for _, b in ipairs(chunk.buckets) do list[#list + 1] = b end end
+     end
++    rec.list, rec.dirty = list, false
+   end
++  local list = rec.list
+   if #list == 0 then return end
+ 
+   local sway = prepare(Grass3D, scene)
+   -- these meshes are not on the voxel grid and carry no window art
+   Voxel3D.seams(false)
+   Voxel3D.glass(false)
+-  for _, b in ipairs(list) do
+-    Voxel3D.draw(b.mesh, tex, Mat4.translate(scene.offsetX, b.y, scene.offsetZ), 0, nil, sway)
++  for i = 1, #list do
++    local b = list[i]
++    local m = b.m
++    if not m or b.mox ~= ox or b.moz ~= oz then
++      m = Mat4.translate(ox, b.y, oz)            -- once per bucket, not per frame
++      b.m, b.mox, b.moz = m, ox, oz
++    end
++    Voxel3D.draw(b.mesh, tex, m, 0, nil, sway)
+   end
+   Voxel3D.grassH, Voxel3D.grassLoad, Voxel3D.crush = nil, nil, nil
+   Voxel3D.seams(true)
+   Voxel3D.glass(true)
+ end
+ 
+--- Drop every baked mesh: the GRASS row flipped, or a map was edited.
+ function Grass.invalidate()
+   for _, rec in pairs(cache) do
+     for _, chunk in pairs(rec.chunks) do
+--- a/lib/Gen4Water.lua	2026-10-03 21:38:53.108118017 +0000
++++ b/lib/Gen4Water.lua	2026-10-03 21:39:13.387627791 +0000
+@@ -111,6 +111,10 @@
+   return ok and mod or nil
+ end
+ 
++-- One shared per-frame build budget (lib/Gen4Budget.lua); see Gen4Sand.
++local Budget = optional("Gen4Budget") or { allow = function() return true end, charge = function() end }
++local clock = (love and love.timer and love.timer.getTime) or os.clock
++
+ local cache = setmetatable({}, { __mode = "k" })   -- ground -> { lands = {}, complete }
+ 
+ -- ----------------------------------------------------------- decoding --
+@@ -389,58 +393,96 @@
+   local fx, fz = scene.focusPx()
+   fx, fz = fx + scene.offsetX, fz + scene.offsetZ         -- map pixels -> world
+ 
+-  local want = {}
+-  for cy = camCy - W, camCy + W do
+-    for cx = camCx - W, camCx + W do
+-      if cx >= 0 and cy >= 0 and cx < grid.width and cy < grid.height then
+-        local land = grid.land[cy * grid.width + cx + 1]
+-        local dx, dz = cx * px + half - fx, cy * px + half - fz
+-        want[#want + 1] = { dx * dx + dz * dz, cx, cy, land }
++  -- The window's cells only change when the camera crosses an engine chunk;
++  -- they were rebuilt (and the whole lot sorted) every frame before.
++  if not (rec.cells and rec.camCx == camCx and rec.camCy == camCy and rec.W == W) then
++    local cells = {}
++    for cy = camCy - W, camCy + W do
++      for cx = camCx - W, camCx + W do
++        if cx >= 0 and cy >= 0 and cx < grid.width and cy < grid.height then
++          cells[#cells + 1] = { cx, cy, grid.land[cy * grid.width + cx + 1] }
++        end
+       end
+     end
++    rec.cells, rec.camCx, rec.camCy, rec.W, rec.dirty = cells, camCx, camCy, W, true
+   end
+-  table.sort(want, function(a, b) return a[1] < b[1] end)
++  local cells, lands = rec.cells, rec.lands
+ 
+-  local now = love.timer and love.timer.getTime
+-  local started = now and now() or 0
+-  local builds, missing = 0, false
+-  local list, nearest, nearestD = {}, nil, math.huge
+-  for _, w in ipairs(want) do
+-    local land = w[4]
+-    local entry = rec.lands[land]
+-    if not entry then
+-      local overBudget = builds >= GW.BUILDS_PER_FRAME
+-        or (builds > 0 and now and (now() - started) > GW.BUILD_BUDGET)
+-      if overBudget then
+-        missing = true
+-      else
+-        builds = builds + 1
+-        local ok, built = pcall(buildLand, ground, land)
+-        if ok then
+-          entry = built
++  -- Distance is per frame (the focus moves smoothly); sorting happens only
++  -- while there is something left to build.
++  local nearest, nearestD, todo = nil, math.huge, nil
++  for i = 1, #cells do
++    local c = cells[i]
++    local dx, dz = c[1] * px + half - fx, c[2] * px + half - fz
++    local d = dx * dx + dz * dz
++    local entry = lands[c[3]]
++    if entry then
++      if entry.mesh and d < nearestD then nearestD, nearest = d, entry end
++    else
++      todo = todo or {}
++      todo[#todo + 1] = { d, c[3] }
++    end
++  end
++  local missing = false
++  if todo then
++    table.sort(todo, function(a, b) return a[1] < b[1] end)
++    local builds = 0
++    for i = 1, #todo do
++      local t = todo[i]
++      local land = t[2]
++      if lands[land] == nil then
++        if builds < GW.BUILDS_PER_FRAME and Budget.allow(true) then
++          builds = builds + 1
++          local t0 = clock()
++          local ok, built = pcall(buildLand, ground, land)
++          Budget.charge(t0, "water")
++          local entry
++          if ok then
++            entry = built
++          else
++            entry = { mesh = nil }
++            once("land", "a land chunk failed to build and was skipped: %s", tostring(built))
++          end
++          lands[land] = entry
++          rec.dirty = true
++          if entry.mesh and t[1] < nearestD then nearestD, nearest = t[1], entry end
+         else
+-          entry = { mesh = nil }
+-          once("land", "a land chunk failed to build and was skipped: %s", tostring(built))
++          missing = true
+         end
+-        rec.lands[land] = entry
+       end
+     end
+-    if entry and entry.mesh then
+-      list[#list + 1] = { mesh = entry.mesh, x = w[2] * px + half, z = w[3] * px + half }
+-      if w[1] < nearestD then nearestD, nearest = w[1], entry end
+-    end
+   end
+   -- Latched per ground: once the whole window has been built, walking into
+   -- chunks that are not yet must not hand the native water back for a frame.
+   if not missing then rec.complete = true end
+   GW.ready = rec.complete == true
+   if nearest then GW.level = nearest.y + GW.LIFT end
+-  if #list == 0 then return end
++
++  if rec.dirty then
++    local list = {}
++    for i = 1, #cells do
++      local c = cells[i]
++      local entry = lands[c[3]]
++      if entry and entry.mesh then
++        list[#list + 1] = { mesh = entry.mesh, x = c[1] * px + half, z = c[2] * px + half }
++      end
++    end
++    rec.list, rec.dirty = list, false
++  end
++  local list = rec.list
++  if not list or #list == 0 then return end
+ 
+   Voxel3D.seams(false)
+   Voxel3D.glass(false)
+-  for _, item in ipairs(list) do
+-    Voxel3D.draw(item.mesh, tex, Mat4.translate(item.x, GW.LIFT, item.z), 0, nil, 0, false)
++  local lift = GW.LIFT
++  for i = 1, #list do
++    local item = list[i]
++    local m = item.m
++    if not m or item.lift ~= lift then
++      m = Mat4.translate(item.x, lift, item.z)     -- once per sheet, not per frame
++      item.m, item.lift = m, lift
++    end
++    Voxel3D.draw(item.mesh, tex, m, 0, nil, 0, false)
+   end
+   Voxel3D.seams(true)
+   Voxel3D.glass(true)
+--- a/lib/Gen4Trees.lua	2026-10-03 21:38:53.110643102 +0000
++++ b/lib/Gen4Trees.lua	2026-10-03 21:39:13.388077088 +0000
+@@ -92,6 +92,12 @@
+   return ok and mod or nil
+ end
+ 
++-- One shared per-frame build budget (lib/Gen4Budget.lua); see Gen4Sand. The
++-- old private WARM_BUDGET (40 ms a frame) is gone: it was the biggest single
++-- hitch on desktop and a multi-second freeze on a phone.
++local Budget = optional("Gen4Budget") or { allow = function() return true end, charge = function() end }
++local clock = (love and love.timer and love.timer.getTime) or os.clock
++
+ local cache = setmetatable({}, { __mode = "k" })   -- ground -> { lands = {} }
+ 
+ -- ----------------------------------------------------------- decoding --
+@@ -772,11 +778,10 @@
+ -- publish GT.active (shape records covered RIGHT NOW). Idempotent per frame;
+ -- Gen4Hide calls it before the native pass, GT.draw calls it again.
+ function GT.prepare(ground)
+-  local active, list, names = {}, {}, {}
+-  GT.active, GT.list, GT.coveredNames = active, list, names
+   local view = ground and ground.view3d
+   if not (GT.enabled and ground and view and ground.grid and ground.terrain
+           and ground.slice and ground.chunkPx and ground.half and ground.set) then
++    GT.active, GT.list, GT.coveredNames = {}, {}, {}
+     return
+   end
+   local rec = cache[ground]
+@@ -785,6 +790,23 @@
+   local grid, px, half = ground.grid, ground.chunkPx, ground.half
+   local W = GT.WINDOW
+   local camCx, camCy = math.floor(view.x / px), math.floor(view.z / px)
++
++  -- MEMO. Once every land of the window is built, the answer (which shapes are
++  -- covered, which lands to draw) only changes when the camera crosses an
++  -- engine chunk. This ran TWICE a frame (Gen4Hide, then draw), each time
++  -- rebuilding and sorting the window and concatenating a signature string.
++  if rec.done and rec.camCx == camCx and rec.camCy == camCy and rec.W == W then
++    if GT.lastRec ~= rec then
++      GT.lastRec = rec
++      GT.coverVersion = GT.coverVersion + 1       -- a different ground: re-filter
++    end
++    GT.active, GT.list, GT.coveredNames = rec.active, rec.list, rec.names
++    return
++  end
++
++  local active, list, names = {}, {}, {}
++  GT.active, GT.list, GT.coveredNames = active, list, names
++
+   local want = {}
+   for cy = camCy - W, camCy + W do
+     for cx = camCx - W, camCx + W do
+@@ -796,8 +818,6 @@
+   end
+   table.sort(want, function(a, b) return a[1] < b[1] end)
+ 
+-  local now = love.timer and love.timer.getTime
+-  local started = now and now() or 0
+   local builds = 0
+   local sig = {}
+   local failedNames = {}
+@@ -805,19 +825,20 @@
+   for _, w in ipairs(want) do
+     if not rec.lands[w[4]] then missing = missing + 1 end
+   end
+-  -- a window that is still filling gets the bigger budget, so the old cards
+-  -- are not on screen beside the new trees for long
+-  local budget = (missing > 1) and GT.WARM_BUDGET or GT.BUILD_BUDGET
+-  local perFrame = (missing > 1) and #want or GT.BUILDS_PER_FRAME
++  -- a window that is still filling gets the larger shared limit, so the old
++  -- cards are not on screen beside the new trees for long
++  local warm = missing > 1
++  local cap = Budget.covered and 12 or GT.BUILDS_PER_FRAME
++  local pending = 0
+   for _, w in ipairs(want) do
+     local land = w[4]
+     local entry = rec.lands[land]
+     if not entry then
+-      local over = builds >= perFrame
+-        or (builds > 0 and now and (now() - started) > budget)
+-      if not over then
++      if builds < cap and Budget.allow(warm) then
+         builds = builds + 1
++        local t0 = clock()
+         local ok, built = pcall(buildLand, ground, land)
++        Budget.charge(t0, "trees")
+         if ok then
+           entry = built
+         else
+@@ -825,6 +846,8 @@
+           once("build", "a land chunk failed to build and was skipped: %s", tostring(built))
+         end
+         rec.lands[land] = entry
++      else
++        pending = pending + 1
+       end
+     end
+     if entry then
+@@ -846,6 +869,14 @@
+     lastSignature = signature
+     GT.coverVersion = GT.coverVersion + 1
+   end
++  GT.lastRec = rec
++
++  if pending == 0 then
++    rec.done, rec.camCx, rec.camCy, rec.W = true, camCx, camCy, W
++    rec.active, rec.list, rec.names = active, list, names
++  else
++    rec.done = false
++  end
+ end
+ 
+ -- Gen4Hide asks this per cache shape record.

@@ -1,4 +1,4 @@
--- Canonical Gen 1 + Gen 2 + Gen 3 Pokemon heights, National Dex #1..386.
+-- Canonical Gen 1 + Gen 2 + Gen 3 + Gen 4 Pokemon heights, National Dex #1..493.
 -- Source: PokeAPI pokemon.csv; height is stored in decimetres.
 -- https://github.com/PokeAPI/pokeapi/blob/master/data/v2/csv/pokemon.csv
 --
@@ -393,6 +393,116 @@ H.DECIMETERS = {
   [384] = 70, -- rayquaza
   [385] = 3, -- jirachi
   [386] = 17, -- deoxys
+  -- Gen 4 (#387..493). NOT in the original PokeAPI import above: entered by
+  -- hand so Platinum's native Sinnoh species have a height. Verify against
+  -- pokemon.csv before shipping (see GEN4_SIZING_NOTES.md).
+  [387] = 4, -- turtwig
+  [388] = 11, -- grotle
+  [389] = 22, -- torterra
+  [390] = 5, -- chimchar
+  [391] = 9, -- monferno
+  [392] = 12, -- infernape
+  [393] = 4, -- piplup
+  [394] = 8, -- prinplup
+  [395] = 17, -- empoleon
+  [396] = 3, -- starly
+  [397] = 6, -- staravia
+  [398] = 12, -- staraptor
+  [399] = 5, -- bidoof
+  [400] = 10, -- bibarel
+  [401] = 3, -- kricketot
+  [402] = 10, -- kricketune
+  [403] = 5, -- shinx
+  [404] = 9, -- luxio
+  [405] = 14, -- luxray
+  [406] = 2, -- budew
+  [407] = 9, -- roserade
+  [408] = 9, -- cranidos
+  [409] = 16, -- rampardos
+  [410] = 5, -- shieldon
+  [411] = 13, -- bastiodon
+  [412] = 2, -- burmy
+  [413] = 5, -- wormadam
+  [414] = 9, -- mothim
+  [415] = 3, -- combee
+  [416] = 12, -- vespiquen
+  [417] = 4, -- pachirisu
+  [418] = 7, -- buizel
+  [419] = 11, -- floatzel
+  [420] = 4, -- cherubi
+  [421] = 5, -- cherrim
+  [422] = 3, -- shellos
+  [423] = 9, -- gastrodon
+  [424] = 12, -- ambipom
+  [425] = 4, -- drifloon
+  [426] = 12, -- drifblim
+  [427] = 4, -- buneary
+  [428] = 12, -- lopunny
+  [429] = 9, -- mismagius
+  [430] = 9, -- honchkrow
+  [431] = 5, -- glameow
+  [432] = 10, -- purugly
+  [433] = 2, -- chingling
+  [434] = 4, -- stunky
+  [435] = 10, -- skuntank
+  [436] = 5, -- bronzor
+  [437] = 13, -- bronzong
+  [438] = 5, -- bonsly
+  [439] = 6, -- mime-jr
+  [440] = 6, -- happiny
+  [441] = 5, -- chatot
+  [442] = 10, -- spiritomb
+  [443] = 7, -- gible
+  [444] = 14, -- gabite
+  [445] = 19, -- garchomp
+  [446] = 6, -- munchlax
+  [447] = 7, -- riolu
+  [448] = 12, -- lucario
+  [449] = 8, -- hippopotas
+  [450] = 20, -- hippowdon
+  [451] = 8, -- skorupi
+  [452] = 13, -- drapion
+  [453] = 7, -- croagunk
+  [454] = 13, -- toxicroak
+  [455] = 14, -- carnivine
+  [456] = 4, -- finneon
+  [457] = 12, -- lumineon
+  [458] = 10, -- mantyke
+  [459] = 10, -- snover
+  [460] = 22, -- abomasnow
+  [461] = 11, -- weavile
+  [462] = 12, -- magnezone
+  [463] = 17, -- lickilicky
+  [464] = 24, -- rhyperior
+  [465] = 20, -- tangrowth
+  [466] = 18, -- electivire
+  [467] = 16, -- magmortar
+  [468] = 15, -- togekiss
+  [469] = 19, -- yanmega
+  [470] = 10, -- leafeon
+  [471] = 8, -- glaceon
+  [472] = 20, -- gliscor
+  [473] = 25, -- mamoswine
+  [474] = 9, -- porygon-z
+  [475] = 16, -- gallade
+  [476] = 14, -- probopass
+  [477] = 22, -- dusknoir
+  [478] = 13, -- froslass
+  [479] = 3, -- rotom
+  [480] = 3, -- uxie
+  [481] = 3, -- mesprit
+  [482] = 3, -- azelf
+  [483] = 54, -- dialga
+  [484] = 42, -- palkia
+  [485] = 17, -- heatran
+  [486] = 37, -- regigigas
+  [487] = 45, -- giratina
+  [488] = 15, -- cresselia
+  [489] = 4, -- phione
+  [490] = 3, -- manaphy
+  [491] = 15, -- darkrai
+  [492] = 2, -- shaymin
+  [493] = 32, -- arceus
 }
 
 function H.meters(dex)
@@ -492,6 +602,56 @@ function H.battleBodyFactor(dex)
   local byShape = shape and H.SHAPE_FACTOR[shape]
   if byShape and byShape > 0 then return byShape end
   return 1
+end
+
+-- ---------------------------------------------------------------------------
+-- Shared presentation size (dex -> size relative to a ~1.70 m trainer).
+--
+-- This is the SAME arithmetic PokemonActors.normalizedPresentationRelative()
+-- applies to every Colosseum actor (soft allometric curve, battleBodyFactor,
+-- readability floor, giant ceiling). It lives here as well so renderers that
+-- are not PokemonActors -- the Platinum native-world HD cards and Stadium
+-- models, see Gen4PokemonScale.lua -- size a species identically to the
+-- Colosseum model instead of inventing their own convention.
+--
+-- KEEP IN SYNC with PokemonActors.lua (HUMAN_REFERENCE_METERS, SCALE_CURVE_EXP,
+-- MIN/MAX_READABLE_RELATIVE, TINY_SPECIES_FLOOR, LARGE_SPECIES_CEILING).
+-- ---------------------------------------------------------------------------
+H.HUMAN_REFERENCE_METERS = 1.70
+H.SCALE_CURVE_EXP = 0.72
+H.MIN_READABLE_RELATIVE = 0.29
+H.MAX_READABLE_RELATIVE = 1.58
+
+H.TINY_SPECIES_FLOOR = {
+  [10] = 0.32, -- caterpie
+  [13] = 0.34, -- weedle
+  [50] = 0.32, -- diglett
+  [19] = 0.31, -- rattata
+  [21] = 0.31, -- spearow
+}
+
+H.LARGE_SPECIES_CEILING = {
+  [95]  = 1.38, -- onix
+  [130] = 1.34, -- gyarados
+  [131] = 1.48, -- lapras
+  [143] = 1.42, -- snorlax
+  [149] = 1.46, -- dragonite
+  [208] = 1.42, -- steelix
+  [249] = 1.50, -- lugia
+  [250] = 1.50, -- ho-oh
+}
+
+-- nil when the species has no canonical height (callers must not guess).
+function H.presentationRelative(dex)
+  local id = tonumber(dex)
+  if not id then return nil end
+  local meters = H.meters(id)
+  if not (meters and meters > 0) then return nil end
+  local raw = math.max(0.04, meters / H.HUMAN_REFERENCE_METERS)
+  local relative = (raw ^ H.SCALE_CURVE_EXP) * H.battleBodyFactor(id)
+  local floor = H.TINY_SPECIES_FLOOR[id] or H.MIN_READABLE_RELATIVE
+  local ceiling = H.LARGE_SPECIES_CEILING[id] or H.MAX_READABLE_RELATIVE
+  return math.min(math.max(relative, floor), ceiling)
 end
 
 return H

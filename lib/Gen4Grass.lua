@@ -66,14 +66,38 @@ local function optional(name)
   return ok and mod or nil
 end
 
--- map -> { chunks = { ["cx:cy"] = { buckets = { {mesh, y}, ... } } } }
-local cache = setmetatable({}, { __mode = "k" })
+-- One shared per-frame build budget (lib/Gen4Budget.lua); see Gen4Sand.
+local Budget = optional("Gen4Budget") or { allow = function() return true end, charge = function() end }
+local clock = (love and love.timer and love.timer.getTime) or os.clock
+
+-- Resolved once: these were pcall(V.require, ...) per CELL and per frame.
+local cellsMod
+local function getCells()
+  if cellsMod == nil then cellsMod = optional("Gen4Cells") or false end
+  return cellsMod or nil
+end
+local grass3dMod, windMod
+local function getGrass3D()
+  if not grass3dMod then grass3dMod = optional("Grass3D") end
+  return grass3dMod
+end
+local function getWind()
+  if not windMod then windMod = optional("Wind") end
+  return windMod
+end
+
+-- World-space grass chunks, keyed by the chunk's world-pixel origin -- not by
+-- the live Map. A Gen 4 route change is a new Map crop of the same grid, so
+-- meshes already built for the overlapping window must survive it. Weak keys
+-- on Map were why the meadow vanished and rebuilt at every border.
+local chunks = {}
+local win = { list = {}, dirty = true }
 
 local function isTallGrass(map, cx, cy)
   -- Gen4Cells reads the live Map inside its crop and the shared layout beyond
   -- it, so grass grows on the neighbouring maps' ground too (a Gen 4 Map is
   -- only a rectangle cut out of the grid the engine draws around you).
-  local Cells = optional("Gen4Cells")
+  local Cells = getCells()
   local b
   if Cells then b = Cells.behaviour(map, cx, cy)
   elseif map.blockAt and map.inBounds and map:inBounds(cx, cy) then
@@ -97,8 +121,11 @@ Grass.isGrassCell = isTallGrass
 -- One chunk's meshes, or an empty record when it has no tall grass. Instances
 -- come from Grass3D.instanceForTile, so the yaw/scale hash is the voxel
 -- scene's own; only where they stand and how big they are is Gen 4's.
-local function buildChunk(Grass3D, scene, map, kx, ky)
+-- Vertices are stamped in WORLD pixels (tile + map origin / 8) so a mesh
+-- built on one crop is still in the right place on the next.
+local function buildChunk(Grass3D, scene, map, kx, ky, ox, oz)
   local C = Grass.CHUNK
+  local ox8, oz8 = (ox or 0) / 8, (oz or 0) / 8
   local order, buckets = {}, {}
   for cy = ky * C, ky * C + C - 1 do
     for cx = kx * C, kx * C + C - 1 do
@@ -110,7 +137,7 @@ local function buildChunk(Grass3D, scene, map, kx, ky)
         -- scene plants it (instanceForTile puts the origin at tile * 8)
         for ty = cy * 2, cy * 2 + 1 do
           for tx = cx * 2, cx * 2 + 1 do
-            bucket[#bucket + 1] = Grass3D.instanceForTile(tx, ty, y)
+            bucket[#bucket + 1] = Grass3D.instanceForTile(tx + ox8, ty + oz8, y)
           end
         end
       end
@@ -128,7 +155,7 @@ end
 -- set here each time, the way VoxelScene's grass pass sets it.
 local lastAt = nil
 local function prepare(Grass3D, scene)
-  local Wind = optional("Wind")
+  local Wind = getWind()
   local sway = 0
   if Wind and Wind.amount then
     local ok, v = pcall(Wind.amount)
@@ -171,10 +198,18 @@ local function prepare(Grass3D, scene)
   return sway
 end
 
+local function numKey(kx, ky) return (ky + 32768) * 65536 + (kx + 32768) end
+
+-- Map-local grass chunk (kx, ky) -> world-pixel origin, unique across crops.
+local function worldChunkKey(kx, ky, ox, oz, span)
+  return numKey(math.floor(kx * span + (ox or 0) + 0.5),
+                math.floor(ky * span + (oz or 0) + 0.5))
+end
+
 function Grass.draw(scene)
   local map = scene.map
   if not map then return end
-  local Grass3D = optional("Grass3D")
+  local Grass3D = getGrass3D()
   if not (Grass3D and Grass3D.available and Grass3D.available()) then
     once("bake", "the 3D grass bake is unavailable (assets/ground/grass, or GRASS "
          .. "set to VOXEL) -- no grass drawn on Gen 4")
@@ -183,93 +218,118 @@ function Grass.draw(scene)
   local tex = Grass3D.texture()
   if not tex then return end
 
-  local rec = cache[map]
-  if not rec then rec = { chunks = {} }; cache[map] = rec end
-
   local fx, fz = scene.focusPx()
   local span = Grass.CHUNK * 16
   local kx0, ky0 = math.floor(fx / span), math.floor(fz / span)
-
-  -- WHICH CHUNKS: every one the engine draws ground for. The engine draws the
-  -- engine chunks within WINDOW of the camera's, so grass is wanted on exactly
-  -- that square (in map pixels: world minus the ground's offset) and not on a
-  -- smaller circle around the player, which is what made it fade in only when
-  -- you were close.
-  local want = {}
   local ground, view = scene.ground, scene.view
   local px = ground and ground.chunkPx
-  if px and view and tonumber(view.x) and tonumber(view.z) then
-    local W = Grass.WINDOW
-    local camCx, camCy = math.floor(view.x / px), math.floor(view.z / px)
-    local x0, x1 = (camCx - W) * px - scene.offsetX, (camCx + W + 1) * px - scene.offsetX
-    local z0, z1 = (camCy - W) * px - scene.offsetZ, (camCy + W + 1) * px - scene.offsetZ
-    for ky = math.floor(z0 / span), math.ceil(z1 / span) - 1 do
-      for kx = math.floor(x0 / span), math.ceil(x1 / span) - 1 do
-        local dx, dy = kx - kx0, ky - ky0
-        want[#want + 1] = { dx * dx + dy * dy, kx, ky }
+  local grid = (px and view and tonumber(view.x) and tonumber(view.z)) and true or false
+  local camCx, camCy = 0, 0
+  if grid then camCx, camCy = math.floor(view.x / px), math.floor(view.z / px) end
+  local ox, oz = scene.offsetX, scene.offsetZ
+
+  -- WHICH CHUNKS: every one the engine draws ground for (the engine chunks
+  -- within WINDOW of the camera's), nearest first. The list only changes when
+  -- the camera or focus crosses a chunk boundary, so it is built and sorted
+  -- then and reused every other frame.
+  if not (win.want and win.kx0 == kx0 and win.ky0 == ky0 and win.camCx == camCx
+          and win.camCy == camCy and win.ox == ox and win.oz == oz and win.grid == grid) then
+    local want = {}
+    if grid then
+      local W = Grass.WINDOW
+      local x0, x1 = (camCx - W) * px - ox, (camCx + W + 1) * px - ox
+      local z0, z1 = (camCy - W) * px - oz, (camCy + W + 1) * px - oz
+      for ky = math.floor(z0 / span), math.ceil(z1 / span) - 1 do
+        for kx = math.floor(x0 / span), math.ceil(x1 / span) - 1 do
+          local dx, dy = kx - kx0, ky - ky0
+          want[#want + 1] = { dx * dx + dy * dy, kx, ky, worldChunkKey(kx, ky, ox, oz, span) }
+        end
       end
-    end
-  else
-    local R = Grass.RADIUS
-    for ky = ky0 - R, ky0 + R do
-      for kx = kx0 - R, kx0 + R do
-        local dx, dy = kx - kx0, ky - ky0
-        if dx * dx + dy * dy <= R * R + 1 then
-          want[#want + 1] = { dx * dx + dy * dy, kx, ky }
+    else
+      local R = Grass.RADIUS
+      for ky = ky0 - R, ky0 + R do
+        for kx = kx0 - R, kx0 + R do
+          local dx, dy = kx - kx0, ky - ky0
+          if dx * dx + dy * dy <= R * R + 1 then
+            want[#want + 1] = { dx * dx + dy * dy, kx, ky, worldChunkKey(kx, ky, ox, oz, span) }
+          end
         end
       end
     end
+    table.sort(want, function(a, b) return a[1] < b[1] end)
+    win.want, win.kx0, win.ky0, win.camCx, win.camCy = want, kx0, ky0, camCx, camCy
+    win.ox, win.oz, win.grid, win.dirty = ox, oz, grid, true
   end
-  -- nearest chunks first, so the ones under the camera are built before the far
-  table.sort(want, function(a, b) return a[1] < b[1] end)
 
-  local now = love.timer and love.timer.getTime
-  local started = now and now() or 0
+  -- BUILD what the shared budget allows, nearest first; nothing past the first
+  -- refusal can build this frame either. Hits the world-keyed table, so a
+  -- route swap that still sees the same meadow does not rebuild it.
+  local want = win.want
   local builds = 0
-  local list = {}
-  for _, w in ipairs(want) do
-    local key = w[2] .. ":" .. w[3]
-    local chunk = rec.chunks[key]
-    if not chunk and builds < Grass.BUILDS_PER_FRAME
-       and (builds == 0 or not now or (now() - started) < Grass.BUILD_BUDGET) then
-      builds = builds + 1
-      local ok, built = pcall(buildChunk, Grass3D, scene, map, w[2], w[3])
-      if ok then
-        chunk = built
+  for i = 1, #want do
+    local w = want[i]
+    if not chunks[w[4]] then
+      if builds < Grass.BUILDS_PER_FRAME and Budget.allow(false) then
+        builds = builds + 1
+        local t0 = clock()
+        local ok, built = pcall(buildChunk, Grass3D, scene, map, w[2], w[3])
+        Budget.charge(t0, "grass")
+        if not ok then
+          once("chunk", "a chunk failed to build and was skipped: %s", tostring(built))
+          built = { buckets = {} }
+        end
+        -- Mesh vertices are map-local; keep the offset they were built under
+        -- so a later crop with a different origin still places them in world.
+        built.ox, built.oz = ox, oz
+        for _, b in ipairs(built.buckets or {}) do
+          b.cox, b.coz = ox, oz
+        end
+        chunks[w[4]] = built
+        win.dirty = true
       else
-        chunk = { buckets = {} }
-        once("chunk", "a chunk failed to build and was skipped: %s", tostring(built))
+        break
       end
-      rec.chunks[key] = chunk
-    end
-    if chunk then
-      for _, b in ipairs(chunk.buckets) do list[#list + 1] = b end
     end
   end
-  if #list == 0 then return end
+
+  if win.dirty then
+    local list = {}
+    for i = 1, #want do
+      local chunk = chunks[want[i][4]]
+      if chunk then for _, b in ipairs(chunk.buckets) do list[#list + 1] = b end end
+    end
+    win.list, win.dirty = list, false
+  end
+  local list = win.list
+  if not list or #list == 0 then return end
 
   local sway = prepare(Grass3D, scene)
   -- these meshes are not on the voxel grid and carry no window art
   Voxel3D.seams(false)
   Voxel3D.glass(false)
-  for _, b in ipairs(list) do
-    Voxel3D.draw(b.mesh, tex, Mat4.translate(scene.offsetX, b.y, scene.offsetZ), 0, nil, sway)
+  for i = 1, #list do
+    local b = list[i]
+    local cox, coz = b.cox or ox, b.coz or oz
+    local m = b.m
+    if not m or b.mox ~= cox or b.moz ~= coz then
+      m = Mat4.translate(cox, b.y, coz)          -- once per bucket, not per frame
+      b.m, b.mox, b.moz = m, cox, coz
+    end
+    Voxel3D.draw(b.mesh, tex, m, 0, nil, sway)
   end
   Voxel3D.grassH, Voxel3D.grassLoad, Voxel3D.crush = nil, nil, nil
   Voxel3D.seams(true)
   Voxel3D.glass(true)
 end
 
--- Drop every baked mesh: the GRASS row flipped, or a map was edited.
 function Grass.invalidate()
-  for _, rec in pairs(cache) do
-    for _, chunk in pairs(rec.chunks) do
-      for _, b in ipairs(chunk.buckets or {}) do
-        if b.mesh and b.mesh.release then pcall(b.mesh.release, b.mesh) end
-      end
+  for _, chunk in pairs(chunks) do
+    for _, b in ipairs(chunk.buckets or {}) do
+      if b.mesh and b.mesh.release then pcall(b.mesh.release, b.mesh) end
     end
   end
-  cache = setmetatable({}, { __mode = "k" })
+  chunks = {}
+  win = {}
 end
 
 return Grass

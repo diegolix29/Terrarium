@@ -81,7 +81,7 @@ end
 -- voxel provider later declines, BattleHost returns here and uses a theme.
 function StadiumArena:preferredExternal(ctx)
   if not StadiumArena.venueFor(ctx and ctx.battle) then
-    return "DRAMALESS_SHAPE:voxel-map"
+    return "DRAMATIC_SHAPE:voxel-map"
   end
 end
 

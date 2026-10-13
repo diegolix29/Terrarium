@@ -75,7 +75,7 @@ local POSES = [====[local function posesOf(state, spriteColors)
 
   for gi, g in ipairs(state.ghosts or {}) do
     local npc = g and g.npc
-    if npc and type(npc.pose) == "function" then
+    if npc and not npc.hidden and type(npc.pose) == "function" then
       local sprite, vx, vy, facing, phase, flip = npc:pose()
       local ghostMap = g.map or state.map
       posed[#posed + 1] = {
@@ -103,7 +103,8 @@ local POSES = [====[local function posesOf(state, spriteColors)
     local playerPokemonDuringFly = e == state.player and type(e) == "table"
       and (e._pokepcAsPokemon == true or e._pokepcControlSpecies ~= nil
            or e.pokepcControlSpecies ~= nil)
-    if not (state.flyAnim and e == state.player and not playerPokemonDuringFly) then
+    if not e.hidden
+       and not (state.flyAnim and e == state.player and not playerPokemonDuringFly) then
       local okPose, sprite, vx, vy, facing, phase, flip = false, nil, nil, nil, nil, nil, nil
       if type(e.pose) == "function" then
         okPose, sprite, vx, vy, facing, phase, flip = pcall(e.pose, e)

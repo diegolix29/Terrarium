@@ -122,8 +122,8 @@ function Compat.update(context, dt)
   -- The Dramaless arena provider advances its own BattleCam before this call.
   -- Advancing the shared table twice makes every BC timeline run too quickly.
   local arenaId = context and context.arena and context.arena.id
-  if backendId == "DRAMALESS_SHAPE" and type(arenaId) == "string"
-      and arenaId:match("^dramaless:") then
+  if backendId == "DRAMATIC_SHAPE" and type(arenaId) == "string"
+      and arenaId:match("^dramatic:") then
     return true
   end
   -- Shape-family staged renderers advance their shared BattleCam from

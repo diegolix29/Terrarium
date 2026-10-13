@@ -25,6 +25,17 @@ Tags and packages:
 
 ## Unreleased
 
+### Gen 4: Pokemon height on the native world
+
+- **One sizing rule for every Pokemon on Platinum.** HD cards, Stadium models and
+  Colosseum models (followers, wilds, roamers, the player's own Pokemon) now size
+  from `PokemonHeights` through the new `lib/Gen4PokemonScale.lua`, in the Gen 4
+  world's 1.5x units. HD cards were one tile tall for every species; Colosseum
+  models were 1.5x too small; Stadium models ignored the height table; the player's
+  Pokemon used three different hardcoded factors. See `GEN4_SIZING_NOTES.md`.
+- `PokemonHeights` now covers #387-#493 (hand-entered, verify against PokeAPI) and
+  exposes `presentationRelative(dex)`, the same curve PokemonActors uses.
+
 ### Gen 4: Colosseum OVERWORLD arena on the native world
 
 - **The OVERWORLD arena now works on Platinum.** It draws the cartridge's own

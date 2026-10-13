@@ -247,8 +247,8 @@ local function pushSpecials(state, dir, why)
   -- restated three of the five.  On the grid (OverworldController:handleInput,
   -- the held-direction loop) the order is:
   --
-  --     checkGen2CarpetExit -> checkGen3ArrowWarp -> checkEdgeExit
-  --     -> checkLedgeHop -> checkBoulderPush
+  --     checkGen2CarpetExit -> checkGen3ArrowWarp -> checkGen4EntranceWarp
+  --     -> checkEdgeExit -> checkLedgeHop -> checkBoulderPush
   --
   -- and the first two are exactly the ones a DIRECTIONAL EXIT MAT answers to.
   -- Nothing else will: on a Gen 2 carpet ($70/$76/$78/$7E) and a Gen 3 arrow
@@ -273,15 +273,19 @@ local function pushSpecials(state, dir, why)
   -- missing here.  Gen 1 was never affected: its mat is a DOOR tile, which
   -- keeps standingOnWarp set, so checkEdgeExit already answered for it.
   --
-  -- Both of these self-gate -- checkGen2CarpetExit returns false off Gen 2,
-  -- checkGen3ArrowWarp returns false on a map with no arrow warps -- so they
-  -- are safe to ask on every firm push, which is the same contract the three
+  -- These self-gate -- checkGen2CarpetExit returns false off Gen 2,
+  -- checkGen3ArrowWarp returns false on a map with no arrow warps, and
+  -- checkGen4EntranceWarp returns false off generation 4 -- so they are
+  -- safe to ask on every firm push, which is the same contract the three
   -- below already keep.  They go FIRST, in the grid walk's own order: the
-  -- engine puts checkGen3ArrowWarp ahead of checkEdgeExit deliberately
-  -- (OverworldController.lua:3719-3724), and a mat whose front is off the map
+  -- engine puts the directional exits ahead of checkEdgeExit deliberately
+  -- (OverworldController.lua:4706-4709), and a mat whose front is off the map
   -- would otherwise be answered by the edge path instead of the door.
   if state:checkGen2CarpetExit(dir) then return true end
   if state:checkGen3ArrowWarp(dir) then return true end
+  if state.checkGen4EntranceWarp and state:checkGen4EntranceWarp(dir) then
+    return true
+  end
 
   if why == "bounds" and state:checkEdgeExit(dir) then return true end
   if state:checkLedgeHop(dir) then return true end

@@ -16,6 +16,21 @@ local Stadium2Pack = V.require("Stadium2Pack")
 local StadiumRig = V.require("StadiumRig")
 local StadiumMon = V.require("StadiumMon")
 local ColosseumMon = V.require("ColosseumMon")
+-- Shared Platinum-native-world sizing (nil-safe: if it is missing the old
+-- hardcoded Gen 4 factors below are used).
+local Gen4Scale = V.optional and V.optional("Gen4PokemonScale") or nil
+
+-- 1.5 on Platinum's native NSBMD world (same as the human trainer model there),
+-- 1 on every other world. Prefers the shared module; falls back to the same
+-- gen4Ground probe this file has always used if the module is missing.
+local function gen4WorldFactor()
+  if Gen4Scale and Gen4Scale.factor then return Gen4Scale.factor() end
+  local okGame, Game = pcall(require, "src.core.Game")
+  local game = okGame and Game and Game.get and Game:get() or nil
+  local map = game and game.overworld and game.overworld.map
+  local renderer = map and map.renderer
+  return (renderer and renderer.gen4Ground) and 1.5 or 1
+end
 local ColosseumTrainer = V.require("ColosseumTrainer")
 local GeneratedAssets = V.require("GeneratedAssets")
 local CharacterWalkCycle = V.require("CharacterWalkCycle")
@@ -900,7 +915,20 @@ function PlayerModel.draw(px, py, y, facing, mirror)
     local m = Mat4.translate(px + 8, y, py + 8)
     local yaw = yawForDraw(px, py, facing, "awayCam", b, FirstPerson)
 
-    if gen4Cam or not (b > 0) then
+    -- Gen 4: hand the camera-derived facing straight to the actor, exactly
+    -- like StadiumFollower's Colosseum branch. Do NOT also rotateY(yaw) the
+    -- matrix or pass the grid-snapped towardFor(facing): the actor already
+    -- turns itself toward (fx, fz), so doing both stacks a continuous yaw on
+    -- a 4-way compass facing and the Pokemon ignores the camera.
+    local gen4Active = Cam and Cam.active and Cam.active()
+    if gen4Cam then
+      -- third / first person: Gen4View look + travel bearing
+      local gyaw = Cam.modelYaw()
+      fx, fz = math.sin(gyaw), math.cos(gyaw)
+    elseif gen4Active then
+      -- field3d (tilted cartridge camera): world compass facing
+      fx, fz = Cam.facingVector(facing)
+    elseif not (b > 0) then
       if yaw ~= 0 then
         m = Mat4.mul(m, Mat4.rotateY(yaw))
       end
@@ -926,25 +954,21 @@ function PlayerModel.draw(px, py, y, facing, mirror)
       fx, fz = ColosseumMon.towardFor("up")
     end
 
+    -- Platinum's native NSBMD world has different proportions than the voxel
+    -- worlds. Scale about the feet BEFORE the actor matrix (T * S * M), so the
+    -- actor's own foot/hover offsets scale with the model instead of staying at
+    -- voxel size (a Gen4 scale applied after them sinks or floats the Pokemon).
+    -- Same factor every other Pokemon gets there (was a bare 2.0, 33% taller than
+    -- a follower of the same species). The species height itself already comes
+    -- from ColosseumMon.matrix -> PokemonHeights.
+    local g4 = gen4WorldFactor()
+    if g4 ~= 1 then
+      m = Mat4.mul(m, Mat4.scale(g4, g4, g4))
+    end
+
     local tempM = ColosseumMon.matrix(currentColosseumDex, colosseumVariant, 0, 0, 0, fx, fz)
     if tempM then
       m = Mat4.mul(m, tempM)
-    end
-
-    -- Detect if we're in Gen4's native 3D world and adjust scale
-    -- Gen4 NSBMD world has different proportions than voxel worlds
-    local okGame, Game = pcall(require, "src.core.Game")
-    if okGame and Game then
-      local game = Game.get and Game:get()
-      if game and game.overworld and game.overworld.map then
-        local map = game.overworld.map
-        local renderer = map and map.renderer
-        local gen4Ground = renderer and renderer.gen4Ground
-        if gen4Ground then
-          -- In Gen4's native NSBMD world, scale up to match terrain proportions
-          m = Mat4.mul(m, Mat4.scale(2.0, 2.0, 2.0))
-        end
-      end
     end
 
     -- `mirror` intentionally unused here -- see the note above PlayerModel.draw.
@@ -989,8 +1013,16 @@ function PlayerModel.draw(px, py, y, facing, mirror)
         local renderer = map and map.renderer
         local gen4Ground = renderer and renderer.gen4Ground
         if gen4Ground then
-          -- In Gen4's native NSBMD world, use larger scale to match terrain proportions
-          scale = scale * 1.7  -- Double the scale for Gen4
+          -- In Gen4's native NSBMD world, stand the model at its canonical
+          -- PokemonHeights size in that world's units (same rule as followers
+          -- and wilds). This replaces the old bare "* 1.7" on top of the 1.5.
+          if Gen4Scale and Gen4Scale.stadiumMultiplier then
+            local stadiumDex = tonumber((currentFilename or ""):match("^stadium_(%d+)"))
+            scale = StadiumMon.scaleFor(model)
+              * Gen4Scale.stadiumMultiplier(model, stadiumDex, StadiumMon)
+          else
+            scale = scale * 1.7
+          end
         end
       end
     end
@@ -1158,7 +1190,10 @@ function PlayerModel.draw(px, py, y, facing, mirror)
   
   -- Apply scaling to match game world units
   -- GLB models from Battle Sprites Reloaded need much smaller scale
-  local scale = 0.1
+  -- On Platinum's native world they get the same x1.5 the human trainer model
+  -- gets (they are user-installed files with arbitrary names/sizes, so there is
+  -- no species to look a canonical height up for).
+  local scale = 0.1 * gen4WorldFactor()
   m = Mat4.mul(m, Mat4.scale(scale, scale, scale))
   
   -- Draw the mesh using Voxel3D with texture

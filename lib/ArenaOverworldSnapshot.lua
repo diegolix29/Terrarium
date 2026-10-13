@@ -18,6 +18,27 @@ local M = {}
 
 local field = nil
 
+-- GEN 4 cost knobs. Every arena frame used to re-render the whole native world
+-- (all Gen4Bridge effects included) at window-pixel size. Now:
+--   WORLD_SCALE  fraction of the arena canvas the world is rendered at (the blit
+--                scales it back up). 1 = full size (the default). 0.5 = a quarter
+--                of the pixels. The engine's fov helper takes the canvas height,
+--                so a smaller canvas may change the world's perspective against
+--                the actors. If you try < 1, watch the log for "FOV mismatch" and
+--                check the Pokemon still sit on the ground.
+--   REFRESH      seconds a rendered world is reused while the camera has not
+--                moved. 0 = render every frame (old behaviour); math.huge = only
+--                when the camera moves (water / wind / sky freeze meanwhile).
+--   POSE_EPS     world units / radians the arena pose may drift before the
+--                cached world is thrown away. At ~20 px per unit, 0.05 is ~1 px,
+--                so the actors cannot visibly slide against a reused world.
+M.WORLD_SCALE = 1
+M.REFRESH = 0.25
+M.POSE_EPS = 0.05
+M.POSE_EPS_FOV = 0.0005
+M.LOG_STATS = true
+M.STATS_EVERY = 5      -- seconds between running-total log lines during a fight
+
 local function log(level, fmt, ...)
   local m = V.mod
   local l = m and m.log
@@ -152,6 +173,14 @@ function M.capture(battle, stateHint)
     mapId = host and host.id or (state.map and state.map.id),
     gen4 = native or nil,
   }
+  if native then
+    local B = voxel("Gen4Bridge")
+    field.stats = { frames = 0, renders = 0, reuses = 0, ms = 0,
+                    dc = 0, cs = 0, ss = 0,
+                    draws0 = (Host.stats and Host.stats.draws) or 0,
+                    bridge0 = (B and B.stats and B.stats.runs) or 0,
+                    pre0 = (B and B.stats and B.stats.pres) or 0 }
+  end
   log("info", "overworld arena field cached map=%s pocket=%s@(%s,%s) (arena=%s%s)",
       tostring(field.mapId), tostring(pocket.shape),
       tostring(pocket.x), tostring(pocket.y), tostring(why),
@@ -163,7 +192,80 @@ function M.field()
   return field
 end
 
+-- One line per fight: how many arena frames there were, how many re-rendered the
+-- world, and how many world passes the overworld itself still drew meanwhile.
+-- overworldPerFrame ~1.0 means the real overworld is drawing underneath the arena.
+local function logStats(label)
+  local st = field and field.stats
+  if not (M.LOG_STATS and st and st.frames > 0) then return end
+  local Host = gen4Host()
+  local own = Host and Host.stats and (Host.stats.draws - st.draws0) or 0
+  log("info", "Gen4 arena world (" .. (label or "fight over") .. "): %d arena frames, %d world renders (%.0f%%), %d reused, "
+      .. "%.2f ms avg render submit (CPU), %d overworld world passes during the fight "
+      .. "(%.2f per arena frame), scale %.2f, refresh %.2fs",
+      st.frames, st.renders, 100 * st.renders / st.frames, st.reuses,
+      st.renders > 0 and st.ms / st.renders or 0, own, own / st.frames,
+      tonumber(M.WORLD_SCALE) or 1, tonumber(M.REFRESH) or 0)
+  local tag = "Gen4 arena world (" .. (label or "fight over") .. "): "
+  -- Is any effect pass running more often than there are world passes?
+  local B = voxel("Gen4Bridge")
+  if B and B.stats then
+    local runs, pres = B.stats.runs - (st.bridge0 or 0), B.stats.pres - (st.pre0 or 0)
+    local passes = st.renders + own
+    log("info", tag .. "Gen4Bridge.run x%d and sky pre-pass x%d for %d world passes (%d arena renders + %d overworld)"
+        .. " -- anything well above %d means a pass is running twice", runs, pres, passes, st.renders, own, passes)
+  end
+  -- What a world render costs LÖVE, and whether GPU resources are growing.
+  if st.renders > 0 and st.tex then
+    local mb = 1024 * 1024
+    log("info", tag .. "a world render costs %.0f draw calls, %.1f canvas switches, %.1f shader switches; "
+        .. "GPU textures %.1f MB (first render %.1f MB), canvases %d (first %d), images %d (first %d)",
+        st.dc / st.renders, st.cs / st.renders, st.ss / st.renders,
+        st.tex / mb, (st.tex0 or st.tex) / mb, st.cv or 0, st.cv0 or 0, st.im or 0, st.im0 or 0)
+  end
+end
+
+-- What the engine's stack will draw under the arena. visibleBase is the lowest
+-- state the stack draws; if the overworld sits at or above it, the overworld is
+-- still being drawn under the arena (a second full world pass for nothing).
+local function logStack()
+  if not M.LOG_STATS then return end
+  local Game = engineReq("src.core.Game")
+  local stack = Game and Game.stack
+  local states = stack and stack.states
+  if type(states) ~= "table" then
+    log("info", "Gen4 arena stack: unavailable (no stack.states)")
+    return
+  end
+  local base
+  if type(stack.visibleBase) == "function" then
+    local ok, v = pcall(stack.visibleBase, stack)
+    if ok then base = tonumber(v) end
+  end
+  local ow, parts = nil, {}
+  for i, s in ipairs(states) do
+    if type(s) == "table" and s.isOverworld == true then ow = i end
+  end
+  for i = math.max(1, #states - 3), #states do
+    local s = states[i]
+    local flag = type(s) == "table" and s.isOpaque
+    parts[#parts + 1] = string.format("[%d]%s%s", i,
+      flag == true and "opaque" or (flag == false and "clear" or "?"),
+      (type(s) == "table" and s.isOverworld == true) and "(overworld)" or "")
+  end
+  local under
+  if base and ow then under = ow >= base end   -- not and/or: false must stay false
+  log("info", "Gen4 arena stack: depth %d, visibleBase %s, %s -- overworld drawn under the arena: %s",
+      #states, tostring(base), table.concat(parts, " "),
+      under == nil and "unknown" or (under and "YES" or "no"))
+end
+
+function M.stats()
+  return field and field.stats or nil
+end
+
 function M.clear()
+  pcall(logStats)
   field = nil
 end
 
@@ -244,19 +346,90 @@ function M.nativeWorld()
   return field ~= nil and field.gen4 == true
 end
 
+-- love.graphics.getStats() deltas around a world render: draw calls, canvas and
+-- shader switches, plus the running GPU texture / canvas / image counts.
+local function gpuStats()
+  local g = love and love.graphics
+  if not (g and type(g.getStats) == "function") then return nil end
+  local ok, t = pcall(g.getStats)
+  if not (ok and type(t) == "table") then return nil end
+  return { dc = tonumber(t.drawcalls) or 0, cs = tonumber(t.canvasswitches) or 0,
+           ss = tonumber(t.shaderswitches) or 0, tex = tonumber(t.texturememory) or 0,
+           cv = tonumber(t.canvases) or 0, im = tonumber(t.images) or 0 }
+end
+
+local function now()
+  local t = love and love.timer and love.timer.getTime
+  return t and t() or os.clock()
+end
+
+local function copyPose(p)
+  return { eye = { p.eye[1], p.eye[2], p.eye[3] },
+           focus = { p.focus[1], p.focus[2], p.focus[3] }, fov = p.fov }
+end
+
+local function poseMoved(a, b)
+  if not (a and b) then return true end
+  local eps = tonumber(M.POSE_EPS) or 0.05
+  for i = 1, 3 do
+    if math.abs((a.eye[i] or 0) - (b.eye[i] or 0)) > eps then return true end
+    if math.abs((a.focus[i] or 0) - (b.focus[i] or 0)) > eps then return true end
+  end
+  return math.abs((a.fov or 0) - (b.fov or 0)) > (tonumber(M.POSE_EPS_FOV) or 0.0005)
+end
+
+-- Render the native world through the arena pose, or reuse the last render.
+-- A render is reused while: same size, the pose has not moved past POSE_EPS, and
+-- less than REFRESH seconds have passed. field.worldColour keeps pointing at the
+-- host's reused canvas, which nothing else writes between renders.
 local function drawNative(w, h, pose)
-  field.worldColour = nil
+  local st = field.stats
+  if st then
+    st.frames = st.frames + 1
+    if st.frames == 1 then pcall(logStack) end
+    -- A run that ends mid-fight (crash, closed window) never reaches clear();
+    -- log the running totals every few seconds so the numbers survive.
+    local tn = now()
+    field.statAt = field.statAt or tn
+    if tn - field.statAt >= (tonumber(M.STATS_EVERY) or 5) then
+      field.statAt = tn
+      pcall(logStats, "so far")
+    end
+  end
   local Host = gen4Host()
-  if not (Host and type(Host.renderPose) == "function") then return false end
+  if not (Host and type(Host.renderPose) == "function") then
+    field.worldColour = nil
+    return false
+  end
   local cam = pose
   if not (cam and cam.eye and cam.focus and cam.fov) then
     cam = M.cameraPose()
   end
   if not cam then
+    field.worldColour = nil
     log("warn", "native arena world skipped: no camera pose")
     return false
   end
-  local colour, whyNot = Host.renderPose(field.state, field.pocket, cam, w, h)
+
+  local scale = tonumber(M.WORLD_SCALE) or 1
+  if scale < 0.25 then scale = 0.25 elseif scale > 1 then scale = 1 end
+  local rw = math.max(2, math.floor(w * scale + 0.5))
+  local rh = math.max(2, math.floor(h * scale + 0.5))
+
+  local t0 = now()
+  local refresh = tonumber(M.REFRESH) or 0
+  if refresh > 0 and field.worldColour and field.worldSize
+      and field.worldSize[1] == rw and field.worldSize[2] == rh
+      and (t0 - (field.worldAt or -math.huge)) < refresh
+      and not poseMoved(field.worldPose, cam) then
+    if st then st.reuses = st.reuses + 1 end
+    return true
+  end
+
+  field.worldColour = nil
+  local gpuBefore = gpuStats()
+  local colour, whyNot = Host.renderPose(field.state, field.pocket, cam, rw, rh)
+  local gpuAfter = gpuStats()
   if not colour then
     if field.warned ~= whyNot then
       field.warned = whyNot
@@ -265,6 +438,27 @@ local function drawNative(w, h, pose)
     return false
   end
   field.worldColour = colour
+  local lf = Host.lastFov
+  if lf and lf.eff and lf.want and math.abs(lf.eff - lf.want) > 0.05 and not field.fovWarned then
+    field.fovWarned = true
+    log("warn", "arena world FOV mismatch: the world draws at %.2f deg (effectiveFovY at "
+        .. "height %d) but the actors project at %.2f deg -- Pokemon will not sit on the "
+        .. "ground; set ArenaOverworldSnapshot.WORLD_SCALE = 1", lf.eff, lf.h or 0, lf.want)
+  end
+  field.worldPose = copyPose(cam)
+  field.worldSize = { rw, rh }
+  field.worldAt = t0
+  if st then
+    st.renders = st.renders + 1
+    st.ms = st.ms + (now() - t0) * 1000
+    if gpuBefore and gpuAfter then
+      st.dc = st.dc + (gpuAfter.dc - gpuBefore.dc)
+      st.cs = st.cs + (gpuAfter.cs - gpuBefore.cs)
+      st.ss = st.ss + (gpuAfter.ss - gpuBefore.ss)
+      st.tex0, st.cv0, st.im0 = st.tex0 or gpuBefore.tex, st.cv0 or gpuBefore.cv, st.im0 or gpuBefore.im
+      st.tex, st.cv, st.im = gpuAfter.tex, gpuAfter.cv, gpuAfter.im
+    end
+  end
   return true
 end
 

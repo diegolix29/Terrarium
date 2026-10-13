@@ -14,6 +14,7 @@ local V = ...
 
 local Host = {
   installed = false,
+    cbeNativeArena = false,
 }
 
 local GRASS_BEHAVIOURS = {
@@ -24,6 +25,20 @@ local GRASS_BEHAVIOURS = {
 }
 
 local grassCache = { mapId = nil, mesh = nil, at = -1 }
+
+-- Counters for the overworld's OWN world passes (the wrapped drawFree in
+-- Host.install). renderPose calls the engine's unwrapped drawFree, so it is
+-- not counted here: ArenaOverworldSnapshot compares this against its own
+-- arena frame count to show whether the real overworld is still drawing
+-- underneath a Colosseum overworld arena.
+Host.stats = { draws = 0 }
+
+-- True only while renderPose is drawing the arena's backdrop world. Heavy
+-- effects that the arena does not want (the RayFX water pass, HD roamers) read
+-- it through Host.inPose() and stand down. Unlike _inBattle it is NOT set by
+-- renderBattle, so the 3D-battle path is unchanged.
+Host._poseDraw = false
+function Host.inPose() return Host._poseDraw == true end
 
 local function engineRequire(name)
   local req = (V and V.engineRequire) or require
@@ -64,6 +79,16 @@ end
 
 function Host.isMap(map)
   return map and map.renderer and map.renderer.gen4Ground ~= nil
+end
+function Host.setCbeNativeArena(on)
+  Host.cbeNativeArena = on and true or false
+  if not Host.cbeNativeArena then Host._skippedOverworld = false end
+end
+
+-- Walking-camera Gen4Ground:drawFree. False while CBE is already drawing the
+-- native world for the arena; renderPose sets _inBattle so it still runs.
+function Host.shouldDrawOverworld()
+  return not (Host.cbeNativeArena and not Host._inBattle)
 end
 
 -- Permission / behaviour byte for a 16px cell. Gen 4 stores that in
@@ -290,6 +315,10 @@ function Host.overlayFx(state, ground, sw, sh, scale)
   pcall(function() V.require("AmbientLife").draw(project, scale or 1) end)
   pcall(function() V.require("Vfx").draw(project, scale or 1) end)
   pcall(function() V.require("WindFX").draw(project, scale or 1) end)
+  -- the fp-ceiling weather (RAIN / LIGHTNING / NPC UMBRELLAS rows): 3D drops and
+  -- umbrellas through the live Gen 4 camera. Defined further down (it needs
+  -- beginFieldVoxel), so it is looked up on Host at call time.
+  if Host.drawFpWeather then pcall(Host.drawFpWeather, state, ground) end
   pcall(function() V.require("Interiors").draw(project, scale or 1) end)
   pcall(function() V.require("HiddenItems").draw(project, scale or 1) end)
   pcall(function()
@@ -319,6 +348,28 @@ local function spriteKey(mapX, mapY)
   return string.format("%d:%d", math.floor((mapX or 0) + 0.5),
                        math.floor((mapY or 0) + 0.5))
 end
+-- A sprite whose entity was drawn as a 3D model this frame is hidden by POSITION
+-- (the engine's freeEntity only hands us map pixels, not the entity). The old key
+-- was the rounded pixel, which misses by one when the engine passes a slightly
+-- different coordinate mid-step, leaving the 2D sprite beside the 3D model. This
+-- matches within SKIP_TOL pixels instead, and falls back to the old key.
+local SKIP_TOL = 2
+function Host.isSkipped(mapX, mapY)
+  local pts = Host._skipPoints
+  if pts then
+    local x, y = mapX or 0, mapY or 0
+    for i = 1, #pts do
+      local q = pts[i]
+      if math.abs(q[1] - x) <= SKIP_TOL and math.abs(q[2] - y) <= SKIP_TOL then
+        return true
+      end
+    end
+  end
+  local skip = Host._skipFeet
+  return (skip and skip[spriteKey(mapX, mapY)]) and true or false
+end
+
+local dupReported = false
 
 local function wantFieldActor(e, state)
   if not e or e.hidden then return false end
@@ -369,11 +420,45 @@ local function beginFieldVoxel(state, ground)
   return true
 end
 
+-- The ds_fp_ceiling weather on Platinum: rain drops, NPC umbrellas, lightning.
+-- Flora.draw owns these on Gen 1-3 but is only ever called by VoxelScene, which
+-- Gen 4 never reaches. Needs the free camera (the cartridge's fixed field camera
+-- has no matrix to put 3D billboards through); the 2D Weather streaks and the
+-- sky's own rain still cover that camera.
+function Host.drawFpWeather(state, ground)
+  if not (state and state.map and ground) then return end
+  local view = ground.view3d
+  if not (view and view.isFree and view:isFree()) then return end
+  local okF, Flora = pcall(V.require, "Flora")
+  if not (okF and Flora and Flora.drawGen4) then return end
+  local Voxel3D = V.require("Voxel3D")
+  -- Map.isOutdoor reads Gen 1/2 header fields: Gen4Spawn has the real answer
+  local outdoor = true
+  local okS, Spawn = pcall(V.require, "Gen4Spawn")
+  if okS and Spawn and Spawn.isOutdoor then
+    local ok, r = pcall(Spawn.isOutdoor, state.map)
+    outdoor = ok and r and true or false
+  end
+  -- FirstPerson's yaw: look direction = (sin yaw, cos yaw) in world x/z
+  local fx, _, fz = 0, 0, -1
+  if type(view.forward) == "function" then fx, _, fz = view:forward() end
+  local yaw = math.atan2(fx, fz)
+  if not beginFieldVoxel(state, ground) then return end
+  local ok, err = pcall(Flora.drawGen4, state, ground, yaw, outdoor)
+  pcall(Voxel3D.endScene)
+  if not ok and not Host._fpWeatherWarned then
+    Host._fpWeatherWarned = true
+    print("Gen4WorldHost: fp weather failed: " .. tostring(err))
+  end
+end
+
 -- Colosseum / Stadium / GLB followers into the same framebuffer as the
 -- NSBMD chunks. VoxelScene never runs on Platinum (drawWorld declines),
 -- so these actors used to keep voxel y=0 and sit in the mesh.
 local function drawFieldActors(state, ground)
   Host._skipFeet = {}
+    Host._skipPoints = {}
+  Host._drawnEnt = {}    
   Host._drew3d = {}
   if not (state and ground) then return end
   local view = ground.view3d
@@ -382,14 +467,33 @@ local function drawFieldActors(state, ground)
   local ox = ground.offsetX or 0
   local oz = ground.offsetY or 0
   local posed = {}
+  local seen = {}
   local function add(e, mapX, mapY)
     if not wantFieldActor(e, state) then return end
+    -- One model per entity: the same table can sit in both entities and ghosts
+    -- (a follower or NPC across a map seam), which used to pose it twice.
+    if seen[e] then
+      if not dupReported then
+        dupReported = true
+        if V.mod and V.mod.log and V.mod.log.warn then
+          pcall(V.mod.log.warn, V.mod.log,
+                "Gen4WorldHost: entity listed twice (entities/ghosts); drawing it once")
+        end
+      end
+      return
+    end
+    seen[e] = true
     if ground.freeMode and ground:freeMode() == "first" and e == state.player then
       return
     end
     local gh = 0
     if ground.groundY then
       gh = ground:groundY((mapX or 0) + 8, (mapY or 0) + 8) or 0
+        end
+    -- FREE FLY: the player model (FreeFly swaps it to the mount's species
+    -- at takeoff) is carried at flight height, like the 2D flyer below
+    if e == state.player then
+      gh = gh + (tonumber(e.freeFlyAlt) or 0)
     end
     -- World compass facing, not view:worldToScreen. That remap is for 2D
     -- sprite frames under an orbited camera; feeding it to a mesh rotateY
@@ -405,6 +509,8 @@ local function drawFieldActors(state, ground)
       gh = gh,
       lift = 0,
       entity = e,
+            mapX = mapX or 0,
+      mapY = mapY or 0,
       skipKey = spriteKey(mapX, mapY),
       isFollower = e.isFollower or e.wildsFollower or e._wildsFollowerSpecies ~= nil,
       isPlayer = e == state.player,
@@ -438,23 +544,29 @@ local function drawFieldActors(state, ground)
     local Mat4 = V.require("Mat4")
     for _, p in ipairs(posed) do
       local drew = false
+      -- The player model is the only thing that may draw the player. Once it has
+      -- been tried, no other model path runs: an error after a partial draw used
+      -- to fall through and stack a second model on top.
+      local playerTried = false
       if p.isPlayer and PM and PM.loaded and PM.loaded() then
-        drew = pcall(PM.draw, p.px, p.py, p.gh, p.facing, p.flip) and true or drew
+        playerTried = true
+        local okP, rP = pcall(PM.draw, p.px, p.py, p.gh, p.facing, p.flip)
+        drew = okP and rP ~= false
       end
-      if not drew and OC and OC.safeDraw then
+      if not drew and not playerTried and OC and OC.safeDraw then
         drew = OC.safeDraw(p) == true
       end
-      if not drew and OS and OS.safeDraw then
+      if not drew and not playerTried and OS and OS.safeDraw then
         drew = OS.safeDraw(p) == true
       end
       local stadiumFollower3d = p.isFollower and SF and SF.loaded and SF.loaded()
         and not (SF.isUsingSpriteFallback and SF.isUsingSpriteFallback())
-      if not drew and stadiumFollower3d then
+      if not drew and not playerTried and stadiumFollower3d then
         if SF.update then pcall(SF.update, 1 / 60) end
         drew = SF.draw(p.px, p.py, p.facing, p.gh) == true
       end
       local mdl = p.entity and p.entity.model3d
-      if not drew and mdl and mdl.mesh then
+      if not drew and not playerTried and mdl and mdl.mesh then
         local m = Mat4.translate((p.px or 0) + 8, p.gh or 0, (p.py or 0) + 8)
         local Cam = V.require("Gen4ActorCam")
         local yaw = Cam and Cam.worldYaw(p.facing) or 0
@@ -465,11 +577,15 @@ local function drawFieldActors(state, ground)
       end
       if drew then
         Host._drew3d[p.skipKey] = true
-      elseif Hd and Hd.drawPose then
+      elseif Hd and Hd.drawPose and not playerTried then
         local okHd, okDraw = pcall(Hd.drawPose, p, ground)
         drew = okHd and okDraw == true
       end
-      if drew then Host._skipFeet[p.skipKey] = true end
+      if drew then
+        Host._skipFeet[p.skipKey] = true
+        Host._skipPoints[#Host._skipPoints + 1] = { p.mapX, p.mapY }
+        if p.entity then Host._drawnEnt[p.entity] = true end
+      end
     end
   end)
   Voxel3D.endScene()
@@ -800,8 +916,18 @@ function Host.renderPose(state, pocket, pose, w, h)
     view.pitch = math.deg(atan2(-dy, math.max(flat, 1e-6)))
     view.fovY = math.deg(pose.fov)
     ground.cameraPlaced = true
+    -- What the engine will actually draw with at this canvas height. The actors
+    -- project with the pose's own fov, so any difference is a world/actor
+    -- perspective mismatch (ArenaOverworldSnapshot warns once if it sees one).
+    local eff
+    if type(view.effectiveFovY) == "function" then
+      local okF, e = pcall(view.effectiveFovY, view, h)
+      if okF then eff = tonumber(e) end
+    end
+    Host.lastFov = { want = view.fovY, eff = eff, h = h }
 
     Host._inBattle = true
+    Host._poseDraw = true
     local painted = drawFree(ground, w, h)
     if not painted then
       why = "the engine declined to draw the world"
@@ -837,6 +963,7 @@ function Host.renderPose(state, pocket, pose, w, h)
   end)
 
   Host._inBattle = false
+  Host._poseDraw = false
   if state then state.entities, state.ghosts = savedEntities, savedGhosts end
   view.mode, view.x, view.y, view.z = saved.mode, saved.x, saved.y, saved.z
   view.yaw, view.pitch, view.fovY = saved.yaw, saved.pitch, saved.fovY
@@ -854,10 +981,26 @@ function Host.install()
   if Host.installed then return true end
   local Gen4Ground = engineRequire("src.render.Gen4Ground")
   if not (Gen4Ground and Gen4Ground.drawFree) then return false end
+    -- Only the NEWEST install is live. If this file runs again (mod reload) the old
+  -- wrappers stay on Gen4Ground; they see a different token and pass straight
+  -- through, so the overlay, the sprite skip and the effects run once, not twice.
+  local token = {}
+  Gen4Ground.__terrariumHostToken = token
 
   local innerDrawFree = Gen4Ground.drawFree
   function Gen4Ground:drawFree(vw, vh)
+      if Gen4Ground.__terrariumHostToken ~= token then
+      return innerDrawFree(self, vw, vh)
+    end
     Host._vw, Host._vh = vw, vh
+    Host.stats.draws = Host.stats.draws + 1
+        -- renderPose calls Host._drawFree (this inner), not this wrap, so the
+    -- arena world still draws. The engine's walking pass hits this wrap.
+    if not Host.shouldDrawOverworld() then
+      Host._skippedOverworld = true
+      return false
+    end
+    Host._skippedOverworld = false
     local ok = innerDrawFree(self, vw, vh)
     if ok then pcall(Host.overlay3D, self) end
     return ok
@@ -865,19 +1008,85 @@ function Host.install()
 
   local innerFreeEntity = Gen4Ground.freeEntity
   if type(innerFreeEntity) == "function" then
-    function Gen4Ground:freeEntity(mapX, mapY, camX, camY, rise, draw)
-      local skip = Host._skipFeet
-      if skip and skip[spriteKey(mapX, mapY)] then
+    function Gen4Ground:freeEntity(mapX, mapY, camX, camY, rise, draw,
+                                   depthLift)
+      if Gen4Ground.__terrariumHostToken ~= token then
+        return innerFreeEntity(self, mapX, mapY, camX, camY, rise, draw,
+                               depthLift)
+      end
+      if Host.isSkipped(mapX, mapY) then
+        -- drawn as a 3D model instead: only the ground shadow is left to
+        -- draw for a flyer
+        if type(Host.flightLift) == "function" then
+          local okL, l, s = pcall(Host.flightLift, mapX, mapY)
+          if okL and l and l > 0 and s then
+            innerFreeEntity(self, mapX, mapY, camX, camY, 0,
+                            function() s(camX, camY) end)
+          end
+        end
+        -- The mount is a 3D model here, so the rider (a 2D figure) would be
+        -- lost with the skipped feet. FreeFly hands it over as its own
+        -- billboard, raised to flight height exactly like a 2D flyer; it
+        -- returns nil on FULL FLY, so a full-fly mount flies alone.
+        if type(Host.flightRider) == "function" and not Host._worldLifted then
+          local okR, rl, rdraw = pcall(Host.flightRider, mapX, mapY)
+          if okR and rl and rl > 0 and type(rdraw) == "function" then
+            local own = rawget(self, "groundY")
+            local base = self.groundY
+            self.groundY = function(g, x, z) return (base(g, x, z) or 0) + rl end
+            Host._worldLifted = true
+            local okD, errD = pcall(innerFreeEntity, self, mapX, mapY, camX,
+                                    camY, rise, function() rdraw(camX, camY) end,
+                                    depthLift)
+            Host._worldLifted = false
+            self.groundY = own
+            if not okD then error(errD, 0) end
+          end
+        end
         return true
       end
-      return innerFreeEntity(self, mapX, mapY, camX, camY, rise, draw)
+      -- A flyer (Host.flightLift is set by FreeFly) is placed at its real
+      -- height: the shadow first, on the ground, then the whole figure
+      -- with groundY raised for this one call so the projection (scale,
+      -- position) and the depth test both see the height, not a sprite-
+      -- space shove at ground depth.
+      local lift, shadow
+      if type(Host.flightLift) == "function" and not Host._worldLifted then
+        local okL, l, s = pcall(Host.flightLift, mapX, mapY)
+        if okL then lift, shadow = l, s end
+      end
+      if lift and lift > 0 then
+        if shadow then
+          innerFreeEntity(self, mapX, mapY, camX, camY, 0,
+                          function() shadow(camX, camY) end)
+        end
+        local own = rawget(self, "groundY")
+        local base = self.groundY
+        self.groundY = function(s, x, z) return (base(s, x, z) or 0) + lift end
+        Host._worldLifted = true
+        local ok, res = pcall(innerFreeEntity, self, mapX, mapY, camX, camY,
+                              rise, draw, depthLift)
+        Host._worldLifted = false
+        self.groundY = own
+        if not ok then error(res, 0) end
+        return res
+      end
+      return innerFreeEntity(self, mapX, mapY, camX, camY, rise, draw,
+                             depthLift)
     end
   end
 
   local innerEndFree = Gen4Ground.endFree
   if type(innerEndFree) == "function" then
     function Gen4Ground:endFree()
-      if not Host._inBattle then
+      if Gen4Ground.__terrariumHostToken ~= token then
+        return innerEndFree(self)
+      end
+      if Host._skippedOverworld then
+        Host._skippedOverworld = false
+        return
+      end
+      if Host.shouldDrawOverworld() and not Host._inBattle then
         local ow = game() and game().overworld
         local sw = self.freeW or Host._vw
         local sh = self.freeH or Host._vh
@@ -894,8 +1103,9 @@ function Host.install()
     local innerAbove = TileRenderer.drawAbove
     function TileRenderer:drawAbove(camX, camY, vw, vh)
       local r = innerAbove(self, camX, camY, vw, vh)
+      if Gen4Ground.__terrariumHostToken ~= token then return r end
       -- Field (non-free) camera: sprites are already on the world canvas.
-      if self.gen4Ground and not (self.gen4Ground.freeMode
+      if Host.shouldDrawOverworld() and self.gen4Ground and not (self.gen4Ground.freeMode
           and self.gen4Ground:freeMode()) then
         local ow = game() and game().overworld
         if ow then

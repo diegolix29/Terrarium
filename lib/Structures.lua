@@ -365,7 +365,11 @@ local GEN3_MAX_LAND = 32
 -- footprint is 0 rows for 341 of them, 1 for one, and 5 and 6 for the two
 -- that are towers: Silph Co and the BATTLE TOWER.  Both now stand (48 -> 128,
 -- 64 -> 144); every other building in either region is unmoved.
-Structures.SHAPE_REV = "g3-east-387"
+-- g3-eave-395: FireRed (and any non-Emerald Gen 3) now loads
+-- data/<version>/gen3_*.lua through V.data's EMERALD_KEYED path in main.lua.
+-- Same shape rules as 394; the disk cache must miss because Kanto meshes
+-- built under Emerald's map/metatile tables are the wrong geometry.
+Structures.SHAPE_REV = "g3-eave-395"
 -- one cell of world height: the step a building may straddle and still be
 -- treated as having one foundation
 local COURSE = 16
@@ -984,19 +988,6 @@ function Structures.stampGround(map, tx, ty)
   local sea = gen3SeaClaimZ(S, map, math.floor(tx / 2), math.floor(ty / 2))
   if sea and (z - sea) >= COURSE then return sea end
   return z
-end
-
---- Has this map been through the build yet?
----
---- Everything else in this file answers nil for a map it has no state for --
---- which is indistinguishable, to a caller, from "no opinion about that
---- cell".  For entity placement the difference is the whole answer: before
---- the build a character has to be put SOMEWHERE, and whatever is chosen
---- must not then be cached as though it were settled, or a town that takes
---- twenty seconds to mesh leaves everyone standing at the datum long after
---- the ground under them has risen.
-function Structures.built(map)
-  return map ~= nil and cache[map.id] ~= nil
 end
 
 --- The height of a cell's FLAT FLOOR shape, or nil if it has none.
@@ -30348,11 +30339,6 @@ function Structures.buildGrass(S, map, x0, x1, y0, y1, data)
       end
     end
   end
-  print(("[grass-debug] map=%s done: grassQuads=%d grassInstances=%d "
-         .. "decorInstances=%d roadInstances=%d groundInstances=%d "
-         .. "waterInstances=%d"):format(
-    tostring(map.id), #quads, #instances, #decorInstances,
-    #roadInstances, #groundInstances, #waterInstances))
 end
 
 -- ---- flowers ----

@@ -25,6 +25,15 @@
 --     .55) so a Gen 4 tree is lit like a Gen 1-3 one.
 -- Round in plan means it reads the same from every orbit angle.
 --
+-- SMOOTH MODE (GT.SMOOTH, on by default)
+--
+-- The per-row slabs above leave stair-stepped ledges. Smooth mode keeps the
+-- same disc profile but puts the depth on the grid CORNERS, so neighbouring
+-- cells share it and the surface is continuous (see smoothSurface): the front
+-- view is still the sprite, the plan view is still round, and the shading
+-- follows the surface slope instead of jumping per block. GT.SMOOTH = false
+-- brings the blocky look back; GT.SMOOTH_PASSES and GT.RIM tune the roundness.
+--
 -- BORDER TREES (`conttree*`)
 --
 -- A strip is split on each texture repeat and every repeat becomes its own
@@ -43,7 +52,31 @@
 -- window uses a bigger frame budget (WARM_BUDGET) so the whole window is
 -- voxel trees within a moment, not a trickle of pop-in.
 --
--- KNOBS: GT.enabled, GT.WINDOW, GT.TEX_STEP, GT.MAX_QUADS, GT.WARM_BUDGET.
+-- DRAW DISTANCE (lib/Gen4Distance.lua, row "G4 DRAW DIST"): only lands within
+-- the chosen reach of the camera get voxel trees, built or drawn. Farther lands
+-- keep Platinum's flat cards (Gen4Hide hides cards only on covered lands), and
+-- baked lands the camera has left are released (GT.MAX_RESIDENT).
+--
+-- FACING (GT.FACING, GT.setFacing)
+--
+-- A tree is round and both z ends carry the same art, so which way it "faces"
+-- is only which side wears the bright front shade. Every surface is shaded by
+-- its own normal against the facing -- not by a Voxel3D face id.
+--
+-- The engine's own native tree cards turn to face the camera every frame
+-- (Gen4Model turnToCamera, billboardYaw = view.yaw). A baked tree cannot turn,
+-- so the DEFAULT, "camera", bakes each tree lit from the south and from the
+-- north and GT.draw shows the one whose lit end looks at the camera (the
+-- south-lit one while the view looks north, the north-lit one while it looks
+-- south). That costs a second mesh per land.
+--
+-- A fixed facing ("south" | "north" | "east" | "west" | degrees) bakes one mesh
+-- and keeps the lit side on that world direction whatever the camera does. The
+-- shade is baked, so change it with GT.setFacing(...), which re-bakes;
+-- assigning GT.FACING alone only reaches lands built later.
+--
+-- KNOBS: GT.enabled, GT.FACING, GT.SMOOTH, GT.SMOOTH_PASSES, GT.RIM, GT.WINDOW,
+-- GT.TEX_STEP, GT.MAX_QUADS, GT.WARM_BUDGET, GT.HYSTERESIS, GT.MAX_RESIDENT.
 -- Bridge.disabled.trees turns the effect off.
 
 local V = ...
@@ -52,11 +85,40 @@ local Mat4 = V.require("Mat4")
 
 local GT = {
   enabled = true,
-  WINDOW = 2,             -- chunks each way (same window as Gen4Ground / water)
+  WINDOW = 2,             -- chunks each way: the MOST lands ever considered (same window as Gen4Ground / water)
+  HYSTERESIS = 1.15,      -- a land already built stays covered out to this multiple of the draw-distance reach, so the edge does not flicker
+  MAX_RESIDENT = 14,      -- built lands kept in memory when the draw distance is limited (the rest are released, oldest first)
+  MAX_RESIDENT_MAX = 30,  -- ...and at MAX, which has no distance limit
+  SMOOTH = true,          -- build the tree as ONE continuous inflated surface (no stair-step slab walls). false = the old blocky stack of discs
+  SMOOTH_PASSES = 1,      -- extra blur passes over the depth field (0 = as sampled, 2-3 = rounder, softer)
+  RIM = 0.35,             -- depth kept at the silhouette, as a fraction of the depth just inside it (0 = razor edge, 1 = full slab wall)
+  LAYER_OFFSET = {        -- hand nudge per LAYER (hat / middle / base), counted from the top, WORLD UNITS. x = sideways (+ east), y = up, z = toward the south. Each layer moves as ONE whole sprite, never cut into parts. All zero = off. Baked: use GT.setLayerOffset(...) or reload
+    { x = 0, y = 12, z = -3 },    -- 1 = the top layer (the hat)
+    { x = 0, y = 5, z = -8 },    -- 2 = the middle layer
+    { x = 0, y = 2, z = -10 },   -- 3 = the bottom layer (the base)
+  },
+  LAYER_GROUP = 8,        -- cards of one shape whose centres are within this many world units (sideways) are the hat / middle / base of ONE tree, ranked by height. Works for normal trees AND border (conttree) strips
+  SINGLE_OFFSET = false, -- a tree drawn as ONE card (all layers in one sprite) moves as one whole piece: "auto" = the average of LAYER_OFFSET[1..3], or { x =, y =, z = } by hand, or false = no offset
+  STRIP_LAYER_GROUP = 20, -- like LAYER_GROUP, but for border (conttree) cards: a border card joins a tree if it is this near ANY card already in it (a leaned stack of cards drifts in z, so the first-card test used for normal trees split them). Raise it if hat / middle / base still land in different groups, lower it if two trees merge. false = use LAYER_GROUP
+  STRIP_LAYER_OFFSET = {  -- the same hat / middle / base nudge, but ONLY for border (conttree) trees. A table of three { x, y, z } like LAYER_OFFSET; false = border trees share LAYER_OFFSET with the normal trees
+    { x = 0, y = 12, z = -3 },    -- 1 = the top layer (the hat)
+    { x = 0, y = 0, z = 0 },    -- 2 = the middle layer
+    { x = 0, y = 5, z = -8 },   -- 3 = the bottom layer (the base)
+  },
+  STRIP_SHAPE_OFFSET = {   -- per border shape { hat, middle, base }; a shape not listed falls back to STRIP_LAYER_OFFSET
+    conttree_t = { { x=0, y=12, z=-3 }, { x=0, y=0, z=0 }, { x=0, y=5, z=-8 } },
+    conttree_b = { { x=0, y=2, z=-10 }, { x=0, y=0, z=0 }, { x=0, y=5, z=-8 } },
+  },
+  STRIP_SINGLE_OFFSET = false, -- a border tree drawn as ONE card: "same" = use SINGLE_OFFSET, "auto" = the average of STRIP_LAYER_OFFSET, { x =, y =, z = } by hand, or false = none
+  DEBUG_LAYERS = false,   -- true: tint each layer (1 bright, 2 mid, 3 dark) so you can SEE which card took which layer
+  FLAT = false,          -- front and back faces sit in (almost) the SAME place: the tree keeps the sprite's silhouette and height but has no depth, so both sides show the same art at the same spot. false = the round disc profile
+  FLAT_HALF = 8.4,        -- ...half the slab's thickness in world units when FLAT (0.4 = 0.8 thick: enough that the two faces never z-fight)
+  SAME_FACE = true,       -- both z ends of a tree wear the FRONT shade, like the native card that always turns its face to the camera. false = the old lit-front / dark-back pair (see FACING)
+  FACING = "camera",      -- "camera" = the lit side follows the camera like the native cards do (two meshes per land, one drawn per frame); or a fixed world side: "south" (+z), "north" (-z), "east" (+x), "west" (-x), or a compass bearing in degrees (0 = north, 90 = east, 180 = south, 270 = west). Baked into the meshes: change it with GT.setFacing(), which re-bakes
   TEX_STEP = 2,           -- texels per block edge (1 = full resolution, 4x the quads)
   MAX_BLOCKS = 40,        -- most blocks across one card, whatever the step says
-  MIN_HALF = 1,           -- a column's chord is never thinner than this many blocks each side
-  MAX_HALF = 9,           -- a tree is never deeper than 2x this many world units, however wide its run
+  MIN_HALF = 3,           -- a column's chord is never thinner than this many blocks each side
+  MAX_HALF = 15,          -- a tree is never deeper than 2x this many world units, however wide its run
   TREE_UNIT = 33,         -- width of one tree on a card (an ordinary Sinnoh tree card): wider cards are split into this many trees
   MAX_TREE_H = 220,       -- a card taller than this is not a tree
   MIN_TREE_H = 0.5,       -- ...nor one flatter than this (a ground quad)
@@ -69,10 +131,12 @@ local GT = {
   BUILD_BUDGET = 0.006,   -- seconds, steady state
   WARM_BUDGET = 0.04,     -- seconds per frame while the window is still filling
   DENSE_FRACTION = 0.92,  -- a sprite window this opaque has no silhouette to follow (no real alpha, or a wall tile): it is rounded, never built as a slab
-  LOG = true,
+  LOG = false,            -- logging disabled for performance
   coverVersion = 0,       -- bumps whenever the set of covered shapes changes
   active = {},            -- cache shape record -> true (covered AND in the window)
   coveredNames = {},      -- texture/material names that converted in EVERY land of the window (Gen4Hide's fallback when a shape has no cache pointer)
+  coveredLands = {},      -- land id -> true for every land inside the draw distance (Gen4Hide's name fallback is only valid there)
+  limited = false,        -- true while a finite draw distance is in force
 }
 
 -- the cartridge's tree lean, the same constants Gen4Model classifies by
@@ -82,9 +146,9 @@ local FX16, UV_UNITS = 4096, 16
 
 local warned = {}
 local function once(key, fmt, ...)
+  -- Logging disabled for performance
   if warned[key] then return end
   warned[key] = true
-  if V.mod and V.mod.log then V.mod.log:info("Gen4Trees: " .. fmt:format(...)) end
 end
 
 local function optional(name)
@@ -92,7 +156,24 @@ local function optional(name)
   return ok and mod or nil
 end
 
-local cache = setmetatable({}, { __mode = "k" })   -- ground -> { lands = {} }
+-- One shared per-frame build budget (lib/Gen4Budget.lua); see Gen4Sand. The
+-- old private WARM_BUDGET (40 ms a frame) is gone: it was the biggest single
+-- hitch on desktop and a multi-second freeze on a phone.
+local Budget = optional("Gen4Budget") or { allow = function() return true end, charge = function() end }
+local clock = (love and love.timer and love.timer.getTime) or os.clock
+
+-- G4 DRAW DIST (lib/Gen4Distance.lua). Absent = the old behaviour, every land.
+local Distance = optional("Gen4Distance")
+
+-- Land meshes, keyed by the engine's land id (shared across crops of the
+-- same grid). A route swap builds a new Ground, so a weak Ground-keyed cache
+-- dropped every voxel tree and let native cards flash back. Number keys stay;
+-- table keys (a land record) go with the record. Dropped only by invalidate().
+local landEntries = setmetatable({}, { __mode = "k" })
+local window = {}
+local northLit = false -- camera mode: draw the north-lit variant (the camera looks south)
+local resident = 0     -- built lands in landEntries
+local tick = 0         -- bumps per window recompute; entry.used = last tick the land was wanted
 
 -- ----------------------------------------------------------- decoding --
 
@@ -299,17 +380,109 @@ end
 
 local ROUND_SHADE = { front = 1.0, back = 0.68, side = 0.78, top = 1.0, bottom = 0.55 }
 
--- one axis-aligned quad of face `f` (Voxel3D face ids), `shade` as baked
-local function quad(b, f, x0, y0, z0, dx, dy, dz, u, v, shade)
+-- WHICH WAY A TREE FACES. The tree is a round, symmetric solid and both of its
+-- z ends carry the same art, so "facing" is purely which side wears the bright
+-- `front` shade. It used to be welded to Voxel3D's face ids (5 = front, 6 =
+-- back), i.e. to one world direction, and a hand swap of the two ids can only
+-- ever move it to the other end of z. Here it is a direction in the ground
+-- plane (+x east, +z south, the Bridge's convention) and every surface is
+-- shaded by where its own normal points relative to it, so a face's id never
+-- decides it.
+local FACING_DIRS = { south = { 0, 1 }, north = { 0, -1 }, east = { 1, 0 }, west = { -1, 0 } }
+
+local function facingVec()
+  local f = GT.FACING
+  local d = FACING_DIRS[type(f) == "string" and f:lower() or ""]
+  if d then return d[1], d[2] end
+  local bearing = tonumber(f)
+  if bearing then
+    local a = math.rad(bearing)
+    return math.sin(a), -math.cos(a)        -- 0 = north (-z), 90 = east (+x)
+  end
+  return 0, 1                               -- anything unreadable: south
+end
+
+-- shade of a surface whose UNIT normal is (nx, ny, nz): front / back by the
+-- part of the normal along the facing, side by the part across it, top /
+-- bottom by the vertical part (the squares of the three parts sum to 1)
+local function surfaceShade(nx, ny, nz, fx, fz)
+  local along = nx * fx + nz * fz
+  local across = nx * fz - nz * fx
+  local horiz = (GT.SAME_FACE or along >= 0) and ROUND_SHADE.front or ROUND_SHADE.back
+  local vert = (ny >= 0) and ROUND_SHADE.top or ROUND_SHADE.bottom
+  return horiz * along * along + ROUND_SHADE.side * across * across + vert * ny * ny
+end
+
+-- The outward normal of each flat quad, keyed by where it stands (zb = the +z
+-- end, za = the -z end, xr = +x, xl = -x). The meshers record the NORMAL on
+-- every vertex and the shade is worked out afterwards (finishBucket), because
+-- the shade depends on which way the tree faces and, in camera mode, a tree
+-- is baked once for each of two facings.
+local FACE_NORMALS = {
+  zb = { 0, 0, 1 }, za = { 0, 0, -1 }, xr = { 1, 0, 0 }, xl = { -1, 0, 0 },
+  top = { 0, 1, 0 }, bottom = { 0, -1, 0 },
+}
+
+-- The facings a tree is baked for, as { fx, fz } pairs. Camera mode bakes both
+-- ends of z (lit side south, then lit side north) and GT.draw picks the one
+-- that looks at the camera; every other setting is a single fixed facing.
+local function variantFacings()
+  if GT.SAME_FACE then return { { 0, 1 } } end   -- both ends shade alike: one mesh, nothing to swap
+  if type(GT.FACING) == "string" and GT.FACING:lower() == "camera" then
+    return { { 0, 1 }, { 0, -1 } }
+  end
+  local fx, fz = facingVec()
+  return { { fx, fz } }
+end
+
+-- The layer (1 hat, 2 middle, 3 base) of the card being emitted, for GT.DEBUG_LAYERS.
+local curLayer = nil
+local DEBUG_TINT = { 1.0, 0.62, 0.38 }
+
+-- one axis-aligned quad of face `f` (Voxel3D face ids), `normal` = FACE_NORMALS.*.
+-- Vertex = { x, y, z, u, v, shade, 0, nx, ny, nz, sky, layer }; the shade (fields 6)
+-- is filled in and the normal stripped by finishBucket before the mesh is made.
+local function quad(b, f, x0, y0, z0, dx, dy, dz, u, v, normal)
   if dz <= 0 or dx <= 0 or dy <= 0 then return end
   local corners = Voxel3D.FACE_CORNERS[f]
-  if f == 3 then shade = -shade end          -- the mesher's "faces the sky" flag
+  local sky = (f == 3)                         -- the mesher's "faces the sky" flag
   local n = #b.verts / 4
   for k = 1, 4 do
     local c = corners[k]
-    b.verts[#b.verts + 1] = { x0 + c[1] * dx, y0 + c[2] * dy, z0 + c[3] * dz, u, v, shade, 0 }
+    b.verts[#b.verts + 1] = { x0 + c[1] * dx, y0 + c[2] * dy, z0 + c[3] * dz, u, v, 1, 0,
+                              normal[1], normal[2], normal[3], sky, curLayer }
   end
   Voxel3D.pushQuad(b.map, n)
+end
+
+-- Turn a bucket's recorded normals into baked shades and make its mesh(es).
+-- Returns the first mesh and, in camera mode, the second (lit from the north).
+local function finishBucket(b)
+  local verts = b.verts
+  local facings = variantFacings()
+  local count = #verts
+  local shades = {}
+  for k, fv in ipairs(facings) do
+    local s = {}
+    for i = 1, count do
+      local v = verts[i]
+      local value = surfaceShade(v[8], v[9], v[10], fv[1], fv[2])
+      if GT.DEBUG_LAYERS and v[12] then value = value * (DEBUG_TINT[v[12]] or DEBUG_TINT[#DEBUG_TINT]) end
+      s[i] = v[11] and -value or value
+    end
+    shades[k] = s
+  end
+  for i = 1, count do                      -- strip the bookkeeping fields
+    local v = verts[i]
+    v[8], v[9], v[10], v[11], v[12] = nil, nil, nil, nil, nil
+  end
+  local meshes = {}
+  for k = 1, #facings do
+    local s = shades[k]
+    for i = 1, count do verts[i][6] = s[i] end
+    meshes[k] = Voxel3D.newMesh(verts, b.map)
+  end
+  return meshes[1], meshes[2]
 end
 
 local function nearBase(positions, comp, ymin)
@@ -346,10 +519,169 @@ local function exposedPieces(za, zb, nza, nzb, emit)
   if zb > nzb then emit(math.max(za, nzb), zb, false) end
 end
 
+-- SMOOTH SURFACE. The blocky recipe gives every cell a flat z slab, so the
+-- tree is a stack of stepped ledges. Here the depth lives on the grid CORNERS
+-- instead: a corner shared by four opaque cells takes their mean half-depth,
+-- a corner on the silhouette keeps GT.RIM of it, and every cell's front and
+-- back face is a quad that follows its four corner depths. Neighbouring cells
+-- share corners, so the surface is continuous: the ledges become slopes, the
+-- canopy a pillow. Thin walls close the silhouette (and holes). Vertex shade
+-- comes from the surface slope, blended from the same five face shades, so
+-- the gradient runs smoothly across the tree instead of jumping per block.
+local SMOOTH_SKY_NY = 0.6   -- a quad whose mean normal points this far up gets the "faces the sky" flag
+
+local function smoothSurface(b, grid, nx, ny, sx, sy, originX, baseY, pivZ, lean)
+  -- 1. half-depth at every grid corner (corner (i0, j0): j0 = 0 is the top edge of row 1)
+  local D = {}
+  for j0 = 0, ny do
+    local up, dn = grid[j0], grid[j0 + 1]
+    local r = {}
+    for i0 = 0, nx do
+      local sum, n = 0, 0
+      local c1, c2 = up and up[i0], up and up[i0 + 1]
+      local c3, c4 = dn and dn[i0], dn and dn[i0 + 1]
+      if c1 then sum, n = sum + c1.h, n + 1 end
+      if c2 then sum, n = sum + c2.h, n + 1 end
+      if c3 then sum, n = sum + c3.h, n + 1 end
+      if c4 then sum, n = sum + c4.h, n + 1 end
+      if n == 4 then r[i0] = sum / 4
+      elseif n > 0 then r[i0] = (GT.FLAT and 0.1 or GT.RIM) * sum / n end
+    end
+    D[j0] = r
+  end
+
+  local function at(t, j0, i0)
+    local r = t[j0]
+    return r and r[i0]
+  end
+
+  -- 2. soften: pull every corner toward the mean of its neighbours
+  for _ = 1, GT.SMOOTH_PASSES or 0 do
+    local nd = {}
+    for j0 = 0, ny do
+      local out = {}
+      for i0 = 0, nx do
+        local c = D[j0][i0]
+        if c then
+          local sum, n = 0, 0
+          local a = at(D, j0, i0 - 1); if a then sum, n = sum + a, n + 1 end
+          a = at(D, j0, i0 + 1);       if a then sum, n = sum + a, n + 1 end
+          a = at(D, j0 - 1, i0);       if a then sum, n = sum + a, n + 1 end
+          a = at(D, j0 + 1, i0);       if a then sum, n = sum + a, n + 1 end
+          out[i0] = n > 0 and (c * 0.5 + 0.5 * sum / n) or c
+        end
+      end
+      nd[j0] = out
+    end
+    D = nd
+  end
+
+  -- slope of the depth field at a corner (world units of z per world unit);
+  -- outside the tree the depth is 0, so the rim tilts outward
+  local function slope(i0, j0)
+    local l, r = at(D, j0, i0 - 1) or 0, at(D, j0, i0 + 1) or 0
+    local u, d = at(D, j0 - 1, i0) or 0, at(D, j0 + 1, i0) or 0
+    return (r - l) / (2 * sx), (u - d) / (2 * sy)
+  end
+
+  -- 3. one face of one cell. Corner order and winding come from Voxel3D's own
+  -- FACE_CORNERS: c[1] = right edge, c[2] = top edge, c[3] = +Z side. Which end
+  -- is "front" is NOT read from the face id: each vertex records its surface
+  -- normal and finishBucket shades it against the tree's facing.
+  local function face(f, i, j, cell, flat)
+    local corners = Voxel3D.FACE_CORNERS[f]
+    local nq = #b.verts / 4
+    local ups = 0
+    local pts, nrm = {}, {}
+    for k = 1, 4 do
+      local c = corners[k]
+      local i0, j0 = i - 1 + c[1], j - c[2]
+      local d = D[j0][i0]
+      local py = baseY + (ny - j0) * sy
+      
+      -- Lean logic removed to keep tree straight
+      pts[k] = { originX + i0 * sx, py, pivZ + (c[3] == 1 and d or -d) }
+      
+      if flat then
+        nrm[k] = flat
+      else
+        -- outward normal of z =  depth(x, y): (-gx, -gy,  1), normalised
+        local gx, gy = slope(i0, j0)
+        local inv = 1 / math.sqrt(gx * gx + gy * gy + 1)
+        local zSide = (c[3] == 1) and 1 or -1
+        nrm[k] = { -gx * inv, -gy * inv, zSide * inv }
+        ups = ups + (-gy) * inv
+      end
+    end
+    local sky
+    if flat then sky = (f == 3) else sky = (ups / 4) > SMOOTH_SKY_NY end
+    for k = 1, 4 do
+      local p, n = pts[k], nrm[k]
+      b.verts[#b.verts + 1] = { p[1], p[2], p[3], cell.u, cell.v, 1, 0, n[1], n[2], n[3], sky, curLayer }
+    end
+    Voxel3D.pushQuad(b.map, nq)
+  end
+
+  local sh = FACE_NORMALS
+  for j = 1, ny do
+    local row = grid[j]
+    for i = 1, nx do
+      local cell = row[i]
+      if cell then
+        face(5, i, j, cell)
+        face(6, i, j, cell)
+        if not row[i - 1] then face(2, i, j, cell, sh.xl) end
+        if not row[i + 1] then face(1, i, j, cell, sh.xr) end
+        if not (grid[j - 1] and grid[j - 1][i]) then face(3, i, j, cell, sh.top) end
+        if j < ny and not (grid[j + 1] and grid[j + 1][i]) then face(4, i, j, cell, sh.bottom) end
+      end
+    end
+  end
+end
+
+-- LAYER OFFSETS. The offset of layer `k` (1 = hat, 2 = middle, 3 = base) as an
+-- { x, y, z } array (missing / bad values = 0), and whether it is non-zero.
+local function layerOffset(k, strip, shapeKey)
+  local src = GT.LAYER_OFFSET
+  if strip then
+    local per = shapeKey and type(GT.STRIP_SHAPE_OFFSET) == "table" and GT.STRIP_SHAPE_OFFSET[shapeKey]
+    if type(per) == "table" then src = per
+    elseif type(GT.STRIP_LAYER_OFFSET) == "table" then src = GT.STRIP_LAYER_OFFSET end
+  end
+  local cfg = type(src) == "table" and src or {}
+  local o = type(cfg[k]) == "table" and cfg[k] or {}
+  local x = tonumber(o.x or o[1]) or 0
+  local y = tonumber(o.y or o[2]) or 0
+  local z = tonumber(o.z or o[3]) or 0
+  return { x, y, z }, (x ~= 0 or y ~= 0 or z ~= 0)
+end
+
+-- The offset of a tree drawn as ONE card (hat, middle and base all in one
+-- sprite). It moves as one whole piece: "auto" is the average of the three
+-- layer offsets, a table is a hand value, false is none.
+local function singleOffset(strip)
+  local cfg = GT.SINGLE_OFFSET
+  if strip and GT.STRIP_SINGLE_OFFSET ~= "same" then cfg = GT.STRIP_SINGLE_OFFSET end
+  if cfg == false then return { 0, 0, 0 }, false end
+  if type(cfg) == "table" then
+    local x = tonumber(cfg.x or cfg[1]) or 0
+    local y = tonumber(cfg.y or cfg[2]) or 0
+    local z = tonumber(cfg.z or cfg[3]) or 0
+    return { x, y, z }, (x ~= 0 or y ~= 0 or z ~= 0)
+  end
+  local sx, sy, sz = 0, 0, 0
+  for k = 1, 3 do
+    local o = layerOffset(k, strip)
+    sx, sy, sz = sx + o[1], sy + o[2], sz + o[3]
+  end
+  local x, y, z = sx / 3, sy / 3, sz / 3
+  return { x, y, z }, (x ~= 0 or y ~= 0 or z ~= 0)
+end
+
 -- ONE TREE, the voxel scene's way (see the header). `uL..uR` / `vB..vT` is the
 -- art's texel window, `pivX/pivZ` the trunk's foot, `width` / `height` the
 -- card's size in world units.
-local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height)
+local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height, leanX, leanZ, cardLayer, isStrip, shapeKey)
   if width < 1 or height < 1 then return 0 end
   local nx = math.max(1, math.min(GT.MAX_BLOCKS, math.floor(math.abs(uR - uL) / GT.TEX_STEP + 0.5)))
   local ny = math.max(1, math.min(GT.MAX_BLOCKS, math.floor(math.abs(vB - vT) / GT.TEX_STEP + 0.5)))
@@ -412,6 +744,21 @@ local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height
     end
   end
 
+  -- LAYER OFFSET: the WHOLE sprite moves as one rigid piece, never row by row.
+  -- A card that is one layer of a multi-card tree (hat / middle / base) takes
+  -- that layer's offset; a tree drawn as a single card takes SINGLE_OFFSET.
+  -- Border strips and normal trees go through the same path.
+  do
+    local off, moved
+    if cardLayer then off, moved = layerOffset(cardLayer, isStrip, shapeKey) else off, moved = singleOffset(isStrip) end
+    if moved then
+      -- Logging disabled for performance
+      pivX, baseY, pivZ = pivX + off[1], baseY + off[2], pivZ + off[3]
+      originX = originX + off[1]
+    end
+    curLayer = cardLayer
+  end
+
   -- every RUN of a row is a disc: a row's opaque cells that touch form one
   -- tree-sized blob (a border sprite holds several trees side by side, and
   -- one disc across all of them was a wall). Its z chord is a circle of the
@@ -430,8 +777,13 @@ local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height
         for c = i, k do
           local dx = (c - 0.5) - cc
           local chord = depthHalf * math.sqrt(math.max(0, 1 - (dx * dx) / (hw * hw)))
-          local n = math.max(GT.MIN_HALF, math.floor(chord + 0.5))
-          row[c].za, row[c].zb = pivZ - n * sx, pivZ + n * sx
+          -- the blocky recipe rounds the chord to whole blocks; the smooth one keeps it exact
+          local n = GT.SMOOTH and chord or math.floor(chord + 0.5)
+          n = math.max(GT.MIN_HALF, n)
+          local half = n * sx
+          if GT.FLAT then half = GT.FLAT_HALF end   -- one plane: no depth profile at all
+          row[c].za, row[c].zb = pivZ - half, pivZ + half
+          row[c].h = half
         end
         i = k + 1
       else
@@ -441,10 +793,20 @@ local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height
   end
 
   local before = #b.verts / 4
+  if GT.SMOOTH then
+    -- lean is explicitly removed (nil) to prevent smoothSurface from bending the tree
+    smoothSurface(b, grid, nx, ny, sx, sy, originX, baseY, pivZ, nil)
+    return #b.verts / 4 - before
+  end
+  local sh = FACE_NORMALS
   for j = 1, ny do
     local row = grid[j]
     local y0 = baseY + (ny - j) * sy
-    -- front and back: the drawing per block, runs of one colour and one chord
+    
+    -- Lean math block completely removed here
+
+    -- the +Z end (zb) and the -Z end (za): the drawing per block, runs of one colour and one chord;
+    -- which of them is the bright front is GT.FACING's call, not the face id's
     local i = 1
     while i <= nx do
       local cell = row[i]
@@ -453,8 +815,10 @@ local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height
         while row[k + 1] and row[k + 1].key == cell.key
               and row[k + 1].za == cell.za do k = k + 1 end
         local x0, w = originX + (i - 1) * sx, (k - i + 1) * sx
-        quad(b, 5, x0, y0, cell.zb - 0.001, w, sy, 0.001, cell.u, cell.v, ROUND_SHADE.front)
-        quad(b, 6, x0, y0, cell.za, w, sy, 0.001, cell.u, cell.v, ROUND_SHADE.back)
+        
+        -- shZ offsets removed from cell.zb and cell.za calculations
+        quad(b, 5, x0, y0, cell.zb - 0.001, w, sy, 0.001, cell.u, cell.v, sh.zb)
+        quad(b, 6, x0, y0, cell.za, w, sy, 0.001, cell.u, cell.v, sh.za)
         i = k + 1
       else
         i = i + 1
@@ -464,31 +828,32 @@ local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height
     for i2 = 1, nx do
       local cell = row[i2]
       if cell then
-        local x0 = originX + (i2 - 1) * sx
+        -- shX offset removed from origin calculation
+        local x0 = originX + (i2 - 1) * sx 
         local za, zb = cell.za, cell.zb
         local L, R = row[i2 - 1], row[i2 + 1]
         exposedPieces(za, zb, L and L.za, L and L.zb, function(a, c)
-          quad(b, 2, x0, y0, a, 0.001, sy, c - a, cell.u, cell.v, ROUND_SHADE.side)
+          quad(b, 2, x0, y0, a, 0.001, sy, c - a, cell.u, cell.v, sh.xl)
         end)
         exposedPieces(za, zb, R and R.za, R and R.zb, function(a, c)
-          quad(b, 1, x0 + sx - 0.001, y0, a, 0.001, sy, c - a, cell.u, cell.v, ROUND_SHADE.side)
+          quad(b, 1, x0 + sx - 0.001, y0, a, 0.001, sy, c - a, cell.u, cell.v, sh.xr)
         end)
         local up = grid[j - 1] and grid[j - 1][i2]
         exposedPieces(za, zb, up and up.za, up and up.zb, function(a, c, whole)
           if whole and (c - a) >= 3 * sx then
             -- the dome cap: outline on the rim blocks, canopy a couple of rows deeper inside
             local deep = (grid[j + 2] and grid[j + 2][i2]) or (grid[j + 1] and grid[j + 1][i2]) or cell
-            quad(b, 3, x0, y0 + sy - 0.001, a, sx, 0.001, sx, cell.u, cell.v, ROUND_SHADE.top)
-            quad(b, 3, x0, y0 + sy - 0.001, a + sx, sx, 0.001, c - a - 2 * sx, deep.u, deep.v, ROUND_SHADE.top)
-            quad(b, 3, x0, y0 + sy - 0.001, c - sx, sx, 0.001, sx, cell.u, cell.v, ROUND_SHADE.top)
+            quad(b, 3, x0, y0 + sy - 0.001, a, sx, 0.001, sx, cell.u, cell.v, sh.top)
+            quad(b, 3, x0, y0 + sy - 0.001, a + sx, sx, 0.001, c - a - 2 * sx, deep.u, deep.v, sh.top)
+            quad(b, 3, x0, y0 + sy - 0.001, c - sx, sx, 0.001, sx, cell.u, cell.v, sh.top)
           else
-            quad(b, 3, x0, y0 + sy - 0.001, a, sx, 0.001, c - a, cell.u, cell.v, ROUND_SHADE.top)
+            quad(b, 3, x0, y0 + sy - 0.001, a, sx, 0.001, c - a, cell.u, cell.v, sh.top)
           end
         end)
         if j < ny then
           local dn = grid[j + 1] and grid[j + 1][i2]
           exposedPieces(za, zb, dn and dn.za, dn and dn.zb, function(a, c)
-            quad(b, 4, x0, y0, a, sx, 0.001, c - a, cell.u, cell.v, ROUND_SHADE.bottom)
+            quad(b, 4, x0, y0, a, sx, 0.001, c - a, cell.u, cell.v, sh.bottom)
           end)
         end
       end
@@ -497,9 +862,135 @@ local function emitTree(b, tex, uL, uR, vB, vT, pivX, baseY, pivZ, width, height
   return #b.verts / 4 - before
 end
 
+-- THE LAYERS OF A TREE. A tree can be made of several stacked cards (hat / middle /
+-- base). Cards of one shape whose centres are within GT.LAYER_GROUP world units
+-- of each other are ONE tree; inside it the cards are ranked from the top (1 = the
+-- highest card) and that rank is the card's layer in GT.LAYER_OFFSET. This holds
+-- for normal trees and for border (conttree) strips alike. Returns comp -> layer
+-- (nil for a card that is alone: it takes GT.SINGLE_OFFSET as one whole piece).
+local function cardLayers(positions, comps, strip, shapeKey)
+  local out = {}
+  local dist = tonumber(GT.LAYER_GROUP) or 0
+  if strip and tonumber(GT.STRIP_LAYER_GROUP) then dist = tonumber(GT.STRIP_LAYER_GROUP) end
+  if dist <= 0 or #comps < 2 then
+    -- For strip trees with 1 card, assign layer based on vertical position
+    if strip and #comps == 1 then
+      local comp = comps[1]
+      local y0, y1 = math.huge, -math.huge
+      for _, i in ipairs(comp) do
+        local p = positions[i]
+        y0, y1 = math.min(y0, p[2]), math.max(y1, p[2])
+      end
+      local y = (y0 + y1) / 2
+      -- Assign layer based on height: > 15 = top (1), 8-15 = middle (2), < 8 = bottom (3)
+      if y > 15 then
+        out[1] = 1  -- Use index as key
+      elseif y > 8 then
+        out[1] = 2
+      else
+        out[1] = 3
+      end
+    end
+    return out
+  end
+  local info = {}
+  for n, comp in ipairs(comps) do
+    local x0, x1, y0, y1, z0, z1, v0 = math.huge, -math.huge, math.huge, -math.huge, math.huge, -math.huge, math.huge
+    for _, i in ipairs(comp) do
+      local p = positions[i]
+      x0, x1 = math.min(x0, p[1]), math.max(x1, p[1])
+      y0, y1 = math.min(y0, p[2]), math.max(y1, p[2])
+      z0, z1 = math.min(z0, p[3]), math.max(z1, p[3])
+      v0 = math.min(v0, p[5])
+    end
+    info[n] = { comp = comp, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, y = (y0 + y1) / 2, v = v0 }
+  end
+  -- Normal trees: a card joins the first group whose FIRST card is near.
+  -- Border strips: a card joins a group if it is near ANY card in it, and a card
+  -- that is near two groups links them into one tree.
+  local function isNear(g, e)
+    if not strip then
+      local f = g[1]
+      return math.abs(e.cx - f.cx) <= dist and math.abs(e.cz - f.cz) <= dist
+    end
+    for _, f in ipairs(g) do
+      if math.abs(e.cx - f.cx) <= dist and math.abs(e.cz - f.cz) <= dist then return true end
+    end
+    return false
+  end
+  local raw = {}
+  for n = 1, #info do
+    local hit
+    for gi = 1, #raw do
+      local g = raw[gi]
+      if g and isNear(g, info[n]) then
+        if not hit then
+          hit = g
+          g[#g + 1] = info[n]
+        elseif strip then
+          for _, e in ipairs(g) do hit[#hit + 1] = e end
+          raw[gi] = false
+        end
+      end
+    end
+    if not hit then raw[#raw + 1] = { info[n] } end
+  end
+  local group = {}
+  for _, g in ipairs(raw) do
+    if g then group[#group + 1] = g end
+  end
+  if strip then                              -- what the grouping found, so a wrong GT.STRIP_LAYER_GROUP can be SEEN
+    local parts = {}
+    for gi, g in ipairs(group) do
+      if gi > 6 then break end
+      local s = {}
+      for _, e in ipairs(g) do s[#s + 1] = ("y%.0f/z%.0f/x%.0f"):format(e.y, e.cz, e.cx) end
+      parts[#parts + 1] = ("[%d cards: %s]"):format(#g, table.concat(s, " "))
+    end
+    once("stripgroups:" .. #comps .. ":" .. #group,
+         "border shape: %d cards -> %d groups (reach %.0f; each card is y/z/x of its centre): %s",
+         #comps, #group, dist, table.concat(parts, " "))
+  end
+  for _, g in ipairs(group) do
+    if #g >= 2 then
+      table.sort(g, function(a, c)
+        if math.abs(a.y - c.y) > 0.5 then return a.y > c.y end
+        if a.v ~= c.v then return a.v < c.v end
+        return a.cz > c.cz
+      end)
+      -- For strip trees, map position in group to layer 1/2/3 based on height
+      -- If group has 2 cards: top=1, bottom=3 (skip middle)
+      -- If group has 3+ cards: top=1, middle=2, bottom=3
+      for k, e in ipairs(g) do
+        local layer
+        if strip then
+          if #g == 2 then
+            layer = (k == 1) and 1 or 3  -- skip layer 2 for 2-card groups
+          else
+            layer = math.min(k, 3)
+          end
+        else
+          layer = k
+        end
+        -- Find the comp index in the original comps array
+        local compIndex
+        for idx, c in ipairs(comps) do
+          if c == e.comp then compIndex = idx; break end
+        end
+        if compIndex then out[compIndex] = layer end
+        if strip then
+          once("layerassign:" .. tostring(shapeKey) .. ":" .. k .. ":" .. e.y .. ":" .. layer,
+               "Strip %s card #%d at y=%.1f assigned layer %d (group size %d)", tostring(shapeKey), k, e.y, layer, #g)
+        end
+      end
+    end
+  end
+  return out
+end
+
 -- One card -> trees in bucket `b`. A wide card is the same sprite tiled
 -- (`conttree*`): one tree per texture repeat.
-local function buildCard(b, tex, positions, comp, strip)
+local function buildCard(b, tex, positions, comp, strip, layer, shapeKey)
   local xmin, xmax, ymin, ymax = math.huge, -math.huge, math.huge, -math.huge
   local zmin, zmax = math.huge, -math.huge
   local umin, umax, vmin, vmax = math.huge, -math.huge, math.huge, -math.huge
@@ -551,6 +1042,19 @@ local function buildCard(b, tex, positions, comp, strip)
   local width = alongZ and spanZ or spanX
   local lean = alongZ and spanX or spanZ     -- the extent the card's lean adds
   local height = math.sqrt((ymax - ymin) ^ 2 + lean ^ 2)
+  -- The card's lean as a shift from its foot to its top, read off its own vertices
+  -- (top centroid minus base centroid). FLAT trees follow it so they stand where the
+  -- native billboard did, and take the card's VERTICAL extent as their height.
+  local leanX, leanZ = 0, 0
+  if GT.FLAT then
+    local tx, tz, tn, bx2, bz2, bn = 0, 0, 0, 0, 0, 0
+    for _, i in ipairs(comp) do
+      local p = positions[i]
+      if p[2] - ymin <= 0.5 then bx2, bz2, bn = bx2 + p[1], bz2 + p[3], bn + 1 end
+      if ymax - p[2] <= 0.5 then tx, tz, tn = tx + p[1], tz + p[3], tn + 1 end
+    end
+    if tn > 0 and bn > 0 then leanX, leanZ = tx / tn - bx2 / bn, tz / tn - bz2 / bn end
+  end
   if width < 1 or height < 1 then return 0, true end
   -- not a tree: a flat quad, or something far bigger than any tree
   if (ymax - ymin) < GT.MIN_TREE_H or height > GT.MAX_TREE_H then
@@ -571,6 +1075,7 @@ local function buildCard(b, tex, positions, comp, strip)
 
   local pivX, pivZ = nearBase(positions, comp, ymin)
   local baseY = ymin - GT.SINK
+  if GT.FLAT then height = math.max(1, ymax - ymin) end   -- the card's vertical extent; the lean carries the rest
   -- ONE TREE PER TREE-WIDTH of card: an ordinary card is one tree (~33 wide),
   -- a border strip is several side by side, each its own slice of the art
   local trees = math.max(1, math.floor(width / GT.TREE_UNIT + 0.5))
@@ -589,7 +1094,7 @@ local function buildCard(b, tex, positions, comp, strip)
     local mid = -width * 0.5 + (k + 0.5) * each
     local px, pz = pivX, pivZ
     if alongZ then pz = pivZ + mid else px = pivX + mid end
-    local m = emitTree(b, tex, a, c, vB, vT, px, baseY, pz, each, height)
+    local m = emitTree(b, tex, a, c, vB, vT, px, baseY, pz, each, height, leanX, leanZ, layer, strip, shapeKey)
     made = made + m
   end
   once("card:" .. tostring(tex.path),
@@ -642,6 +1147,9 @@ local function buildLand(ground, land)
     local skip
     local named = GT.isTreeName(s)
     local strip = namesOf(s):find("conttree", 1, true) ~= nil
+    local nm = namesOf(s)
+    local shapeKey = strip and (nm:find("conttree_t", 1, true) and "conttree_t"
+                         or nm:find("conttree_b", 1, true) and "conttree_b") or nil
     if out.quads >= GT.MAX_QUADS then
       skip = "quad budget"
     end
@@ -695,8 +1203,17 @@ local function buildLand(ground, land)
     -- card in it has to have become trees; if one did not, undo the lot and
     -- leave the native shape drawing (it used to vanish with 0 quads).
     local v0, m0, built, ok, bad = #b.verts, #b.map, 0, true, 0
-    for _, comp in ipairs(comps) do
-      local n, failed = buildCard(b, tex, positions, comp, strip)
+    local layerOfCard = cardLayers(positions, comps, strip, shapeKey)
+    do
+      local sizes, n1 = {}, 0
+      for _, k in pairs(layerOfCard) do sizes[k] = (sizes[k] or 0) + 1; n1 = n1 + 1 end
+      once("cardlayers:" .. tostring(tex.path),
+           "'%s': %d of %d cards are hat/middle/base layers (cards per layer: %s); the rest are single cards moved whole by SINGLE_OFFSET",
+           tostring(tex.path), n1, #comps,
+           (function() local t = {} for k = 1, 6 do if sizes[k] then t[#t + 1] = k .. "=" .. sizes[k] end end return table.concat(t, " ") end)())
+    end
+    for idx, comp in ipairs(comps) do
+      local n, failed = buildCard(b, tex, positions, comp, strip, layerOfCard[idx], shapeKey)
       if failed then bad = bad + 1 end
       built = built + n
     end
@@ -751,16 +1268,14 @@ local function buildLand(ground, land)
   end
 
   for _, b in ipairs(order) do
-    local mesh = Voxel3D.newMesh(b.verts, b.map)
-    if mesh then out.buckets[#out.buckets + 1] = { mesh = mesh, tex = b.tex } end
+    local mesh, meshN = finishBucket(b)
+    if mesh then out.buckets[#out.buckets + 1] = { mesh = mesh, meshN = meshN, tex = b.tex } end
   end
-  if GT.LOG and (#out.shapes > 0 or next(skipped)) then
-    local why = {}
-    for k, n in pairs(skipped) do why[#why + 1] = ("%d %s"):format(n, k) end
-    once("land" .. tostring(land),
-         "land %s: %d tree shapes voxelised (%d quads); left native: %s",
-         tostring(land), #out.shapes, out.quads, #why > 0 and table.concat(why, ", ") or "none")
+  out.coveredKeys = {}
+  for _, s in ipairs(out.shapes) do
+    for _, k in ipairs(nameKeys(s)) do out.coveredKeys[k] = true end
   end
+  -- Logging disabled for performance
   return out
 end
 
@@ -768,71 +1283,141 @@ end
 
 local lastSignature = ""
 
+-- Hide native cards for this land's live shape records (the current Ground's
+-- copies, which are not the pointers stored when the land was first built).
+local function coverLiveShapes(ground, land, entry, active, names)
+  local keys = entry.coveredKeys
+  if not keys then
+    keys = {}
+    for _, s in ipairs(entry.shapes or {}) do
+      for _, k in ipairs(nameKeys(s)) do keys[k] = true end
+    end
+    entry.coveredKeys = keys
+  end
+  for _, s in ipairs(entry.shapes or {}) do
+    active[s] = true
+    for _, k in ipairs(nameKeys(s)) do names[k] = true end
+  end
+  local record = ground.terrain and ground.terrain.chunks and ground.terrain.chunks[land]
+  if not record then return end
+  local function consider(s)
+    for _, k in ipairs(nameKeys(s)) do
+      if keys[k] then
+        active[s] = true
+        names[k] = true
+        return
+      end
+    end
+  end
+  for _, s in ipairs(record.shapes or {}) do consider(s) end
+  for _, object in ipairs(record.objects or {}) do
+    local packed = packedFor(ground, object)
+    if packed and packed.shapes then
+      for _, s in ipairs(packed.shapes) do consider(s) end
+    end
+  end
+end
+
 -- Work out which lands are in the window, build what the budget allows, and
 -- publish GT.active (shape records covered RIGHT NOW). Idempotent per frame;
 -- Gen4Hide calls it before the native pass, GT.draw calls it again.
 function GT.prepare(ground)
-  local active, list, names = {}, {}, {}
-  GT.active, GT.list, GT.coveredNames = active, list, names
   local view = ground and ground.view3d
   if not (GT.enabled and ground and view and ground.grid and ground.terrain
           and ground.slice and ground.chunkPx and ground.half and ground.set) then
+    GT.active, GT.list, GT.coveredNames, GT.coveredLands = {}, {}, {}, {}
     return
   end
-  local rec = cache[ground]
-  if not rec then rec = { lands = {} }; cache[ground] = rec end
 
   local grid, px, half = ground.grid, ground.chunkPx, ground.half
   local W = GT.WINDOW
   local camCx, camCy = math.floor(view.x / px), math.floor(view.z / px)
+
+  -- DRAW DISTANCE. Only lands within `reach` of the eye get voxel trees; past
+  -- it Platinum's flat cards keep drawing (Gen4Hide only hides covered lands).
+  local reach = math.huge
+  if Distance and Distance.reach then
+    local okR, r = pcall(Distance.reach, px)
+    if okR and tonumber(r) then reach = r end
+  end
+  GT.limited = reach ~= math.huge
+
+  -- MEMO. Once every land of the window is built, the answer (which shapes are
+  -- covered, which lands to draw) only changes when the camera moves a quarter
+  -- chunk (the reach is measured to a land's NEAREST EDGE, so the chunk the
+  -- camera stands in is not fine enough) -- or when Ground is replaced (new
+  -- shape pointers to hide), or the draw distance changes.
+  local qx, qy = math.floor(view.x * 4 / px), math.floor(view.z * 4 / px)
+  if window.done and window.ground == ground and window.qx == qx
+      and window.qy == qy and window.W == W and window.reach == reach then
+    GT.active, GT.list, GT.coveredNames, GT.coveredLands =
+      window.active, window.list, window.names, window.lands
+    return
+  end
+
+  tick = tick + 1
   local want = {}
+  local keepReach = reach * GT.HYSTERESIS
   for cy = camCy - W, camCy + W do
     for cx = camCx - W, camCx + W do
       if cx >= 0 and cy >= 0 and cx < grid.width and cy < grid.height then
-        local dx, dz = cx - camCx, cy - camCy
-        want[#want + 1] = { dx * dx + dz * dz, cx, cy, grid.land[cy * grid.width + cx + 1] }
+        local land = grid.land[cy * grid.width + cx + 1]
+        local lx, lz = cx * px + half, cy * px + half
+        -- built lands get the wider (hysteresis) reach; new ones must be inside the plain one
+        local r = (land and landEntries[land]) and keepReach or reach
+        if Distance and Distance.landInReach then
+          if Distance.landInReach(view.x, view.z, lx, lz, px, r) then
+            local dx, dz = lx - view.x, lz - view.z
+            want[#want + 1] = { dx * dx + dz * dz, cx, cy, land }
+          end
+        else
+          local dx, dz = cx - camCx, cy - camCy
+          want[#want + 1] = { dx * dx + dz * dz, cx, cy, land }
+        end
       end
     end
   end
   table.sort(want, function(a, b) return a[1] < b[1] end)
 
-  local now = love.timer and love.timer.getTime
-  local started = now and now() or 0
   local builds = 0
   local sig = {}
   local failedNames = {}
   local missing = 0
   for _, w in ipairs(want) do
-    if not rec.lands[w[4]] then missing = missing + 1 end
+    if not landEntries[w[4]] then missing = missing + 1 end
   end
-  -- a window that is still filling gets the bigger budget, so the old cards
-  -- are not on screen beside the new trees for long
-  local budget = (missing > 1) and GT.WARM_BUDGET or GT.BUILD_BUDGET
-  local perFrame = (missing > 1) and #want or GT.BUILDS_PER_FRAME
+  -- a window that is still filling gets the larger shared limit, so the old
+  -- cards are not on screen beside the new trees for long
+  local warm = missing > 1
+  local cap = Budget.covered and 12 or GT.BUILDS_PER_FRAME
+  local pending = 0
+  local active, list, names, lands = {}, {}, {}, {}
   for _, w in ipairs(want) do
     local land = w[4]
-    local entry = rec.lands[land]
+    local entry = land and landEntries[land]
     if not entry then
-      local over = builds >= perFrame
-        or (builds > 0 and now and (now() - started) > budget)
-      if not over then
+      if builds < cap and Budget.allow(warm) then
         builds = builds + 1
+        local t0 = clock()
         local ok, built = pcall(buildLand, ground, land)
+        Budget.charge(t0, "trees")
         if ok then
           entry = built
         else
-          entry = { buckets = {}, shapes = {}, quads = 0, failed = {} }
+          entry = { buckets = {}, shapes = {}, quads = 0, failed = {}, coveredKeys = {} }
           once("build", "a land chunk failed to build and was skipped: %s", tostring(built))
         end
-        rec.lands[land] = entry
+        landEntries[land] = entry
+        resident = resident + 1
+      else
+        pending = pending + 1
       end
     end
     if entry then
+      entry.used = tick
+      lands[land] = true
       sig[#sig + 1] = tostring(land)
-      for _, s in ipairs(entry.shapes) do
-        active[s] = true
-        for _, k in ipairs(nameKeys(s)) do names[k] = true end
-      end
+      coverLiveShapes(ground, land, entry, active, names)
       for k in pairs(entry.failed or {}) do failedNames[k] = true end
       if #entry.buckets > 0 then
         list[#list + 1] = { entry = entry, x = w[2] * px + half, z = w[3] * px + half }
@@ -842,9 +1427,41 @@ function GT.prepare(ground)
   -- a name that failed in ANY land of the window is not safe to hide by name
   for k in pairs(failedNames) do names[k] = nil end
   local signature = table.concat(sig, ",")
-  if signature ~= lastSignature then
+  if signature ~= lastSignature or window.ground ~= ground then
     lastSignature = signature
     GT.coverVersion = GT.coverVersion + 1
+  end
+
+  -- Publish after the fill so a Ground swap does not clear hide/draw for a
+  -- frame while overlapping lands are already in landEntries.
+  GT.active, GT.list, GT.coveredNames, GT.coveredLands = active, list, names, lands
+  window.ground, window.qx, window.qy, window.W, window.reach = ground, qx, qy, W, reach
+  window.active, window.list, window.names, window.lands = active, list, names, lands
+  window.done = pending == 0
+
+  -- EVICT. landEntries was never freed before invalidate(), so every land the
+  -- player had ever walked past kept its baked trees in GPU memory. Keep the
+  -- most recently wanted ones and release the rest (oldest first); a released
+  -- land simply rebuilds if the player walks back.
+  local cap = GT.limited and GT.MAX_RESIDENT or GT.MAX_RESIDENT_MAX
+  if resident > cap then
+    local old = {}
+    for land, entry in pairs(landEntries) do
+      if entry.used ~= tick then old[#old + 1] = { entry.used or 0, land, entry } end
+    end
+    table.sort(old, function(a, b) return a[1] < b[1] end)
+    local i = 1
+    while resident > cap and old[i] do
+      local item = old[i]
+      for _, b in ipairs(item[3].buckets or {}) do
+        if b.mesh and b.mesh.release then pcall(b.mesh.release, b.mesh) end
+        if b.meshN and b.meshN.release then pcall(b.meshN.release, b.meshN) end
+      end
+      landEntries[item[2]] = nil
+      resident = resident - 1
+      i = i + 1
+    end
+    once("evict", "released baked tree lands past the draw distance (keeping %d)", cap)
   end
 end
 
@@ -858,9 +1475,12 @@ end
 -- but only names that converted in EVERY land of the window (see `prepare`),
 -- and never by the shape's own name. This is what lets BOTH kinds of tree
 -- lose their native card once their voxel tree is standing.
-function GT.isCoveredName(shape)
+function GT.isCoveredName(shape, land)
   local names = GT.coveredNames
   if not (shape and names) then return false end
+  -- With a finite draw distance a name covers only the lands inside it: a
+  -- terrain shape of a FAR land keeps its native cards (nothing replaces them).
+  if land ~= nil and GT.limited and not GT.coveredLands[land] then return false end
   for _, k in ipairs(nameKeys(shape)) do
     if names[k] then return true end
   end
@@ -875,10 +1495,36 @@ function GT.draw(scene)
   if #GT.list == 0 then return end
   Voxel3D.seams(false)
   Voxel3D.glass(false)
+  -- Every land in the window used to be drawn whatever the camera was looking
+  -- at (~2M quads on Route 202). Skip the lands that are wholly outside the
+  -- view cone; the radius is the land's half-diagonal plus tree height and
+  -- terrain relief, so a visible tree is never dropped.
+  local visible = scene.sphereVisible
+  local ground = scene.ground
+  local radius = ((ground and ground.chunkPx) or 512) * 0.72 + 160
+  local drawn = 0
+  -- CAMERA MODE: the engine turns its native tree cards to face the camera
+  -- every frame (Gen4Model's turnToCamera, billboardYaw = view.yaw); a baked
+  -- tree cannot turn, so it is baked lit from the south AND from the north
+  -- (b.mesh / b.meshN) and the one whose lit end looks at the camera is drawn.
+  -- Looking north (forward z < 0) the camera is south of the trees, so the
+  -- south-lit mesh; looking south, the north-lit one. A small dead band keeps
+  -- the choice from flickering when the view runs along east-west.
+  local lookZ = scene.forward and scene.forward[3] or 0
+  if lookZ > 0.05 then northLit = true elseif lookZ < -0.05 then northLit = false end
   for _, item in ipairs(GT.list) do
-    for _, b in ipairs(item.entry.buckets) do
-      Voxel3D.draw(b.mesh, b.tex, Mat4.translate(item.x, GT.Y_OFFSET or 0, item.z), 0, nil, 0, false)
+    if (not visible) or visible(item.x, 0, item.z, radius) then
+      drawn = drawn + 1
+      for _, b in ipairs(item.entry.buckets) do
+        local mesh = (northLit and b.meshN) or b.mesh
+        Voxel3D.draw(mesh, b.tex, Mat4.translate(item.x, GT.Y_OFFSET or 0, item.z), 0, nil, 0, false)
+      end
     end
+  end
+  GT.lastDrawn, GT.lastTotal = drawn, #GT.list
+  if visible and drawn < #GT.list then
+    once("cull", "view culling skips tree lands the camera cannot see (%d of %d drawn this frame)",
+         drawn, #GT.list)
   end
   Voxel3D.seams(true)
   Voxel3D.glass(true)
@@ -886,17 +1532,77 @@ end
 
 -- Drop every baked tree: a map was edited, or the mod was reloaded.
 function GT.invalidate()
-  for _, rec in pairs(cache) do
-    for _, entry in pairs(rec.lands) do
-      for _, b in ipairs(entry.buckets or {}) do
-        if b.mesh and b.mesh.release then pcall(b.mesh.release, b.mesh) end
-      end
+  for _, entry in pairs(landEntries) do
+    for _, b in ipairs(entry.buckets or {}) do
+      if b.mesh and b.mesh.release then pcall(b.mesh.release, b.mesh) end
+      if b.meshN and b.meshN.release then pcall(b.meshN.release, b.meshN) end
     end
   end
-  cache = setmetatable({}, { __mode = "k" })
+  landEntries = setmetatable({}, { __mode = "k" })
+  resident = 0
+  window = {}
+  lastSignature = ""
   textures = {}
-  GT.active, GT.list, GT.coveredNames = {}, {}, {}
+  warned = {}                      -- so the layer log prints again after a re-bake
+  GT.active, GT.list, GT.coveredNames, GT.coveredLands = {}, {}, {}, {}
   GT.coverVersion = GT.coverVersion + 1
 end
+
+-- Turn the trees: "south" / "north" / "east" / "west" or a compass bearing.
+-- The shade is baked into each land's mesh, so this drops the baked lands and
+-- the next frame rebuilds them facing the new way.
+function GT.setFacing(value)
+  GT.FACING = value
+  GT.invalidate()
+end
+
+-- Move one layer: GT.setLayerOffset(layer, x, y, z), layer 1 = hat, 2 = middle,
+-- 3 = base, world units, nil = leave that axis as it is. Re-bakes at once, so the
+-- trees on screen update -- the quick way to pair the layers before writing the
+-- numbers into GT.LAYER_OFFSET.
+function GT.setLayerOffset(layer, x, y, z)
+  if type(GT.LAYER_OFFSET) ~= "table" then GT.LAYER_OFFSET = {} end
+  local o = GT.LAYER_OFFSET[layer]
+  if type(o) ~= "table" then o = { x = 0, y = 0, z = 0 }; GT.LAYER_OFFSET[layer] = o end
+  if x ~= nil then o.x = x end
+  if y ~= nil then o.y = y end
+  if z ~= nil then o.z = z end
+  GT.invalidate()
+end
+
+-- Same as setLayerOffset, but for the border (conttree) trees only. If
+-- GT.STRIP_LAYER_OFFSET is false this starts it as a copy of LAYER_OFFSET.
+function GT.setStripLayerOffset(layer, x, y, z)
+  if type(GT.STRIP_LAYER_OFFSET) ~= "table" then
+    GT.STRIP_LAYER_OFFSET = {}
+    for k = 1, 3 do
+      local o = type(GT.LAYER_OFFSET) == "table" and GT.LAYER_OFFSET[k] or {}
+      GT.STRIP_LAYER_OFFSET[k] = { x = o.x or 0, y = o.y or 0, z = o.z or 0 }
+    end
+  end
+  local o = GT.STRIP_LAYER_OFFSET[layer]
+  if type(o) ~= "table" then o = { x = 0, y = 0, z = 0 }; GT.STRIP_LAYER_OFFSET[layer] = o end
+  if x ~= nil then o.x = x end
+  if y ~= nil then o.y = y end
+  if z ~= nil then o.z = z end
+  GT.invalidate()
+end
+
+-- Per-shape offset setter for border trees. shape = "conttree_t" or "conttree_b",
+-- layer = 1/2/3, x/y/z = world units (nil = leave unchanged). Re-bakes at once.
+function GT.setStripShapeOffset(shape, layer, x, y, z)
+  GT.STRIP_SHAPE_OFFSET = GT.STRIP_SHAPE_OFFSET or {}
+  local t = GT.STRIP_SHAPE_OFFSET[shape]
+  if type(t) ~= "table" then t = {}; GT.STRIP_SHAPE_OFFSET[shape] = t end
+  local o = t[layer]
+  if type(o) ~= "table" then o = { x = 0, y = 0, z = 0 }; t[layer] = o end
+  if x ~= nil then o.x = x end
+  if y ~= nil then o.y = y end
+  if z ~= nil then o.z = z end
+  GT.invalidate()
+end
+
+-- built lands currently held (tests and the log read this)
+function GT.residentCount() return resident end
 
 return GT

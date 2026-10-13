@@ -94,6 +94,36 @@ local function game()
   return require("src.core.Game")
 end
 
+-- ------- Gen 4
+--
+-- Platinum is a real 3D world (see lib/Gen4WorldHost), and two things this
+-- file used to assume are Gen 1-3 facts:
+--   * Map.isOutdoor reads Gen 1/2 header fields a Gen 4 def does not have, so it
+--     answers "indoors" for EVERY Sinnoh map. That one answer zeroed the shower
+--     on its way out (openSky below gates DayNight.overcast, Water.wet, the wind
+--     drive, the far curtain AND the draw), so on Gen 4 the clock ran, the sound
+--     played, and not one pixel of weather ever reached the screen.
+--   * VoxelScene.groundAt / map:isWaterCell describe the voxel diorama. On Gen 4
+--     the ground is the cartridge's BDHC height and the water is Gen4Water's sheet.
+-- Gen4Spawn already owns the Gen 4 answers to both (Gen4Sky and CityLife lean on
+-- it for the same reason); this just asks it.
+local function gen4Spawn()
+  local ok, Spawn = pcall(V.require, "Gen4Spawn")
+  if ok and Spawn and type(Spawn.active) == "function" and Spawn.active() then
+    return Spawn
+  end
+  return nil
+end
+
+-- BDHC ground height under a cell, in the same world units the host projects.
+local function gen4GroundY(map, cx, cy)
+  local r = map and map.renderer
+  local ground = r and r.gen4Ground
+  if not (ground and type(ground.groundY) == "function") then return nil end
+  local ok, y = pcall(ground.groundY, ground, cx * 16 + 8, cy * 16 + 8)
+  return ok and tonumber(y) or nil
+end
+
 local rand = love.math.random
 
 -- ------- the calendar
@@ -289,9 +319,17 @@ end
 -- above it -- silently, until the first call.
 local function openSky(map)
   if not (map and map.def) then return false end
+  local Spawn = gen4Spawn()
+  if Spawn then
+    -- Gen 4: Map.isOutdoor says "indoors" everywhere (see the Gen 4 note above)
+    local ok, outdoor = pcall(Spawn.isOutdoor, map)
+    if not (ok and outdoor) then return false end
+    return not DayNight.isCanopy(map)
+  end
   if not Map.isOutdoor(map.def) then return false end
   return not DayNight.isCanopy(map)
 end
+Weather.openSky = openSky
 
 -- `falling` is the one question everything outside this file has: what is
 -- coming down, and how hard. nil kind means nothing is.
@@ -443,6 +481,7 @@ Weather.POOL_TRIES = 5          -- rolls spent looking for standing water
 -- standing in a downpour, every ring drew sunk into the street. The shape
 -- profile already knows the height; this only had to ask.
 local function groundAt(map, cx, cy)
+  if gen4Spawn() then return gen4GroundY(map, cx, cy) or 0 end
   local VoxelScene = V.require("VoxelScene")
   local ok, h = pcall(VoxelScene.groundAt, map, cx, cy)
   return (ok and h) or 0
@@ -466,6 +505,29 @@ local function splashCell(ow)
                false, true, groundAt(map, cx, cy)
       end
     end
+  end
+  local Spawn = gen4Spawn()
+  if Spawn then
+    -- Gen 4: the engine's own cell queries plus Gen4Spawn's water test, and
+    -- the ring is set on the BDHC height (or on Gen4Water's sheet over a pond)
+    for _ = 1, 8 do
+      local cx = p.cellX + rand(-7, 7)
+      local cy = p.cellY + rand(-7, 7)
+      local water = Spawn.isWater(map, cx, cy)
+      if Spawn.standable(water and "water" or "street", map, cx, cy) then
+        local gh = gen4GroundY(map, cx, cy) or 0
+        if water then
+          local okw, GW = pcall(V.require, "Gen4Water")
+          local level = okw and GW and tonumber(GW.level)
+          if level then gh = level end
+          -- spawnSplash sinks a pond ring by SPLASH_POND_LIFT (the voxel
+          -- water is recessed); the Gen 4 sheet is not, so cancel it
+          gh = gh - Weather.SPLASH_POND_LIFT + 0.2
+        end
+        return cx * 16 + rand(1, 15), cy * 16 + rand(1, 15), water, false, gh
+      end
+    end
+    return nil
   end
   for _ = 1, 8 do
     local cx = p.cellX + rand(-7, 7)
@@ -510,8 +572,11 @@ local function spawnFlake(ow)
   local p = ow.player
   local x = (p.cellX + rand(-9, 9)) * 16 + rand(0, 15)
   local z = (p.cellY + rand(-9, 9)) * 16 + rand(0, 15)
+  -- the height flakes land at: world zero on the diorama, the BDHC ground under
+  -- the player on Gen 4 (Sinnoh's terrain is not centred on y = 0)
+  local floor = gen4Spawn() and gen4GroundY(ow.map, p.cellX, p.cellY) or 0
   motes[#motes + 1] = {
-    kind = "flake", x = x, z = z, y = 40 + rand() * 26,
+    kind = "flake", x = x, z = z, y = floor + 40 + rand() * 26, floor = floor,
     seed = rand() * 6.2831, t = 0, ttl = 30,
     fall = 7 + rand() * 6, size = rand() < 0.35 and 1.4 or 0.9,
   }
@@ -740,7 +805,7 @@ local function tick(dt)
                    + (Wind.DIR[1] or 1) * windAmt * 2.2) * dt
       m.z = m.z + (math.cos(m.t * 0.9 + m.seed) * 2
                    + (Wind.DIR[2] or 0) * windAmt * 2.2) * dt
-      if m.y <= 0 then dead = true end
+      if m.y <= (m.floor or 0) then dead = true end
     end
     if not dead and (math.abs(m.x - px) > 200 or math.abs(m.z - pz) > 200) then
       dead = true
@@ -856,7 +921,7 @@ function Weather.draw(project, scale, w, h)
         end
       else
         local c = Weather.SNOW
-        local fade = math.min(1, m.t * 3, m.y / 6)
+        local fade = math.min(1, m.t * 3, (m.y - (m.floor or 0)) / 6)
         g.setColor(c[1], c[2], c[3], 0.92 * fade * power)
         local d = math.max(1, s * m.size)
         g.rectangle("fill", sx - d * 0.5, sy - d * 0.5, d, d)

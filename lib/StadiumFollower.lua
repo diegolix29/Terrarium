@@ -14,6 +14,17 @@ local StadiumRig = V.require("StadiumRig")
 local StadiumMon = V.require("StadiumMon")
 local Voxel3D = V.require("Voxel3D")
 local ColosseumMon = V.require("ColosseumMon")
+
+-- Platinum's native world is drawn 1.5x larger than the voxel worlds; the shared
+-- Gen4PokemonScale applies that (and nothing else) to the Colosseum matrix.
+-- Pass-through everywhere but Platinum, and if the module is missing.
+local Gen4Scale = V.optional and V.optional("Gen4PokemonScale") or nil
+local function colosseumMatrix(dex, variant, x, y, z, fx, fz)
+  if Gen4Scale and Gen4Scale.colosseumMatrix then
+    return Gen4Scale.colosseumMatrix(ColosseumMon, dex, variant, x, y, z, fx, fz)
+  end
+  return ColosseumMon.matrix(dex, variant, x, y, z, fx, fz)
+end
 local ColosseumDex = V.require("ColosseumDex")
 local ColosseumDexNames = V.require("ColosseumDexNames")
 
@@ -427,7 +438,7 @@ function StadiumFollower.draw(x, y, facing, yUp)
       fx, fz = ColosseumMon.towardFor(facing)
     end
 
-    local matrix = ColosseumMon.matrix(currentSpecies, colosseumVariant, x, yUp, y, fx, fz)
+    local matrix = colosseumMatrix(currentSpecies, colosseumVariant, x, yUp, y, fx, fz)
     if not matrix then return false end
     return ColosseumMon.draw(currentSpecies, colosseumVariant, matrix)
   end
@@ -482,6 +493,11 @@ function StadiumFollower.draw(x, y, facing, yUp)
   -- Apply scaling
   local model = currentModel
   local scale = StadiumMon.scaleFor(model) * FOLLOWER_SCALE
+  -- Platinum native world: re-target to the canonical PokemonHeights size in
+  -- that world's 1.5x units (1 everywhere else).
+  if Gen4Scale and Gen4Scale.stadiumMultiplier then
+    scale = scale * Gen4Scale.stadiumMultiplier(model, currentSpecies, StadiumMon)
+  end
   m = Mat4.mul(m, Mat4.scale(scale, scale, scale))
   
   -- Stand the model on its own lowest point and give back HOVER_CAP of any

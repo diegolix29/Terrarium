@@ -69,7 +69,7 @@ local selfHost = { exports = { lib = HostV } }
 function wxMod:find(id)
   id = tostring(id or "")
   if id == "STADIUM2_OVERWORLD_MODELS" then return selfHost end
-  if id == "DRAMALESS_SHAPE" or id == "potato_voxel"
+  if id == "DRAMATIC_SHAPE" or id == "potato_voxel"
       or id == "POTATO_VOXEL" or id == "PotatoVoxel" then
     return nil
   end

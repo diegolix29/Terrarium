@@ -627,8 +627,8 @@ local function withoutBattleField(battle, fn)
   local arenaId = session and (session.ids.arena
     or (session.context.arena and session.context.arena.id))
   local dramalessArena = type(arenaId) == "string"
-    and (arenaId:match("^DRAMALESS_SHAPE:") ~= nil
-      or arenaId:match("^dramaless:") ~= nil)
+    and (arenaId:match("^DRAMATIC_SHAPE:") ~= nil
+      or arenaId:match("^dramatic:") ~= nil)
   local stadiumArena = type(arenaId) == "string"
     and arenaId:match("^stadium:") ~= nil
   -- Any selected Stadium/external effects provider owns hit presentation for

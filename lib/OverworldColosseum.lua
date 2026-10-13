@@ -28,6 +28,17 @@ local V = ...
 local ColosseumDex = nil  -- Load lazily
 local ColosseumMon = V.require("ColosseumMon")
 
+-- Platinum's native world is drawn 1.5x larger than the voxel worlds; the shared
+-- Gen4PokemonScale applies that (and nothing else) to the Colosseum matrix.
+-- Pass-through everywhere but Platinum, and if the module is missing.
+local Gen4Scale = V.optional and V.optional("Gen4PokemonScale") or nil
+local function colosseumMatrix(dex, variant, x, y, z, fx, fz)
+  if Gen4Scale and Gen4Scale.colosseumMatrix then
+    return Gen4Scale.colosseumMatrix(ColosseumMon, dex, variant, x, y, z, fx, fz)
+  end
+  return ColosseumMon.matrix(dex, variant, x, y, z, fx, fz)
+end
+
 local OverworldColosseum = {}
 
 -- Initialize global tag state in V namespace to share across module instances
@@ -682,7 +693,7 @@ function OverworldColosseum.safeCast(p, ShadowMap)
   local z = (p.py or 0) + 8
   local y = (p.gh or 0) + (p.lift or 0)
   local fx, fz = facingVector(p.facing or "down")
-  local ok, matrix = pcall(ColosseumMon.matrix, p._colosseumDex, p._colosseumVariant or "normal", x, y, z, fx, fz)
+  local ok, matrix = pcall(colosseumMatrix, p._colosseumDex, p._colosseumVariant or "normal", x, y, z, fx, fz)
   return ok and matrix ~= nil
 end
 
@@ -769,7 +780,7 @@ function OverworldColosseum.draw(p)
     return false 
   end
 
-  local okMatrix, matrix = pcall(ColosseumMon.matrix, dex, variant, x, y, z, fx, fz)
+  local okMatrix, matrix = pcall(colosseumMatrix, dex, variant, x, y, z, fx, fz)
   if not okMatrix or not matrix then 
     local log = V.mod and V.mod.log
     if log and log.warn then

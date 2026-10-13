@@ -45,6 +45,7 @@ local Bridge = {
   order = {},        -- registration order == draw order
   pre = {},          -- name -> draw(scene): effects drawn BEFORE the terrain (the sky),
   preOrder = {},     -- into the same open Voxel3D scene, see Bridge.runPre
+  stats = { runs = 0, pres = 0 },   -- passes actually run; ArenaOverworldSnapshot reports them
   after = {},        -- fn(ground, view, vw, vh): screen passes run once the effects
                      -- are drawn and BEFORE the engine blits the frame (Gen4Reflect)
   disabled = {},     -- name -> true when switched off
@@ -52,6 +53,34 @@ local Bridge = {
   installed = false,
   reported = {},
 }
+
+-- The shared per-frame build budget (lib/Gen4Budget.lua). Resolved once.
+local budgetMod
+local function budget()
+  if not budgetMod then
+    local ok, B = pcall(V.require, "Gen4Budget")
+    if ok and type(B) == "table" then budgetMod = B end
+  end
+  return budgetMod
+end
+
+-- True while a warp fade hides the world: nothing on screen to hitch, so the
+-- budget may spend much more building meshes. Only `transitioning` is read (the
+-- same flag main.lua's own COVERED test uses for warps); the stack-top test is
+-- left out on purpose, because a Gen 4 world can run with an empty stack and
+-- that would read as "covered" for the whole game.
+local function worldCovered()
+  local okG, Game = pcall(require, "src.core.Game")
+  local ow = okG and type(Game) == "table" and Game.overworld or nil
+  return (ow and ow.transitioning) and true or false
+end
+
+local function frameEnd()
+  local B = budget()
+  if not B then return end
+  B.covered = worldCovered()      -- read by the NEXT frame's builds
+  B.nextFrame()
+end
 
 local function report(key, fmt, ...)
   if Bridge.reported[key] then return end
@@ -147,6 +176,22 @@ local function buildScene(ground, view, vw, vh)
   function scene.opaque()
     love.graphics.setDepthMode("lequal", true)
   end
+  -- scene.sphereVisible(x, y, z, r): false only when a sphere (world units) is
+  -- well outside the view. Effects use it to skip whole chunks the camera cannot
+  -- see (see Gen4Cull). Absent when the view's fov is unreadable: callers must
+  -- treat nil as "draw everything".
+  do
+    local okC, Cull = pcall(V.require, "Gen4Cull")
+    local fovRad
+    if type(view.effectiveFovY) == "function" then
+      local okF, f = pcall(view.effectiveFovY, view, vh)
+      if okF and tonumber(f) then fovRad = math.rad(f) end
+    end
+    if okC and type(Cull) == "table" and fovRad then
+      scene.sphereVisible = Cull.sphereTest(scene.eye, scene.forward, fovRad,
+                                            (tonumber(vw) or 1) / math.max(tonumber(vh) or 1, 1))
+    end
+  end
   return scene
 end
 
@@ -190,6 +235,7 @@ function Bridge.run(ground)
   local view, vw, vh = ground.view3d, ground.freeW, ground.freeH
   if not (view and vw and vh and view.matrix and view.forward) then return end
   if not Bridge.isGen4() then return end
+  Bridge.stats.runs = Bridge.stats.runs + 1
   local ok, err = pcall(runScene, ground, view, vw, vh, Bridge.order, Bridge.effects, "fx:")
   if not ok then
     -- make sure a throw between beginScene/endScene can't leave state behind
@@ -212,6 +258,7 @@ function Bridge.runPre(ground)
   local view, vw, vh = ground.view3d, ground.freeW, ground.freeH
   if not (view and vw and vh and view.matrix and view.forward) then return false end
   if not Bridge.isGen4() then return false end
+  Bridge.stats.pres = Bridge.stats.pres + 1
   local ok, err = pcall(runScene, ground, view, vw, vh, Bridge.preOrder, Bridge.pre, "pre:")
   if not ok then
     pcall(Voxel3D.endScene)
@@ -244,12 +291,25 @@ function Bridge.install()
     end
   end
 
+  -- Only the newest install is live; a wrapper left over from an earlier run of
+  -- this file (mod reload) passes straight through instead of drawing every
+  -- effect a second time.
+  local token = {}
+  Ground.__terrariumBridgeToken = token
+
   local original = Ground.endFree
   Ground.endFree = function(self, ...)
+    if Ground.__terrariumBridgeToken ~= token then return original(self, ...) end
     -- Runs while the free canvas is still open (colour + depth): terrain,
     -- buildings and characters are already in it. See the header.
     if Ground.freeOpen and self and self.freeW then Bridge.run(self) end
-    return original(self, ...)
+    -- close the frame's shared build budget after the engine has finished with
+    -- the canvas, and pass every return value of the original through
+    local function finish(...)
+      frameEnd()
+      return ...
+    end
+    return finish(original(self, ...))
   end
   Bridge.installed = true
 
@@ -270,6 +330,13 @@ function Bridge.install()
   else
     report("sand", "the sand pass did not load: %s", tostring(GS))
   end
+  -- Neighbour-tile blend skirts for Gen4Lawn swaps (grass/road/sand seams).
+  local okL, GL = pcall(V.require, "Gen4Lawn")
+  if okL and type(GL) == "table" and GL.draw then
+    Bridge.register("lawn", GL.draw)
+  else
+    report("lawn", "the lawn blend pass did not load: %s", tostring(GL))
+  end
   -- The voxel scene's 3D trees in place of Platinum's flat tree cards. Opaque,
   -- after the ground passes, before grass and the actors.
   local okT, GT = pcall(V.require, "Gen4Trees")
@@ -277,6 +344,31 @@ function Bridge.install()
     Bridge.register("trees", GT.draw)
   else
     report("trees", "the tree pass did not load: %s", tostring(GT))
+  end
+  -- Small grey voxel rocks where Platinum draws its route rocks (`imped`). Opaque,
+  -- after the trees. Gen4Lawn hides the native rock card only where these are built.
+  local okR, GR = pcall(V.require, "Gen4Rocks")
+  if okR and type(GR) == "table" and GR.draw then
+    Bridge.register("rocks", GR.draw)
+  else
+    report("rocks", "the rock pass did not load: %s", tostring(GR))
+  end
+  -- Real 3D fences (posts, rails or pickets) where Platinum draws its flat fence
+  -- banners (`imped`). Opaque, after the rocks. Gen4Hide drops the native banner
+  -- only where every card of the shape has a fence built for it.
+  local okFe, GFe = pcall(V.require, "Gen4Fence")
+  if okFe and type(GFe) == "table" and GFe.draw then
+    Bridge.register("fence", GFe.draw)
+  else
+    report("fence", "the fence pass did not load: %s", tostring(GFe))
+  end
+  -- Small voxel flowers on Platinum's flower beds (`nhana`). Opaque, after the
+  -- rocks. Gen4Lawn repaints the bed's floor with grass.png once they exist.
+  local okF, GF = pcall(V.require, "Gen4Flowers")
+  if okF and type(GF) == "table" and GF.draw then
+    Bridge.register("flowers", GF.draw)
+  else
+    report("flowers", "the flower pass did not load: %s", tostring(GF))
   end
   -- The voxel scene's sky (bands, clouds, sun/moon, stars, painted horizon, scenery)
   -- on Gen 4, with the engine's own horizon image hidden. Pre-terrain, so it is
@@ -291,9 +383,26 @@ function Bridge.install()
   return true
 end
 
+-- Drop every baked Gen 4 effect mesh (water, sand, lawn, trees, grass). The voxel
+-- pipeline's invalidate used to be the only reset path and it knew none of
+-- these, so a graphics reset, a mod reload or a cache reset left the old
+-- meshes (and, on a lost GL context, dead ones) in place.
+function Bridge.invalidateAll()
+  for _, name in ipairs({ "Gen4Sand", "Gen4Lawn", "Gen4Rocks", "Gen4Fence", "Gen4Flowers", "Gen4Trees", "Gen4Water", "Gen4Grass" }) do
+    local ok, mod = pcall(V.require, name)
+    if ok and type(mod) == "table" and type(mod.invalidate) == "function" then
+      local okI, err = pcall(mod.invalidate)
+      if not okI then report("inv:" .. name, "%s.invalidate failed: %s", name, tostring(err)) end
+    end
+  end
+end
+
 function Bridge.uninstall()
   if not Bridge.installed then return end
   pcall(function() V.require("Gen4Sky").uninstall() end)
+  pcall(function() V.require("Gen4Lawn").uninstall() end)
+    Bridge.Ground.__terrariumBridgeToken = nil
+
   Bridge.Ground.endFree = Bridge.originalEndFree
   Bridge.Ground.forMap = Bridge.originalForMap
   Bridge.installed = false

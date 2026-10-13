@@ -31,6 +31,17 @@ local StadiumPack = V.require("StadiumPack")
 -- everywhere Stadium can't cover -- every Gen III species, and every
 -- species at all when only the Colosseum disc is imported.
 local ColosseumMon = V.require("ColosseumMon")
+
+-- Platinum's native world is drawn 1.5x larger than the voxel worlds; the shared
+-- Gen4PokemonScale applies that (and nothing else) to the Colosseum matrix.
+-- Pass-through everywhere but Platinum, and if the module is missing.
+local Gen4Scale = V.optional and V.optional("Gen4PokemonScale") or nil
+local function colosseumMatrix(dex, variant, x, y, z, fx, fz)
+  if Gen4Scale and Gen4Scale.colosseumMatrix then
+    return Gen4Scale.colosseumMatrix(ColosseumMon, dex, variant, x, y, z, fx, fz)
+  end
+  return ColosseumMon.matrix(dex, variant, x, y, z, fx, fz)
+end
 local ColosseumDex = V.require("ColosseumDex")
 local Mat4 = V.require("Mat4")
 local Config = V.require("OverworldStadiumConfig")
@@ -474,6 +485,19 @@ end
 
 local function scaleForDex(mon, dex)
   local base = mon and mon.worldHeight and mon:worldHeight() or nil
+
+  -- Platinum's native world: size by the canonical PokemonHeights table, in
+  -- the same units and with the same curve as the Colosseum models and HD
+  -- cards (Gen4PokemonScale). Config.pokedexScale / the small+large species
+  -- boosts below are voxel-world tuning and do not apply here.
+  if Gen4Scale and Gen4Scale.active and Gen4Scale.active() then
+    if base and base > 0 then
+      local target, _, meters = Gen4Scale.targetHeight(dex)
+      if target then return target / base, target, meters end
+      -- no height on file: keep the model's own size, in the 1.5x world
+      return Gen4Scale.WORLD_FACTOR, base * Gen4Scale.WORLD_FACTOR, nil
+    end
+  end
 
   -- Keep the restored pre-v0.1.6 Dramatic Shape sizing, but do not let very
   -- small Stadium models vanish completely inside Gen 1 tall grass. This is
@@ -923,7 +947,7 @@ local function prepareOneColosseum(p, dex, dt)
     y = y + tonumber(p.entity._stadiumSkyRideLift)
   end
 
-  local matrix = ColosseumMon.matrix(dex, "normal", x, y, z, fx, fz)
+  local matrix = colosseumMatrix(dex, "normal", x, y, z, fx, fz)
   if not matrix then return false end
 
   p.colosseumDex = dex

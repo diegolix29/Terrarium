@@ -1539,7 +1539,7 @@ local function posesOf(state, spriteColors)
       seen = (not okV) or shows
     end
     if not seen then skippedGhosts = skippedGhosts + 1 end
-    if seen then
+    if seen and g.npc and not g.npc.hidden then
     local sprite, vx, vy, facing, phase, flip = g.npc:pose()
     local gpx, gpy = vx + g.ox, g.npc.py + g.oy
     local waterRoamer = g.npc.roamer and g.npc.kind == "water"
@@ -1572,7 +1572,7 @@ local function posesOf(state, spriteColors)
     end
   end
   for ei, e in ipairs(state.entities or {}) do
-    if not (state.flyAnim and e == state.player) then
+    if not e.hidden and not (state.flyAnim and e == state.player) then
       local sprite, vx, vy, facing, phase, flip = e:pose()
       local waterRoamer = e.roamer and e.kind == "water"
       local onWater = e.surfing or waterRoamer

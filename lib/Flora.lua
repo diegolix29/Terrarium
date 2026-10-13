@@ -1891,7 +1891,11 @@ end
 -- LuaJIT's 60-upvalue ceiling; they are lifted out so the draw stays
 -- inside it, and so each effect can be read on its own.
 
-local function drawRain(state, cfg, px, pz, yaw, t, dt, raining)
+-- `g4` is nil on Gen 1-3 (the diorama is flat at y = 0 and its coordinates are
+-- the map's own). On Gen 4 (Flora.drawGen4) it carries { floor, ox, oz,
+-- groundY(mapX, mapY), skip(entity) } so the shower falls onto the BDHC terrain
+-- and each umbrella is held over its owner's real feet.
+local function drawRain(state, cfg, px, pz, yaw, t, dt, raining, g4)
   -- ---------- rain, and the umbrellas that answer it
   local rainNote = ""
   if raining then
@@ -1930,7 +1934,7 @@ local function drawRain(state, cfg, px, pz, yaw, t, dt, raining)
           local sy = d.splash > 0 and 1.2 or 9
           Voxel3D.draw(partMesh, dropImg,
                        Mat4.mul(Mat4.mul(
-                         Mat4.translate(px + d.x, d.y, pz + d.z),
+                         Mat4.translate(px + d.x, (g4 and g4.floor or 0) + d.y, pz + d.z),
                          Mat4.rotateY(-yaw)), Mat4.scale(sx, sy, 1)))
         end
 
@@ -1938,12 +1942,15 @@ local function drawRain(state, cfg, px, pz, yaw, t, dt, raining)
         if umbrellaImg and cfg.umbrellas ~= false then
           local me = state.player
           for _, e in ipairs(state.entities or {}) do
-            if e ~= me and e.px and e.py then
+            if e ~= me and e.px and e.py
+               and not (g4 and g4.skip and g4.skip(e)) then
               local bob = math.sin((e.px + e.py) * 0.2 + t * 6) * 0.6
+              local feet = (g4 and g4.groundY and g4.groundY(e.px + 8, e.py + 8)) or 0
               Voxel3D.draw(partMesh, umbrellaImg,
                            Mat4.mul(Mat4.mul(
-                             Mat4.translate(e.px + 8, UMBRELLA_H + bob,
-                                            e.py + 8),
+                             Mat4.translate(e.px + 8 + (g4 and g4.ox or 0),
+                                            feet + UMBRELLA_H + bob,
+                                            e.py + 8 + (g4 and g4.oz or 0)),
                              Mat4.rotateY(-yaw)), Mat4.scale(15, 15, 1)))
             end
           end
@@ -2731,6 +2738,94 @@ end
 -- actual clean-up; this just keeps quiet in the meantime.
 local function abandoned()
   return rawget(_G, "__ds_ceiling_config") == nil
+end
+
+-- ------- Gen 4: the fp-ceiling weather on Platinum's own 3D world
+--
+-- Flora.draw only ever runs from VoxelScene.render, and Gen 4 never reaches it
+-- (Gen4WorldHost declines drawWorld so Gen4Ground keeps the frame). That is the
+-- whole reason the RAIN / LIGHTNING / NPC UMBRELLAS rows did nothing on Sinnoh:
+-- the settings were published (main.lua -> __ds_ceiling_config) and nothing was
+-- reading them. Gen4WorldHost now calls Flora.drawGen4 once a frame, inside a
+-- Voxel3D pass bound to the Gen 4 camera.
+--
+-- Same shower clock as Flora.draw (copied rather than shared: that body sits at
+-- LuaJIT's upvalue ceiling and cannot take a new local), same drops, same
+-- umbrellas, same storm -- only the ground under them differs.
+function Flora.rainClock(cfg, t, dt, outdoor)
+  local rainMode = cfg.rain or "SOMETIMES"
+  local wantRain = false
+  if rainMode == "ALWAYS" then
+    wantRain = true
+  elseif rainMode ~= "OFF" then
+    if not dryUntil and not rainUntil then
+      dryUntil = t + DRY_MIN + math.random() * (DRY_MAX - DRY_MIN)
+    end
+    if rainUntil then
+      if t > rainUntil then
+        rainUntil = nil
+        dryUntil = t + DRY_MIN + math.random() * (DRY_MAX - DRY_MIN)
+      else
+        wantRain = true
+      end
+    elseif dryUntil and t > dryUntil then
+      dryUntil = nil
+      rainUntil = t + WET_MIN + math.random() * (WET_MAX - WET_MIN)
+      wantRain = true
+      storm = math.random() < STORM_ODDS
+    end
+  end
+  if not wantRain then storm = false end
+  raining = wantRain and outdoor and true or false
+  -- Gen 4 draws no puddles, so the ground's wetness is tracked here instead of
+  -- in drawPuddles; SkyLayer reads it (and the rainbow's trigger) off the global.
+  wetness = math.max(0, math.min(1, wetness
+    + (raining and (dt / PUDDLE_FILL) or -(dt / PUDDLE_DRY))))
+  local was = rawget(_G, "__ds_weather") or {}
+  _G.__ds_weather = {
+    raining = raining,
+    storm = raining and storm or false,
+    wetness = wetness,
+    stoppedAt = (was.raining and not raining) and t or was.stoppedAt,
+  }
+  return raining
+end
+
+-- Called with a Voxel3D scene already open on the Gen 4 camera (see
+-- Gen4WorldHost.drawFpWeather). `yaw` follows FirstPerson's convention (the
+-- look direction is sin(yaw), cos(yaw)), `outdoor` is Gen4Spawn.isOutdoor --
+-- Map.isOutdoor says "indoors" on every Gen 4 map.
+function Flora.drawGen4(state, ground, yaw, outdoor)
+  if abandoned() then return end
+  local cfg = config()
+  local map = state and state.map
+  local p = state and state.player
+  if not (map and p and ground) then return end
+  local t = now()
+  local dt = Flora._g4Last and math.min(0.1, t - Flora._g4Last) or 0
+  Flora._g4Last = t
+
+  Flora.rainClock(cfg, t, dt, outdoor)
+
+  local ox, oz = ground.offsetX or 0, ground.offsetY or 0
+  local function groundY(mx, my)
+    if type(ground.groundY) ~= "function" then return 0 end
+    local ok, y = pcall(ground.groundY, ground, mx, my)
+    return ok and tonumber(y) or 0
+  end
+  local px, pz = (p.px or 0) + 8 + ox, (p.py or 0) + 8 + oz
+  local g4 = {
+    floor = groundY((p.px or 0) + 8, (p.py or 0) + 8),
+    ox = ox, oz = oz, groundY = groundY,
+    -- a wild Pokemon or a follower standing in the rain is not holding an
+    -- umbrella; on Gen 4 the entity list carries them as well as the people
+    skip = function(e)
+      return e.hidden or e.roamer or e.overworldWildSpawn or e.species
+             or e.isFollower or e.wildsFollower or e._wildsFollowerSpecies
+    end,
+  }
+  drawRain(state, cfg, px, pz, yaw, t, dt, raining, g4)
+  drawStorm(cfg, px, pz, yaw, t, dt, partMesh or makeQuad())
 end
 
 function Flora.draw(state, atlasFor)

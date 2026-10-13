@@ -84,6 +84,10 @@ function ChunkMesher.setCacheRulesTag(tag)
   end
 end
 
+-- The water flag's rules changed (class-gated again, never on side faces,
+-- finite cached-chunk boxes), so entries baked before this are stale.
+ChunkMesher.setCacheRulesTag("water-class-gated-v2")
+
 function ChunkMesher.cacheStatus()
   if DiskCache and type(DiskCache.status) == "function" then
     return DiskCache.status()
@@ -118,6 +122,12 @@ local INSET = 0.02
 -- standing drawing reads as depth rather than repeating the same art at
 -- the same energy.
 local VOLUME_TOP_SHADE = 0.85
+
+-- The water attribute rides on HORIZONTAL surfaces only. A vertical face
+-- carrying it (a waterfall's whole drop, a shoreline step) gets the water
+-- shader's per-vertex motion applied across its full height, which is what
+-- made water "explode". Flip to true to bisect.
+local WATER_ON_SIDES = false
 
 local cache = {}     -- map id -> { full = mesh|false, body = ..., grass = ... }
 local gen = {}       -- map id -> generation, bumped by invalidate/evict
@@ -407,6 +417,11 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
   }
   
   local SEAM_DATUM = -16
+  -- A sculpted (sub-tile) cell occludes its LOWEST sub-column, for the same
+  -- reason a hull occludes its foot: a cell is only as occluding as the part
+  -- of it that fills the cell.  Gen 3 only; inert on kerb sculpts, whose
+  -- minimum equals their cell height.
+  local subLow = {}
   local function occludeH(tx, ty)
     if not S.isGen3 then return heightAt(tx, ty) end
     local k = keyOf(tx, ty)
@@ -418,19 +433,56 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
       local h = shapeHeight(tx, ty, s)
       return (b < h) and b or h
     end
+    if s and s.sub and s.sub.res and s.sub.h then
+      local hit = subLow[k]
+      if hit == nil then
+        local h = heightAt(tx, ty)
+        -- sculpt heights are absolute and ride with the cell (see `shift`
+        -- in the sub-tile branch)
+        local shift = 0
+        local z0 = s.sub.z0
+        if type(z0) == "number" then shift = h - z0 end
+        local res = math.max(1, math.min(8, math.floor(s.sub.res)))
+        local lo = h
+        for i = 1, res * res do
+          local v = tonumber(s.sub.h[i])
+          if v ~= nil then
+            v = v + shift
+            if v < lo then lo = v end
+          end
+        end
+        hit = lo
+        subLow[k] = hit
+      end
+      return hit
+    end
     return heightAt(tx, ty)
   end
 
+  -- WATER IS A CLASS FIRST.  The shape class decides whether a cell is water
+  -- at all; the cartridge's byte-level data may only VETO that (it is how
+  -- bridge reflection water is excluded), never add water to a cell the
+  -- class says is something else.  The earlier byte-level-only form could
+  -- flag walls, roofs and ledges, and any flagged vertex gets the water
+  -- shader's motion.  Memoized: this used to be a pcall per side band.
+  local waterCache = {}
   local function isWaterAt(tx, ty)
     local k = keyOf(tx, ty)
+    local hit = waterCache[k]
+    if hit ~= nil then return hit end
     local s = S.shapeAt[k]
-    if not s then return false end
-    -- For Gen3, use byte-level water detection to exclude bridge reflection water
-    if S.isGen3 then
-      local okW, water = pcall(map.isWaterCell, map, math.floor(tx / 2), math.floor(ty / 2))
-      return okW and water
+    local w = false
+    if s and s.class == "water" then
+      w = true
+      if S.isGen3 and map.isWaterCell then
+        local okW, isW = pcall(map.isWaterCell, map,
+                               math.floor(tx / 2), math.floor(ty / 2))
+        -- veto only; on error (ring cells outside the map) trust the class
+        if okW and not isW then w = false end
+      end
     end
-    return s.class == "water"
+    waterCache[k] = w
+    return w
   end
 
   local function tileOrigin(tile)
@@ -529,11 +581,18 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
       c = { { x0, y0, z0 }, { x0, y0, z1 }, { x0, y1, z1 }, { x0, y1, z0 } }
     end
     local u0, u1, v0, v1 = uvRect(tile, vTop, vBot)
-    push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, shade, nil, water)
+    -- vertical faces never carry the water attribute (see WATER_ON_SIDES)
+    push(c, { { u0, v1 }, { u1, v1 }, { u1, v0 }, { u0, v0 } }, shade, nil,
+         WATER_ON_SIDES and water or false)
   end
 
   local def = map.def
-  local tw, th = def.width * 4, def.height * 4
+  -- map size in tiles.  A Gen 1/Gen 2 block is 4 tiles on a side; a Gen 3
+  -- metatile is 2, and IS one cell.  Hard-coding 4 doubled a Gen 3 map's
+  -- "body": the ring on its east and south sides counted as body (never
+  -- masked, never hidden indoors) and every bw/bh edge test below was off.
+  local blockTiles = tonumber(tileset.blockTiles) or 4
+  local tw, th = def.width * blockTiles, def.height * blockTiles
   local r = bodyOnly and 0 or RING * 4
 
   local function masked(px0, pz0, px1, pz1)
@@ -648,7 +707,32 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
               local ni, nj = i + side[1], j + side[2]
               local nh = subH(ni, nj)
               if nh == nil then
-                nh = occludeH(tx + side[1], ty + side[2])
+                -- A sculpted neighbour is asked what it draws AT THIS EDGE,
+                -- not what it occludes overall (occludeH answers its lowest
+                -- sub-column).  Otherwise both planks of a step each read
+                -- the other's water as lower, both think they are the taller
+                -- one, and both cut the step: coplanar double faces.
+                local ntx, nty = tx + side[1], ty + side[2]
+                local nk = keyOf(ntx, nty)
+                local ns = S.shapeAt[nk]
+                local nsub = ns and ns.sub
+                if nsub and nsub.res and nsub.h
+                   and not (S.skip[nk] or S.runs[nk]) then
+                  local nres = math.max(1, math.min(8, math.floor(nsub.res)))
+                  local nbase = shapeHeight(ntx, nty, ns)
+                  local nshift = 0
+                  if type(nsub.z0) == "number" then nshift = nbase - nsub.z0 end
+                  local nstep = 8 / nres
+                  local px = (side[1] ~= 0) and ((side[1] > 0) and 0 or 7)
+                             or math.floor(i * step)
+                  local py = (side[2] ~= 0) and ((side[2] > 0) and 0 or 7)
+                             or math.floor(j * step)
+                  local nv = tonumber(nsub.h[math.floor(py / nstep) * nres
+                                            + math.floor(px / nstep) + 1])
+                  nh = (nv ~= nil) and (nv + nshift) or nbase
+                else
+                  nh = occludeH(ntx, nty)
+                end
               end
               if nh < hh then
                 local d = side[3]
@@ -934,7 +1018,12 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
             if up and up.class == "water" then
               topTile = S.tileAt[keyOf(tx, n - 1)] or topTile
             end
-          elseif s.art == "upright" and s.authored then
+          elseif s.art == "upright" and s.authored and not s.topIsOwn then
+            -- ...unless the pass that stood this cell says its own tile IS
+            -- the top.  `topIsOwn` marks a BLOCKED cell the cartridge draws
+            -- with the map's own floor art -- a raised slab, a shelf you
+            -- cannot walk on -- where folding a face onto the top lays the
+            -- wrong picture flat.  See `buildGen3CaveTerraces`.
             local north, front = ty, ty
             while ty - north < 6 do
               local bs = S.shapeAt[keyOf(tx, north - 1)]
@@ -1295,6 +1384,9 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                   -- wear the same stack darkened, which is what keeps a
                   -- fall's edge against the gorge wall from smearing a
                   -- different row per course.
+                  --
+                  -- NOTE: the fall's vertical face does NOT carry the water
+                  -- attribute (sideQuad drops it unless WATER_ON_SIDES).
                   if d == 5 then shade = 1 end
                   isWater = true
                   local front = ty
@@ -1420,7 +1512,7 @@ local function runGeometry(map, bodyOnly, masks, sink, waterSink)
                          vT or ((band * 8 + 8) - y1),
                          vB or ((band * 8 + 8) - y0),
                          sideShades(hl, hr, y0, y1, y0 <= nh, shade),
-                         isWater or isWaterAt(tx, ty))
+                         isWater)
               end
             end
           end
@@ -1562,6 +1654,9 @@ function ChunkMesher.bake(map, slot, masks)
     if okHas and hit then return false, "cached" end
   end
   local sink = newSink()
+  -- NOTE: newFfiSink does not define writeRaw, so this always declines and
+  -- no bake (warmDisk / write-back) ever reaches the disk. Add writeRaw to
+  -- the ffi sink to match whatever VoxelDiskCache.store expects.
   if type(sink.writeRaw) ~= "function" then
     return false, "no ffi sink"
   end
@@ -1727,21 +1822,28 @@ end
 -- A disk-cache hit hands back one flat terrain mesh and (maybe) one flat
 -- water mesh -- not the chunked Group runGeometry's live path produces. Wrap
 -- them as a one-or-two-chunk Group so Voxel3D.drawGroup/ShadowMap can draw a
--- cache-loaded slot exactly like a freshly built one. The chunk boxes are
--- left unbounded (drawGroup's box test always passes) rather than guessed at
--- from map dimensions: this file's own rule is "over-drawing is slow, and
--- under-drawing is a hole in the world", and a wrong guess here would be the
--- second kind. A live-built slot still gets its normal per-chunk culling --
--- only cache-loaded slots skip it.
-local function wrapCachedMesh(terrainMesh, waterMesh)
+-- cache-loaded slot exactly like a freshly built one.
+--
+-- The chunk box is FINITE: the whole map, its border ring and the chunk
+-- margin, with a generous ceiling. It used to be +-math.huge, which is safe
+-- for a pure "is it on screen" test but turns into NaN the moment anything
+-- does arithmetic on the box (a centre, an extent, a light-frustum fit):
+-- inf - inf. Over-drawing is slow and under-drawing is a hole in the world,
+-- so the box errs large -- it just has to be a number.
+local function wrapCachedMesh(map, terrainMesh, waterMesh)
+  local def = map and map.def
+  local pad = RING * 32 + CHUNK_MARGIN
+  local x0, z0 = -pad, -pad
+  local blockPx = (tonumber(map and map.tileset and map.tileset.blockTiles) or 4) * 8
+  local x1 = ((def and def.width or 0) * blockPx) + pad
+  local z1 = ((def and def.height or 0) * blockPx) + pad
+  local ymax = 1024
   local chunks = {}
-  if terrainMesh then
-    chunks[#chunks + 1] = { mesh = terrainMesh,
-      x0 = -math.huge, z0 = -math.huge, x1 = math.huge, z1 = math.huge, ymax = 0 }
-  end
-  if waterMesh then
-    chunks[#chunks + 1] = { mesh = waterMesh,
-      x0 = -math.huge, z0 = -math.huge, x1 = math.huge, z1 = math.huge, ymax = 0 }
+  for _, m in ipairs({ terrainMesh or false, waterMesh or false }) do
+    if m then
+      chunks[#chunks + 1] = { mesh = m, x0 = x0, z0 = z0,
+                              x1 = x1, z1 = z1, ymax = ymax }
+    end
   end
   if #chunks == 0 then return nil end
   return setmetatable({ chunks = chunks }, Group)
@@ -1813,6 +1915,33 @@ local function finishJob(job, ok, err)
   end
 end
 
+-- DISK WRITE-BACK. VoxelDiskCache was READ on every build (below) but nothing
+-- ever WROTE to it on the normal path: only ChunkMesher.warmDisk (Kanto's
+-- region warm-up) and VoxelPrebake (which has no caller) store anything, so
+-- on an ordinary run every map was meshed from scratch on every launch -- the
+-- "mobile takes forever to load" case. After a live build that missed the
+-- disk, queue a low-priority bake of the same slot. It rides the existing warm
+-- queue: drained only when no real job is waiting, never before the player's
+-- own mesh. (warmDisk itself cannot be used here: it answers "live" for a map
+-- whose mesh was just swapped in.) Set ChunkMesher.WRITE_BACK = false to turn
+-- it off; the existing "voxelDiskCache" option still gates the store.
+ChunkMesher.WRITE_BACK = true
+local function queueWriteBack(map, slot, masks)
+  if not ChunkMesher.WRITE_BACK then return end
+  if not (DiskCache and map and map.id) then return end
+  if type(DiskCache.enabled) == "function" and not DiskCache.enabled() then return end
+  local key = jobKey(map.id, slot)
+  if jobIndex[key] or warmIndex[key] then return end
+  if type(DiskCache.has) == "function" then
+    local okHas, hit = pcall(DiskCache.has, map, slot, masks)
+    if okHas and hit then return end
+  end
+  local job = { id = map.id, map = map, slot = slot, masks = masks,
+                region = "writeback", co = nil }
+  warmIndex[key] = job
+  warmJobs[#warmJobs + 1] = job
+end
+
 local function runJob(job)
   local map = job.map
   local c = entry(job.id)
@@ -1869,8 +1998,9 @@ local function runJob(job)
       return
     end
     swapSlot(c, job.slot, mesh or false)
+    if mesh then pcall(queueWriteBack, map, job.slot, job.masks) end
   else
-    local mesh = wrapCachedMesh(cachedTerrain, cachedWater)
+    local mesh = wrapCachedMesh(map, cachedTerrain, cachedWater)
     if (gen[job.id] or 0) ~= job.gen then
       if mesh and mesh.release then pcall(mesh.release, mesh) end
       return
